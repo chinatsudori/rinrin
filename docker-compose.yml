@@ -1,0 +1,24 @@
+version: "3.9"
+services:
+  bot:
+    image: yuribot:latest
+    build: .
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN} # put this in .env
+      TZ: America/Los_Angeles
+      DATA_DIR: /app/data
+    volumes:
+      - botdata:/app/data
+    user: "0:0"
+    restart: unless-stopped
+    networks:
+      - npm_default
+      
+networks:
+  npm_default:
+    external: true
+
+volumes:
+  botdata:
+
+

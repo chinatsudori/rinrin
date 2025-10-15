@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.build/
+dist/
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Local env & runtime
+.env
+.env.*
+!.env.example
+*.sqlite
+*.db
+*.log
+ppkn-key.json
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIISbaZnEEhxmV5LWsy6QiDkzCHttLVH93Vg/ZEJBo3Ze svoge29@wgu.edu
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIISbaZnEEhxmV5LWsy6QiDkzCHttLVH93Vg/ZEJBo3Ze svoge29@wgu.edu
+# Caches
+.cache/
+pytest_cache/
+
+# Docker
+**/.dockerignore
+
+ppkn-key.json
+ppkn-key.json

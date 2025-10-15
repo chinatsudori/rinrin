@@ -1,0 +1,219 @@
+from __future__ import annotations
+import os, sqlite3
+from .config import DB_PATH
+
+def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str):
+    cur = con.cursor()
+    cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})")]
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+def _table_sql(con: sqlite3.Connection, table: str) -> str | None:
+    cur = con.cursor()
+    row = cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    return row[0] if row else None
+
+def ensure_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+
+        # --- clubs (no CHECK on club_type) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS clubs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            club_type TEXT NOT NULL,
+            announcements_channel_id INTEGER,
+            planning_forum_id INTEGER,
+            polls_channel_id INTEGER,
+            discussion_forum_id INTEGER,
+            UNIQUE(guild_id, club_type)
+        )""")
+        # migrate if an old CHECK exists
+        sql = _table_sql(con, "clubs")
+        if sql and "CHECK" in sql.upper():
+            cur.execute("ALTER TABLE clubs RENAME TO clubs_old")
+            cur.execute("""
+            CREATE TABLE clubs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                club_type TEXT NOT NULL,
+                announcements_channel_id INTEGER,
+                planning_forum_id INTEGER,
+                polls_channel_id INTEGER,
+                discussion_forum_id INTEGER,
+                UNIQUE(guild_id, club_type)
+            )""")
+            cur.execute("""
+            INSERT OR IGNORE INTO clubs (id, guild_id, club_type, announcements_channel_id, planning_forum_id, polls_channel_id, discussion_forum_id)
+            SELECT id, guild_id, club_type, announcements_channel_id, planning_forum_id, polls_channel_id, discussion_forum_id
+            FROM clubs_old
+            """)
+            cur.execute("DROP TABLE clubs_old")
+
+        # collections
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            club_id INTEGER,
+            opens_at TEXT,
+            closes_at TEXT,
+            status TEXT CHECK(status IN ('open','closed')) DEFAULT 'open'
+        )""")
+        _ensure_column(con, "collections", "club_id", "INTEGER")
+
+        # submissions
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            club_id INTEGER,
+            collection_id INTEGER,
+            author_id INTEGER,
+            title TEXT,
+            link TEXT,
+            thread_id INTEGER,
+            created_at TEXT
+        )""")
+        _ensure_column(con, "submissions", "club_id", "INTEGER")
+
+        # polls
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            club_id INTEGER,
+            channel_id INTEGER,
+            message_id INTEGER,
+            created_at TEXT,
+            closes_at TEXT,
+            status TEXT CHECK(status IN ('open','closed')) DEFAULT 'open'
+        )""")
+        _ensure_column(con, "polls", "club_id", "INTEGER")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS poll_options (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id INTEGER,
+            label TEXT,
+            submission_id INTEGER
+        )""")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            poll_id INTEGER,
+            user_id INTEGER,
+            option_id INTEGER,
+            PRIMARY KEY (poll_id, user_id)
+        )""")
+
+        # series
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            club_id INTEGER,
+            title TEXT,
+            link TEXT,
+            source_submission_id INTEGER,
+            status TEXT CHECK(status IN ('active','queued','completed')) DEFAULT 'active'
+        )""")
+        _ensure_column(con, "series", "club_id", "INTEGER")
+
+        # schedule_sections
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS schedule_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_id INTEGER,
+            label TEXT,
+            start_chapter INTEGER,
+            end_chapter INTEGER,
+            discussion_event_id INTEGER,
+            discussion_start TEXT
+        )""")
+        _ensure_column(con, "schedule_sections", "discussion_thread_id", "INTEGER")
+        _ensure_column(con, "schedule_sections", "posted", "INTEGER DEFAULT 0")
+# --- Guild-wide settings (mod logs channel) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            mod_logs_channel_id INTEGER,
+            bot_logs_channel_id INTEGER
+        )""")
+        _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
+        _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
+# --- Moderation actions log ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS mod_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            target_user_id INTEGER NOT NULL,
+            target_username TEXT,
+            rule TEXT NOT NULL,
+            offense INTEGER NOT NULL,
+            action TEXT NOT NULL,               -- warning | timeout | kick | ban | other
+            details TEXT,
+            evidence_url TEXT,
+            actor_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+# --- Emoji / Sticker monthly usage ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS emoji_usage_monthly (
+            guild_id INTEGER NOT NULL,
+            month TEXT NOT NULL,                -- 'YYYY-MM'
+            emoji_key TEXT NOT NULL,            -- custom:<id> or uni:<codepoint(s)>
+            emoji_name TEXT,                    -- best-effort label
+            is_custom INTEGER NOT NULL,         -- 1 custom guild emoji, 0 unicode
+            via_reaction INTEGER NOT NULL,      -- 1 reaction, 0 message body
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, month, emoji_key, via_reaction)
+        )""")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS sticker_usage_monthly (
+            guild_id INTEGER NOT NULL,
+            month TEXT NOT NULL,
+            sticker_id INTEGER NOT NULL,
+            sticker_name TEXT,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, month, sticker_id)
+        )""")
+# --- Member message activity (monthly + total) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_activity_monthly (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            month TEXT NOT NULL,                -- 'YYYY-MM'
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, month)
+        )""")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_activity_total (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_month ON member_activity_monthly (guild_id, month, count DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_total ON member_activity_total (guild_id, count DESC)")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS movie_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            club_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            link TEXT,
+            show_date TEXT NOT NULL,            -- the Saturday ISO date (YYYY-MM-DD)
+            event_id_morning INTEGER,           -- guild scheduled event id
+            event_id_evening INTEGER            -- guild scheduled event id
+        )""")
+
+        con.commit()
+
+def connect():
+    return sqlite3.connect(DB_PATH)
+
