@@ -328,7 +328,7 @@ _STRINGS.update({
     "welcome.title": "Welcome!",
     "welcome.desc": "Hey {mention}, you’re our **{ordinal}** member. Glad you’re here.",
     "welcome.content": "{mention}",
- # Coin
+    # Coin
     "fun.coin.title": "🪙 Coin Flip",
     "fun.coin.results": "{heads} Heads, {tails} Tails",
     "fun.coin.sequence": "{seq}",
@@ -342,4 +342,35 @@ _STRINGS.update({
     "fun.dice.total": "Grand total: **{total}**",
     "fun.dice.limit": "Too many dice requested (max {max_dice} dice total).",
     "fun.dice.invalid_spec": "Couldn’t parse `{text}`. Try formats like `d20`, `2d6`, or `3d8+2`.",
+    "move_any.header":              "**{author}** — {ts}\n{jump}",
+    "move_any.sticker.line_with_url": "[Sticker: {name}]({url})",
+    "move_any.sticker.line_no_url":   "(Sticker: {name})",
+    #movebot
+    "move_any.thread.created_body":   "Post created by bot to receive copied messages.",
+    "move_any.thread.starter_msg":    "Starting thread **{title}** for copied messages…",
+
+    "move_any.error.bad_ids":         "Invalid source_id or destination_id.",
+    "move_any.error.bad_source_type": "Source must be a Text Channel or Thread.",
+    "move_any.error.bad_dest_type":   "Destination must be a Text Channel, Thread, or Forum Channel.",
+    "move_any.error.need_read_history": "I need **Read Message History** in the source.",
+    "move_any.error.need_send_messages": "I need **Send Messages** in the destination.",
+    "move_any.error.need_attach_files":  "I need **Attach Files** in the destination.",
+    "move_any.error.forbidden_read_source": "Forbidden to read the source history.",
+    "move_any.error.forum_needs_title": "Destination is a forum. Please provide `dest_thread_title` to create a post.",
+    "move_any.error.forbidden_forum":  "Forbidden: cannot create a post in that forum.",
+    "move_any.error.create_forum_failed": "Failed to create forum post: {err}",
+    "move_any.error.forbidden_thread": "Forbidden: cannot create a thread in that channel.",
+    "move_any.error.create_thread_failed": "Failed to create thread: {err}",
+    "move_any.error.unsupported_destination": "Unsupported destination channel type.",
+
+    "move_any.info.none_matched":     "No messages matched that range.",
+    "move_any.info.dry_run":          "Dry run: would copy **{count}** message(s) from **{src}** → **{dst}**.",
+    "move_any.info.webhook_fallback": "Couldn’t use a webhook (missing permission or create failed); falling back to normal sending.",
+
+    "move_any.notice.cant_delete_source": "Note: Could not delete originals (missing **Manage Messages** in source).",
+
+    "move_any.summary":               "Copied **{copied}/{total}** message(s) from **{src}** → **{dst}**.",
+    "move_any.summary_failed_tail":   "Failed: {failed}.",
+    "move_any.summary_deleted_tail":  "Deleted original: {deleted}.",
 })
+
