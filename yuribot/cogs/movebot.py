@@ -2,7 +2,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Dict
+from difflib import SequenceMatcher
 
 import discord
 from discord.ext import commands
@@ -14,8 +15,11 @@ log = logging.getLogger(__name__)
 
 GuildTextish = Union[discord.TextChannel, discord.Thread, discord.ForumChannel]
 
+# ---------- Utilities ----------
 
-async def _resolve_messageable_from_id(bot: commands.Bot, gid: int, ident: int) -> Optional[GuildTextish]:
+async def _resolve_messageable_from_id(
+    bot: commands.Bot, gid: int, ident: int
+) -> Optional[GuildTextish]:
     log.debug("resolve_messageable: gid=%s ident=%s", gid, ident)
     ch = bot.get_channel(ident)
     if isinstance(ch, (discord.TextChannel, discord.ForumChannel)) and ch.guild and ch.guild.id == gid:
@@ -76,7 +80,7 @@ async def _send_copy(
     *,
     use_webhook: bool,
     webhook: Optional[discord.Webhook],
-    include_header: bool,  # <<— NEW
+    include_header: bool,
 ):
     # Build body
     content = source_msg.content or ""
@@ -90,7 +94,7 @@ async def _send_copy(
         body = content
 
     # Attachments
-    files: list[discord.File] = []
+    files: List[discord.File] = []
     for att in source_msg.attachments:
         try:
             b = await att.read()
@@ -109,7 +113,7 @@ async def _send_copy(
         if sticker_lines:
             body += ("\n\n" if body else "") + "\n".join(sticker_lines)
 
-    # Build kwargs without Nones
+    # kwargs without Nones
     common_kwargs = {
         "content": body or None,
         "allowed_mentions": discord.AllowedMentions.none(),
@@ -121,7 +125,7 @@ async def _send_copy(
     if use_webhook and webhook is not None:
         try:
             if isinstance(destination, discord.Thread):
-                log.debug("send_copy: webhook to thread=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
+                log.debug("send_copy: webhook->thread=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
                 await webhook.send(
                     username=source_msg.author.display_name,
                     avatar_url=source_msg.author.display_avatar.url,
@@ -130,7 +134,7 @@ async def _send_copy(
                     **common_kwargs,
                 )
             else:
-                log.debug("send_copy: webhook to channel=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
+                log.debug("send_copy: webhook->channel=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
                 await webhook.send(
                     username=source_msg.author.display_name,
                     avatar_url=source_msg.author.display_avatar.url,
@@ -138,7 +142,7 @@ async def _send_copy(
                     **common_kwargs,
                 )
         except Exception as e:
-            log.debug("send_copy: webhook send failed msg=%s err=%r (fallback to bot identity)", source_msg.id, e)
+            log.debug("send_copy: webhook send failed msg=%s err=%r (fallback)", source_msg.id, e)
             await destination.send(**common_kwargs)
     else:
         log.debug("send_copy: direct send to %s msg=%s files=%d", destination.id, source_msg.id, len(files))
@@ -159,7 +163,8 @@ async def _maybe_create_destination_thread(
         try:
             created = await destination.create_thread(
                 name=dest_thread_title,
-                content=S("move_any.thread.created_body"))
+                content=S("move_any.thread.created_body"),
+            )
             return created, None
         except discord.Forbidden:
             return None, S("move_any.error.forbidden_forum")
@@ -182,16 +187,54 @@ async def _maybe_create_destination_thread(
     return None, S("move_any.error.unsupported_destination")
 
 
+# ----- Pin matching helpers -----
+
+def _collapse_ws(s: str) -> str:
+    return " ".join(s.split())
+
+def _strip_possible_header(s: str) -> str:
+    lines = s.splitlines()
+    if not lines:
+        return s
+    first = lines[0]
+    if "discord.com/channels/" in first or "http" in first:
+        return "\n".join(lines[1:]).strip()
+    if " — " in first and (":" in first or any(m in first.lower() for m in ("am", "pm", "utc"))):
+        return "\n".join(lines[1:]).strip()
+    return s
+
+def _normalize_content(raw: str, *, allow_header: bool, ignore_case: bool, collapse_ws: bool) -> str:
+    s = raw or ""
+    if allow_header:
+        s = _strip_possible_header(s)
+    if collapse_ws:
+        s = _collapse_ws(s)
+    if ignore_case:
+        s = s.lower()
+    return s.strip()
+
+def _attach_sig(msg: discord.Message) -> str:
+    if not msg.attachments:
+        return ""
+    parts = []
+    for a in msg.attachments:
+        size = getattr(a, "size", None)
+        parts.append(f"{a.filename}:{size if size is not None else 'na'}")
+    return "|".join(parts)
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+# ---------- Cog ----------
+
 class MoveAnyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     group = app_commands.Group(name="threadtools", description="Thread & channel utilities")
 
-    @group.command(
-        name="movebot",
-        description="Copy messages from a channel/thread to a channel/thread (by IDs)."
-    )
+    @group.command(name="movebot", description="Copy messages from a channel/thread to a channel/thread (by IDs).")
     @app_commands.describe(
         source_id="ID of source TextChannel or Thread",
         destination_id="ID of destination TextChannel/Thread/ForumChannel",
@@ -203,7 +246,7 @@ class MoveAnyCog(commands.Cog):
         before="Only copy messages created before this message ID or jump URL (in the source).",
         after="Only copy messages created after this message ID or jump URL (in the source).",
         dry_run="Count messages only; don’t send anything.",
-        debug="Include a short failure digest and emit detailed logs."
+        debug="Include a short failure digest and emit detailed logs.",
     )
     async def move_any(
         self,
@@ -212,7 +255,7 @@ class MoveAnyCog(commands.Cog):
         destination_id: str,
         dest_thread_title: Optional[str] = None,
         use_webhook: bool = True,
-        backlink: bool = True,          # <<— NEW
+        backlink: bool = True,
         delete_original: bool = False,
         limit: Optional[int] = None,
         before: Optional[str] = None,
@@ -287,9 +330,10 @@ class MoveAnyCog(commands.Cog):
 
         before_msg = await _resolve_msg(before)
         after_msg = await _resolve_msg(after)
-        log.debug("movebot: history window before=%s after=%s limit=%s", getattr(before_msg, "id", None), getattr(after_msg, "id", None), limit)
+        log.debug("movebot: history window before=%s after=%s limit=%s",
+                  getattr(before_msg, "id", None), getattr(after_msg, "id", None), limit)
 
-        to_copy: list[discord.Message] = []
+        to_copy: List[discord.Message] = []
         try:
             async for m in source.history(limit=limit, oldest_first=True, before=before_msg, after=after_msg):
                 if m.type != discord.MessageType.default:
@@ -325,7 +369,7 @@ class MoveAnyCog(commands.Cog):
                 use_webhook = False
 
         copied = 0
-        failed: list[tuple[int, str]] = []
+        failed: List[tuple[int, str]] = []
         for i, msg in enumerate(to_copy, 1):
             try:
                 await _send_copy(
@@ -333,7 +377,7 @@ class MoveAnyCog(commands.Cog):
                     msg,
                     use_webhook=use_webhook,
                     webhook=webhook,
-                    include_header=backlink,  # <<— pass the toggle through
+                    include_header=backlink,
                 )
                 copied += 1
                 if debug:
@@ -377,6 +421,157 @@ class MoveAnyCog(commands.Cog):
             top = "\n".join(f"- {mid}: {err}" for mid, err in failed[:10])
             summary += f"\n```\nFailures (first {min(10, len(failed))}):\n{top}\n```"
 
+        await interaction.followup.send(summary, ephemeral=True)
+
+    # ---- pinmatch command ----
+
+    @group.command(
+        name="pinmatch",
+        description="Mirror pins from a source channel/thread into a destination by content matching (no mapping needed)."
+    )
+    @app_commands.describe(
+        source_id="ID (or jump URL) of the source TextChannel/Thread with pins.",
+        destination_id="ID (or jump URL) of the destination TextChannel/Thread to pin in.",
+        search_depth="How many destination messages to scan (default 3000).",
+        allow_header="Set true if copies may include a header/backlink you want ignored.",
+        ignore_case="Case-insensitive content match (default true).",
+        collapse_ws="Collapse whitespace for matching (default true).",
+        min_fuzzy="Minimum fuzzy ratio (0.0–1.0) if exact content match fails (default 0.88).",
+        ts_slack_seconds="Timestamp slack for choosing among candidates (default 240s).",
+    )
+    async def pinmatch(
+        self,
+        interaction: discord.Interaction,
+        source_id: str,
+        destination_id: str,
+        search_depth: int = 3000,
+        allow_header: bool = True,
+        ignore_case: bool = True,
+        collapse_ws: bool = True,
+        min_fuzzy: float = 0.88,
+        ts_slack_seconds: int = 240,
+    ):
+        if not interaction.guild:
+            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        def _parse_id(s: str) -> Optional[int]:
+            s = s.strip()
+            try:
+                return int(s)
+            except Exception:
+                try:
+                    return int(s.rstrip("/").split("/")[-1])
+                except Exception:
+                    return None
+
+        gid = interaction.guild_id
+        src_ident = _parse_id(source_id)
+        dst_ident = _parse_id(destination_id)
+        if not src_ident or not dst_ident:
+            return await interaction.followup.send("Bad IDs. Pass channel/thread IDs or jump URLs.", ephemeral=True)
+
+        source = await _resolve_messageable_from_id(self.bot, gid, src_ident)
+        destination = await _resolve_messageable_from_id(self.bot, gid, dst_ident)
+        if not isinstance(source, (discord.TextChannel, discord.Thread)):
+            return await interaction.followup.send("Source must be a TextChannel or Thread.", ephemeral=True)
+        if not isinstance(destination, (discord.TextChannel, discord.Thread)):
+            return await interaction.followup.send("Destination must be a TextChannel or Thread.", ephemeral=True)
+
+        me = interaction.guild.me
+        if not source.permissions_for(me).read_message_history:
+            return await interaction.followup.send("I need **Read Message History** in the source.", ephemeral=True)
+        if not (destination.permissions_for(me).read_message_history and destination.permissions_for(me).manage_messages):
+            return await interaction.followup.send("I need **Read Message History** and **Manage Messages** in the destination.", ephemeral=True)
+
+        # Load source pins
+        try:
+            src_pins = await source.pins()
+        except discord.Forbidden:
+            return await interaction.followup.send("Forbidden reading source pins.", ephemeral=True)
+
+        if not src_pins:
+            return await interaction.followup.send("No pins in the source.", ephemeral=True)
+
+        # Preload destination messages (newest first)
+        dest_msgs: List[discord.Message] = []
+        async for m in destination.history(limit=search_depth, oldest_first=False):
+            dest_msgs.append(m)
+
+        # Build indexes
+        by_content: Dict[str, List[discord.Message]] = {}
+        by_attach: Dict[str, List[discord.Message]] = {}
+        for dm in dest_msgs:
+            if dm.type != discord.MessageType.default:
+                continue
+            key = _normalize_content(dm.content or "", allow_header=allow_header, ignore_case=ignore_case, collapse_ws=collapse_ws)
+            by_content.setdefault(key, []).append(dm)
+            sig = _attach_sig(dm)
+            if sig:
+                by_attach.setdefault(sig, []).append(dm)
+
+        pinned = 0
+        misses: List[int] = []
+
+        for sm in src_pins:
+            if sm.type != discord.MessageType.default:
+                misses.append(sm.id)
+                continue
+
+            src_key = _normalize_content(sm.content or "", allow_header=False, ignore_case=ignore_case, collapse_ws=collapse_ws)
+            src_sig = _attach_sig(sm)
+            timestamp = int(sm.created_at.timestamp())
+
+            candidates: List[discord.Message] = []
+
+            # 1) exact content
+            if src_key:
+                candidates = list(by_content.get(src_key, []))
+
+            # 2) attachment signature intersection/union
+            if src_sig:
+                with_attach = by_attach.get(src_sig, [])
+                if candidates:
+                    ids = {m.id for m in candidates}
+                    both = [m for m in with_attach if m.id in ids]
+                    candidates = both or candidates
+                else:
+                    candidates = list(with_attach)
+
+            # 3) fuzzy fallback
+            if not candidates and src_key:
+                best: Optional[tuple[discord.Message, float]] = None
+                for dm in dest_msgs:
+                    if dm.type != discord.MessageType.default:
+                        continue
+                    dkey = _normalize_content(dm.content or "", allow_header=allow_header, ignore_case=ignore_case, collapse_ws=collapse_ws)
+                    if not dkey:
+                        continue
+                    r = _fuzzy_ratio(src_key, dkey)
+                    if r >= min_fuzzy and (best is None or r > best[1]):
+                        best = (dm, r)
+                if best:
+                    candidates = [best[0]]
+
+            if not candidates:
+                misses.append(sm.id)
+                continue
+
+            # choose closest timestamp (still pin even if outside slack)
+            candidates.sort(key=lambda m: abs(int(m.created_at.timestamp()) - timestamp))
+            target = candidates[0]
+
+            try:
+                await target.pin()
+                pinned += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                misses.append(sm.id)
+
+        summary = f"Pinned **{pinned}** out of **{len(src_pins)}** source pin(s) in {destination.mention}."
+        if misses:
+            sample = "\n".join(f"- {mid}" for mid in misses[:10])
+            summary += f"\nMissed **{len(misses)}** (first 10 IDs):\n```\n{sample}\n```"
         await interaction.followup.send(summary, ephemeral=True)
 
 
