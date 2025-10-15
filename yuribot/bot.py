@@ -27,6 +27,12 @@ class YuriBot(commands.Bot):
         await self.load_extension("yuribot.cogs.emoji_stats")
         await self.load_extension("yuribot.cogs.activity")
         await self.load_extension("yuribot.cogs.movie")
+        await self.load_extension("yuribot.cogs.movebot")
+        await self.load_extension("yuribot.cogs.coin_dice")
+        GUILD_ID = 1417424777425064059  # your test guild
+        guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)  # quick!
 
     async def on_ready(self):
         try:
