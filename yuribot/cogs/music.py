@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Dict, Deque, List
 from collections import deque
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, quote, quote_plus
 
 import discord
 from discord.ext import commands
@@ -36,16 +36,37 @@ if SPOTIFY_ENABLED:
 
 import json, urllib.request
 
-FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTS = {"before_options": FFMPEG_BEFORE, "options": "-vn"}
+FFMPEG_BEFORE = (
+    "-nostdin -loglevel warning "
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+)
+FFMPEG_OPTS = {"before_options": FFMPEG_BEFORE, "options": "-vn -af aresample=async=1"}
 
 YTDL_BASE = {
     "format": "bestaudio/best",
     "quiet": True,
+    "noprogress": True,
     "no_warnings": True,
+    "cachedir": False,          
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
-}
+    "encoding": "utf-8",       
+    "extractor_args": {"youtube": {"player_client": ["web"]}}, 
+
+def _iri_to_uri(s: str) -> str:
+    try:
+        parts = urlsplit(s)
+        netloc = parts.netloc.encode("idna").decode("ascii")
+        path = quote(parts.path)
+        # keep & and = intact in queries
+        query = "&".join(
+            f"{k}={v}" if "=" in pair else pair
+            for pair in [quote_plus(p, safe="=&") for p in parts.query.split("&")] if pair
+            for k, _, v in [pair.partition("=")]
+        ) if parts.query else ""
+        return urlunsplit((parts.scheme, netloc, path, query, parts.fragment))
+    except Exception:
+        return s
 
 def _ytdl(noplaylist: bool = True) -> yt_dlp.YoutubeDL:
     opts = dict(YTDL_BASE)
@@ -138,6 +159,10 @@ class GuildPlayer:
 
             self.vc.play(source, after=_after)
             await done.wait()
+            try:
+                source.cleanup()  # ensure FFmpeg process is torn down promptly
+            except Exception:
+                pass
             self.now = None
 
     def enqueue(self, track: Track):
@@ -254,6 +279,8 @@ class MusicCog(commands.Cog):
     async def fetch_many(query_or_url: str, requester_id: int, limit: int = 100) -> List[Track]:
         """Return 1..N tracks for URL/query. Expands playlists/sets for SC and Spotify (if enabled)."""
         is_url = MusicCog._is_url(query_or_url)
+        if is_url:
+            query_or_url = _iri_to_uri(query_or_url)
         domain = MusicCog._domain(query_or_url) if is_url else ""
 
         # SoundCloud
