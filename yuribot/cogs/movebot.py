@@ -7,25 +7,22 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from ..strings import S  
+from ..strings import S  # string lookup helper
 
 GuildTextish = Union[discord.TextChannel, discord.Thread, discord.ForumChannel]
 
 
 async def _resolve_messageable_from_id(bot: commands.Bot, gid: int, ident: int) -> Optional[GuildTextish]:
     ch = bot.get_channel(ident)
-    if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
-        if ch.guild and ch.guild.id == gid:
-            return ch
+    if isinstance(ch, (discord.TextChannel, discord.ForumChannel)) and ch.guild and ch.guild.id == gid:
+        return ch
     thr = bot.get_channel(ident)
-    if isinstance(thr, discord.Thread):
-        if thr.guild and thr.guild.id == gid:
-            return thr
+    if isinstance(thr, discord.Thread) and thr.guild and thr.guild.id == gid:
+        return thr
     try:
         fetched = await bot.fetch_channel(ident)
-        if isinstance(fetched, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
-            if fetched.guild and fetched.guild.id == gid:
-                return fetched
+        if isinstance(fetched, (discord.TextChannel, discord.Thread, discord.ForumChannel)) and fetched.guild and fetched.guild.id == gid:
+            return fetched
     except Exception:
         pass
     return None
@@ -155,16 +152,16 @@ async def _maybe_create_destination_thread(
 
     return None, S("move_any.error.unsupported_destination")
 
-class MoveAnyCog(commands.Cog):
 
+class MoveAnyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     group = app_commands.Group(name="threadtools", description="Thread & channel utilities")
 
     @group.command(
-        name="move_any",
-        description="Copy messages from a channel/thread to a channel/thread (IDs)."
+        name="movebot",  # renamed here
+        description="Copy messages from a channel/thread to a channel/thread (by IDs)."
     )
     @app_commands.describe(
         source_id="ID of source TextChannel or Thread",
