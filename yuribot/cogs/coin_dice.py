@@ -24,10 +24,7 @@ DICE_SPEC_RE = re.compile(
 )
 
 def _parse_specs(text: str) -> List[Tuple[int, int, int, str]]:
-    """
-    Return list of (count, sides, mod, canonical_spec) for each token.
-    Raises ValueError if any token is invalid.
-    """
+
     if not text:
         raise ValueError("empty")
     tokens = [t.strip() for t in re.split(r"[, \u3000]+", text) if t.strip()]
@@ -47,7 +44,6 @@ def _parse_specs(text: str) -> List[Tuple[int, int, int, str]]:
     return out
 
 class CoinDiceCog(commands.Cog):
-    """Fun utilities: coin flips and dice rolls."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
