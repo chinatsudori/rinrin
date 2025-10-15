@@ -103,33 +103,39 @@ async def _send_copy(
         if sticker_lines:
             body += ("\n\n" if body else "") + "\n".join(sticker_lines)
 
-    # Send
+    # build kwargs without passing None (discord.py will try to iterate None)
+    common_kwargs = {
+        "content": body or None,
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+    if files:
+        common_kwargs["files"] = files
+
     if use_webhook and webhook is not None:
-        if isinstance(destination, discord.Thread):
-            await webhook.send(
-                content=body or None,
-                username=source_msg.author.display_name,
-                avatar_url=source_msg.author.display_avatar.url,
-                files=files or None,
-                thread=destination,
-                wait=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        else:
-            await webhook.send(
-                content=body or None,
-                username=source_msg.author.display_name,
-                avatar_url=source_msg.author.display_avatar.url,
-                files=files or None,
-                wait=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        try:
+            if isinstance(destination, discord.Thread):
+                log.debug("send_copy: webhook to thread=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
+                await webhook.send(
+                    username=source_msg.author.display_name,
+                    avatar_url=source_msg.author.display_avatar.url,
+                    thread=destination,
+                    wait=True,
+                    **common_kwargs,
+                )
+            else:
+                log.debug("send_copy: webhook to channel=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
+                await webhook.send(
+                    username=source_msg.author.display_name,
+                    avatar_url=source_msg.author.display_avatar.url,
+                    wait=True,
+                    **common_kwargs,
+                )
+        except Exception as e:
+            log.debug("send_copy: webhook send failed msg=%s err=%r (fallback to bot identity)", source_msg.id, e)
+            await destination.send(**common_kwargs)
     else:
-        await destination.send(
-            content=body or None,
-            files=files or None,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        log.debug("send_copy: direct send to %s msg=%s files=%d", destination.id, source_msg.id, len(files))
+        await destination.send(**common_kwargs)
 
 
 async def _maybe_create_destination_thread(
