@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Dict, Deque, List
 from collections import deque
-from urllib.parse import urlparse, urlsplit, urlunsplit, quote, quote_plus
+from urllib.parse import urlparse, urlsplit, urlunsplit, quote  # quote_plus not needed
 
 import discord
 from discord.ext import commands
@@ -13,6 +13,7 @@ from discord import app_commands
 from ..strings import S
 
 import yt_dlp
+import json, urllib.request
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -34,8 +35,6 @@ if SPOTIFY_ENABLED:
         _sp = None
         SPOTIFY_ENABLED = False
 
-import json, urllib.request
-
 FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
     "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -47,24 +46,26 @@ YTDL_BASE = {
     "quiet": True,
     "noprogress": True,
     "no_warnings": True,
-    "cachedir": False,          
+    "cachedir": False,            
     "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-    "encoding": "utf-8",       
-    "extractor_args": {"youtube": {"player_client": ["web"]}}, 
+    "source_address": "0.0.0.0",  
+    "encoding": "utf-8",
+    "extractor_args": {"youtube": {"player_client": ["web"]}},
+}
 
 def _iri_to_uri(s: str) -> str:
+    """
+    Percent-encode non-ASCII in URL parts so yt-dlp can handle IRI links
+    (e.g., titles/paths with Chinese/Japanese characters).
+    """
     try:
         parts = urlsplit(s)
+        scheme = parts.scheme
         netloc = parts.netloc.encode("idna").decode("ascii")
-        path = quote(parts.path)
-        # keep & and = intact in queries
-        query = "&".join(
-            f"{k}={v}" if "=" in pair else pair
-            for pair in [quote_plus(p, safe="=&") for p in parts.query.split("&")] if pair
-            for k, _, v in [pair.partition("=")]
-        ) if parts.query else ""
-        return urlunsplit((parts.scheme, netloc, path, query, parts.fragment))
+        path = quote(parts.path or "", safe="/%:@")        
+        query = quote(parts.query or "", safe="=&;%+/?:@") 
+        fragment = quote(parts.fragment or "", safe="")
+        return urlunsplit((scheme, netloc, path, query, fragment))
     except Exception:
         return s
 
@@ -80,18 +81,17 @@ def fmt_duration(seconds: Optional[int]) -> str:
     h, r = divmod(td.seconds, 3600)
     m, s = divmod(r, 60)
     h += td.days * 24
-    return (f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}")
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
 @dataclass
 class Track:
     title: str
-    url: str            # direct audio stream url (for ffmpeg)
-    webpage_url: str    # canonical page
+    url: str            
+    webpage_url: str    
     duration: Optional[int]
     requester_id: int
 
 class GuildPlayer:
-    """Per-guild player: voice client, queue, and a worker task."""
     def __init__(self, bot: commands.Bot, guild: discord.Guild):
         self.bot = bot
         self.guild = guild
@@ -160,7 +160,7 @@ class GuildPlayer:
             self.vc.play(source, after=_after)
             await done.wait()
             try:
-                source.cleanup()  # ensure FFmpeg process is torn down promptly
+                source.cleanup() 
             except Exception:
                 pass
             self.now = None
@@ -191,7 +191,6 @@ class GuildPlayer:
         self.now = None
 
 class MusicCog(commands.Cog):
-    """Music: join/leave, play/search (yt-dlp), queue, pause/resume/skip/stop, now, list. Supports Spotify & SoundCloud links."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.players: Dict[int, GuildPlayer] = {}
@@ -219,7 +218,6 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     async def _ytdl_extract(query_or_url: str, allow_playlist: bool, requester_id: int) -> List[Track]:
-        """Generic yt-dlp resolver; expands playlist if allowed."""
         def _extract():
             y = _ytdl(noplaylist=not allow_playlist)
             info = y.extract_info(query_or_url, download=False)
@@ -252,7 +250,6 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     def _spotify_oembed_title(url: str) -> Optional[str]:
-        """Lightweight metadata fetch without credentials (good for single track)."""
         try:
             with urllib.request.urlopen(f"https://open.spotify.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}") as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -277,7 +274,6 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     async def fetch_many(query_or_url: str, requester_id: int, limit: int = 100) -> List[Track]:
-        """Return 1..N tracks for URL/query. Expands playlists/sets for SC and Spotify (if enabled)."""
         is_url = MusicCog._is_url(query_or_url)
         if is_url:
             query_or_url = _iri_to_uri(query_or_url)
