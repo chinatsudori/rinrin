@@ -10,7 +10,7 @@ from discord import app_commands
 
 from ..strings import S  # string lookup helper
 
-log = logging.getLogger(__name__)  # <-- module logger
+log = logging.getLogger(__name__)
 
 GuildTextish = Union[discord.TextChannel, discord.Thread, discord.ForumChannel]
 
@@ -76,15 +76,20 @@ async def _send_copy(
     *,
     use_webhook: bool,
     webhook: Optional[discord.Webhook],
+    include_header: bool,  # <<— NEW
 ):
-    jump = source_msg.jump_url
-    ts = f"<t:{int(source_msg.created_at.timestamp())}:F>"
-    author = source_msg.author.display_name
-    header = S("move_any.header", author=author, ts=ts, jump=jump)
-
+    # Build body
     content = source_msg.content or ""
-    body = (header + ("\n" if content else "") + content).strip()
+    if include_header:
+        jump = source_msg.jump_url
+        ts = f"<t:{int(source_msg.created_at.timestamp())}:F>"
+        author = source_msg.author.display_name
+        header = S("move_any.header", author=author, ts=ts, jump=jump)
+        body = (header + ("\n" if content else "") + content).strip()
+    else:
+        body = content
 
+    # Attachments
     files: list[discord.File] = []
     for att in source_msg.attachments:
         try:
@@ -93,6 +98,7 @@ async def _send_copy(
         except Exception as e:
             log.debug("copy: attachment read failed msg=%s att=%s err=%r", source_msg.id, att.filename, e)
 
+    # Stickers
     if source_msg.stickers:
         sticker_lines = []
         for s in source_msg.stickers:
@@ -103,7 +109,7 @@ async def _send_copy(
         if sticker_lines:
             body += ("\n\n" if body else "") + "\n".join(sticker_lines)
 
-    # build kwargs without passing None (discord.py will try to iterate None)
+    # Build kwargs without Nones
     common_kwargs = {
         "content": body or None,
         "allowed_mentions": discord.AllowedMentions.none(),
@@ -111,6 +117,7 @@ async def _send_copy(
     if files:
         common_kwargs["files"] = files
 
+    # Send
     if use_webhook and webhook is not None:
         try:
             if isinstance(destination, discord.Thread):
@@ -182,7 +189,7 @@ class MoveAnyCog(commands.Cog):
     group = app_commands.Group(name="threadtools", description="Thread & channel utilities")
 
     @group.command(
-        name="movebot",  # renamed here
+        name="movebot",
         description="Copy messages from a channel/thread to a channel/thread (by IDs)."
     )
     @app_commands.describe(
@@ -190,6 +197,7 @@ class MoveAnyCog(commands.Cog):
         destination_id="ID of destination TextChannel/Thread/ForumChannel",
         dest_thread_title="If destination is a Forum, title for the new post (or a new thread title in a TextChannel).",
         use_webhook="Preserve author name & avatar via webhook when possible",
+        backlink="Include a header with author/time/jump URL at the top of each copied message (default: true).",
         delete_original="Delete original messages after successful copy",
         limit="Max number of messages to copy (oldest first). Leave empty for all.",
         before="Only copy messages created before this message ID or jump URL (in the source).",
@@ -204,6 +212,7 @@ class MoveAnyCog(commands.Cog):
         destination_id: str,
         dest_thread_title: Optional[str] = None,
         use_webhook: bool = True,
+        backlink: bool = True,          # <<— NEW
         delete_original: bool = False,
         limit: Optional[int] = None,
         before: Optional[str] = None,
@@ -319,7 +328,13 @@ class MoveAnyCog(commands.Cog):
         failed: list[tuple[int, str]] = []
         for i, msg in enumerate(to_copy, 1):
             try:
-                await _send_copy(destination, msg, use_webhook=use_webhook, webhook=webhook)
+                await _send_copy(
+                    destination,
+                    msg,
+                    use_webhook=use_webhook,
+                    webhook=webhook,
+                    include_header=backlink,  # <<— pass the toggle through
+                )
                 copied += 1
                 if debug:
                     log.debug("movebot: copied msg id=%s", msg.id)
@@ -358,7 +373,6 @@ class MoveAnyCog(commands.Cog):
         if delete_original:
             summary += " " + S("move_any.summary_deleted_tail", deleted=deleted)
 
-        # Inline digest when debug is on
         if debug and failed:
             top = "\n".join(f"- {mid}: {err}" for mid, err in failed[:10])
             summary += f"\n```\nFailures (first {min(10, len(failed))}):\n{top}\n```"
