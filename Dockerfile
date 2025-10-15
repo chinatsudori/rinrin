@@ -8,10 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ffmpeg ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ffmpeg locales ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -u 10001 -m appuser
+
+RUN sed -i 's/# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONIOENCODING=UTF-8
 
 WORKDIR /app
 
