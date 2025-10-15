@@ -2,10 +2,7 @@
 
 **What it does**
 
-- Announcements → an **announcements** text channel.
-- Submissions → a **planning** forum. The thread title is the submission title. The bot scrapes the **first URL** from the starter message as the link. During an **open collection window**, any new forum post auto-registers as a submission.
-- Polls → a **polls** text channel. Council passes numbers (from `/club list_current_submissions`) into `/club create_poll numbers:"1,3,4"`. No shortlists.
-- Discussions → assume **Fridays**. After picking the winning series, `/club plan_discussions total_chapters:X chapters_per_section:Y [hour:HH]` divides chapters accordingly and creates **Discord Scheduled Events** on successive Fridays at that hour (local TZ).
+blah blah blah stuff stuff
 
 **Prereqs**
 
