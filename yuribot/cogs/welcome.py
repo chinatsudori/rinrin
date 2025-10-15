@@ -1,10 +1,14 @@
 from __future__ import annotations
 from pathlib import Path
+import logging
+
 import discord
 from discord.ext import commands
 
 from .. import models
 from ..strings import S
+
+log = logging.getLogger(__name__)
 
 
 def _ordinal(n: int) -> str:
@@ -15,8 +19,32 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def _project_root() -> Path:
+def _pkg_root() -> Path:
+    # /app/yuribot
+    return Path(__file__).resolve().parents[1]
+
+
+def _app_root() -> Path:
+    # /app
     return Path(__file__).resolve().parents[2]
+
+
+def _resolve_welcome_image(filename: str) -> Path | None:
+    """Try a few common locations; return the first existing path."""
+    candidates = [
+        _app_root() / filename,                 # /app/welcome.png  <-- your new location
+        _app_root() / "assets" / filename,      # /app/assets/welcome.png
+        _pkg_root() / filename,                 # /app/yuribot/welcome.png
+        _pkg_root() / "assets" / filename,      # /app/yuribot/assets/welcome.png
+        Path.cwd() / filename,                  # working dir fallback
+        Path.cwd() / "assets" / filename,
+    ]
+    for p in candidates:
+        if p.exists():
+            log.debug("welcome: using image at %s", p)
+            return p
+    log.warning("welcome: image '%s' not found. Tried: %s", filename, ", ".join(str(p) for p in candidates))
+    return None
 
 
 class WelcomeCog(commands.Cog):
@@ -35,6 +63,7 @@ class WelcomeCog(commands.Cog):
         if not isinstance(ch, discord.TextChannel):
             return
 
+        # Count humans if cache is available; fall back to guild member_count
         try:
             human_count = sum(1 for m in member.guild.members if not m.bot)
         except Exception:
@@ -51,23 +80,27 @@ class WelcomeCog(commands.Cog):
         embed.timestamp = discord.utils.utcnow()
 
         filename = (cfg.get("welcome_image_filename") or "welcome.png").strip()
-        root = _project_root()
-        path = (root / filename).resolve()
-        if not path.exists():
-            alt = (root / "assets" / filename).resolve()
-            if alt.exists():
-                path = alt
+        path = _resolve_welcome_image(filename)
 
         file = None
-        if path.exists():
-            file = discord.File(str(path), filename=path.name)
-            embed.set_image(url=f"attachment://{path.name}")
+        if path:
+            try:
+                file = discord.File(str(path), filename=path.name)
+                embed.set_image(url=f"attachment://{path.name}")
+            except Exception as e:
+                log.warning("welcome: failed to attach image %s: %r", path, e)
 
         content = S("welcome.content", mention=member.mention)
-        if file:
-            await ch.send(content=content, embed=embed, file=file)
-        else:
-            await ch.send(content=content, embed=embed)
+        try:
+            if file:
+                await ch.send(content=content, embed=embed, file=file, allowed_mentions=discord.AllowedMentions(users=True))
+            else:
+                await ch.send(content=content, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+        except discord.Forbidden:
+            log.error("welcome: forbidden posting in #%s (%s). Check permissions (Send Messages, Attach Files).",
+                      getattr(ch, "name", "unknown"), ch.id)
+        except Exception as e:
+            log.exception("welcome: failed to send welcome message: %r", e)
 
 
 async def setup(bot: commands.Bot):
