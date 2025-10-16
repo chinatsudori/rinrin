@@ -38,10 +38,19 @@ if SPOTIFY_ENABLED:
 
 FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
-    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+    "-probesize 100M -analyzeduration 100M"
 )
-FFMPEG_OPTS_BASE = {"before_options": FFMPEG_BEFORE, "options": "-vn"}
 
+FFMPEG_OPTS_BASE = {
+    "before_options": FFMPEG_BEFORE,
+    # force 48kHz stereo, clean opus at 128k VBR, longer frames (smoother), audio profile
+    "options": (
+        "-vn -ar 48000 -ac 2 "
+        "-c:a libopus -b:a 128k -vbr on -compression_level 10 "
+        "-frame_duration 60 -application audio"
+    ),
+}
 # Prefer highest-ABR audio-only; don’t force Opus if M4A/AAC has higher bitrate.
 YTDL_BASE = {
     "format": (
