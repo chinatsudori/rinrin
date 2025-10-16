@@ -24,30 +24,26 @@ if SPOTIFY_ENABLED:
     try:
         import spotipy
         from spotipy.oauth2 import SpotifyClientCredentials
-
-        _sp = spotipy.Spotify(
-            auth_manager=SpotifyClientCredentials(
-                client_id=SPOTIFY_CLIENT_ID,
-                client_secret=SPOTIFY_CLIENT_SECRET,
-            )
-        )
+        _sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+        ))
     except Exception:
         _sp = None
         SPOTIFY_ENABLED = False
-
+OPUS_BITRATE_K = int(os.getenv("MUSIC_OPUS_BITRATE", "192"))
 
 FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
     "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 )
-
 FFMPEG_OPTS_BASE = {"before_options": FFMPEG_BEFORE, "options": "-vn"}
 
 YTDL_BASE = {
     "format": (
-        "bestaudio[acodec=opus][abr>=160]/"
+        "bestaudio[abr>=256]/"
         "bestaudio[abr>=192]/"
-        "bestaudio[abr>=128]/"
+        "bestaudio[abr>=160]/"
         "bestaudio/best"
     ),
     "quiet": True,
@@ -57,12 +53,10 @@ YTDL_BASE = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
     "encoding": "utf-8",
-
     "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
 }
 
 def _iri_to_uri(s: str) -> str:
-    """Percent-encode non-ASCII URL parts (e.g., CJK paths) so yt-dlp/ffmpeg handle them."""
     try:
         parts = urlsplit(s)
         scheme = parts.scheme
@@ -91,26 +85,21 @@ def fmt_duration(seconds: Optional[int]) -> str:
 @dataclass
 class Track:
     title: str
-    url: str                 
-    webpage_url: str         
+    url: str                 # direct media url
+    webpage_url: str         # canonical page
     duration: Optional[int]
     requester_id: int
-    headers: Optional[Dict[str, str]] = None  
+    headers: Optional[Dict[str, str]] = None  # request headers for ffmpeg
 
 def _ffmpeg_opts_for(track: Track, *, volume: float | None) -> dict:
-    """
-    Merge base options with per-track headers.
-    If volume is provided (e.g., 1.25 for +25%), add a volume filter.
-    """
     opts = dict(FFMPEG_OPTS_BASE)
     if volume and abs(volume - 1.0) > 1e-3:
-        vol = max(0.0, min(volume, 3.0))  # clamp 0–300%
+        vol = max(0.0, min(volume, 3.0))
         opts["options"] = opts["options"] + f' -filter:a "volume={vol}"'
     if track.headers:
         hdr_blob = "".join(f"{k}: {v}\r\n" for k, v in track.headers.items())
         opts["before_options"] = FFMPEG_BEFORE + f' -headers "{hdr_blob}"'
     return opts
-
 
 class GuildPlayer:
     def __init__(self, bot: commands.Bot, guild: discord.Guild):
@@ -162,21 +151,24 @@ class GuildPlayer:
 
             try:
                 source = await discord.FFmpegOpusAudio.from_probe(
-                    self.now.url, **_ffmpeg_opts_for(self.now, volume=self.volume)
+                    self.now.url,
+                    bitrate=OPUS_BITRATE_K,              # <<— higher Opus bitrate to Discord
+                    **_ffmpeg_opts_for(self.now, volume=self.volume),
                 )
             except Exception:
                 try:
                     refetched = await MusicCog.fetch_one(self.now.webpage_url, self.now.requester_id)
                     self.now = refetched
                     source = await discord.FFmpegOpusAudio.from_probe(
-                        self.now.url, **_ffmpeg_opts_for(self.now, volume=self.volume)
+                        self.now.url,
+                        bitrate=OPUS_BITRATE_K,
+                        **_ffmpeg_opts_for(self.now, volume=self.volume),
                     )
                 except Exception:
                     self.now = None
                     continue
 
             done = asyncio.Event()
-
             def _after(err: Exception | None):
                 try:
                     if err:
@@ -186,36 +178,26 @@ class GuildPlayer:
 
             self.vc.play(source, after=_after)
             await done.wait()
-            try:
-                source.cleanup()
-            except Exception:
-                pass
+            try: source.cleanup()
+            except Exception: pass
             self.now = None
 
     def enqueue(self, track: Track):
-        self.queue.append(track)
-        self._ensure_task()
-        self._play_next.set()
+        self.queue.append(track); self._ensure_task(); self._play_next.set()
 
     def extend(self, tracks: List[Track]):
         if tracks:
-            self.queue.extend(tracks)
-            self._ensure_task()
-            self._play_next.set()
+            self.queue.extend(tracks); self._ensure_task(); self._play_next.set()
 
     def skip(self):
-        if self.vc and (self.vc.is_playing() or self.vc.is_paused()):
-            self.vc.stop()
+        if self.vc and (self.vc.is_playing() or self.vc.is_paused()): self.vc.stop()
 
     def stop(self):
         self._stop_flag = True
         if self.vc and self.vc.is_connected():
-            try:
-                self.vc.stop()
-            except Exception:
-                pass
-        self.queue.clear()
-        self.now = None
+            try: self.vc.stop()
+            except Exception: pass
+        self.queue.clear(); self.now = None
 
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -231,24 +213,19 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     def _is_url(s: str) -> bool:
-        try:
-            return bool(urlparse(s).scheme)
-        except Exception:
-            return False
+        try: return bool(urlparse(s).scheme)
+        except Exception: return False
 
     @staticmethod
     def _domain(s: str) -> str:
-        try:
-            return urlparse(s).netloc.lower()
-        except Exception:
-            return ""
+        try: return urlparse(s).netloc.lower()
+        except Exception: return ""
 
     @staticmethod
     async def _ytdl_extract(query_or_url: str, allow_playlist: bool, requester_id: int) -> List[Track]:
         """
-        Run yt-dlp in a thread, returning Track objects with the best audio-only URL + headers.
-        We still manually select the best audio stream to avoid yt-dlp occasionally
-        returning a low-bitrate fallback.
+        Run yt-dlp in a thread and explicitly pick the best *audio-only* format
+        by bitrate (abr/tbr). This avoids low-abr fallbacks.
         """
         def _extract():
             y = _ytdl(noplaylist=not allow_playlist)
@@ -258,39 +235,36 @@ class MusicCog(commands.Cog):
             def _pick(e: dict):
                 chosen_url = e.get("url")
                 chosen_headers = e.get("http_headers") or info.get("http_headers")
+
                 if e.get("formats"):
-                    afmts = [
-                        f for f in e["formats"]
-                        if f.get("vcodec") == "none" and f.get("acodec") != "none"
-                    ]
+                    afmts = [f for f in e["formats"] if f.get("vcodec") == "none" and f.get("acodec") != "none"]
+                    # Score: prefer higher abr/tbr first, then Opus, then samplerate
                     def _score(f):
-                        is_opus = 1 if (f.get("acodec") or "").lower().startswith("opus") else 0
                         abr = f.get("abr") or f.get("tbr") or 0
-                        return (is_opus, abr)
+                        is_opus = 1 if (f.get("acodec") or "").lower().startswith("opus") else 0
+                        asr = f.get("asr") or 0
+                        return (abr, is_opus, asr)
                     afmts.sort(key=_score, reverse=True)
                     if afmts:
-                        chosen_url = afmts[0].get("url") or chosen_url
-                        chosen_headers = (afmts[0].get("http_headers") or
-                                          e.get("http_headers") or info.get("http_headers"))
+                        top = afmts[0]
+                        chosen_url = top.get("url") or chosen_url
+                        chosen_headers = top.get("http_headers") or chosen_headers
 
                 title = e.get("title") or "Unknown"
                 page = e.get("webpage_url") or e.get("original_url") or query_or_url
                 duration = e.get("duration")
                 if chosen_url:
-                    out.append(
-                        Track(
-                            title=title,
-                            url=chosen_url,
-                            webpage_url=page,
-                            duration=duration,
-                            requester_id=requester_id,
-                            headers=chosen_headers,
-                        )
-                    )
+                    out.append(Track(
+                        title=title,
+                        url=chosen_url,
+                        webpage_url=page,
+                        duration=duration,
+                        requester_id=requester_id,
+                        headers=chosen_headers,
+                    ))
 
             if "entries" in info:
-                for e in (e for e in info["entries"] if e):
-                    _pick(e)
+                for e in (e for e in info["entries"] if e): _pick(e)
             else:
                 _pick(info)
             return out
@@ -310,32 +284,26 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     def _search_query_from_spotify(title: Optional[str], url: str) -> str:
-        if title and " - " in title:
-            return title
-        parsed = urlparse(url)
-        parts = [p for p in parsed.path.split("/") if p]
+        if title and " - " in title: return title
+        parsed = urlparse(url); parts = [p for p in parsed.path.split("/") if p]
         return f"spotify {parts[0] if parts else ''} {parts[1] if len(parts) > 1 else ''}".strip()
 
     @staticmethod
     async def fetch_one(query_or_url: str, requester_id: int) -> Track:
         tracks = await MusicCog.fetch_many(query_or_url, requester_id, limit=1)
-        if not tracks:
-            raise RuntimeError("No audio found")
+        if not tracks: raise RuntimeError("No audio found")
         return tracks[0]
 
     @staticmethod
     async def fetch_many(query_or_url: str, requester_id: int, limit: int = 100) -> List[Track]:
         is_url = MusicCog._is_url(query_or_url)
-        if is_url:
-            query_or_url = _iri_to_uri(query_or_url)
+        if is_url: query_or_url = _iri_to_uri(query_or_url)
         domain = MusicCog._domain(query_or_url) if is_url else ""
 
-        # SoundCloud
         if "soundcloud.com" in domain:
             items = await MusicCog._ytdl_extract(query_or_url, allow_playlist=True, requester_id=requester_id)
             return items[:limit]
 
-        # Spotify
         if "open.spotify.com" in domain or "spotify.link" in domain:
             if SPOTIFY_ENABLED and _sp:
                 try:
@@ -357,7 +325,7 @@ class MusicCog(commands.Cog):
                             while res.get("next"):
                                 res = _sp.next(res)
                                 ids.extend([it["id"] for it in res["items"] if it.get("id")])
-                        else:  # playlist
+                        else:
                             pid = path.split("/")[1].split("?")[0]
                             res = _sp.playlist_items(pid, limit=50)
                             def _items(r): return [it["track"] for it in r["items"] if it.get("track")]
@@ -377,14 +345,11 @@ class MusicCog(commands.Cog):
                                 got = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
                                 if got:
                                     results.append(got[0])
-                                    if len(results) >= limit:
-                                        break
-                            if len(results) >= limit:
-                                break
+                                    if len(results) >= limit: break
+                            if len(results) >= limit: break
                         return results[:limit]
                 except Exception:
-                    pass  # fall through
-
+                    pass
             title = MusicCog._spotify_oembed_title(query_or_url)
             query = MusicCog._search_query_from_spotify(title, query_or_url)
             got = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
@@ -416,8 +381,7 @@ class MusicCog(commands.Cog):
     @app_commands.describe(channel="Voice channel (optional; defaults to your current one)")
     async def join(self, interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
         gp = await self._require_voice(interaction, channel)
-        if not gp:
-            return
+        if not gp: return
         ch = gp.vc.channel if gp.vc else channel
         await interaction.followup.send(S("music.joined", name=(ch.name if ch else "voice")), ephemeral=True)
 
@@ -428,21 +392,18 @@ class MusicCog(commands.Cog):
         gp = self._player(interaction.guild)
         gp.stop()
         if gp.vc and gp.vc.is_connected():
-            await gp.vc.disconnect(force=True)
-            gp.vc = None
+            await gp.vc.disconnect(force=True); gp.vc = None
         await interaction.response.send_message(S("music.left"), ephemeral=True)
 
     @app_commands.command(name="play", description="Play a track by URL or search query (YouTube, Spotify, SoundCloud).")
     @app_commands.describe(query="URL or search query (Spotify/SC links supported)")
     async def play(self, interaction: discord.Interaction, query: str):
         gp = await self._require_voice(interaction)
-        if not gp:
-            return
+        if not gp: return
         try:
             tracks = await self.fetch_many(query, interaction.user.id, limit=100)
         except Exception as e:
             return await interaction.followup.send(S("music.error.resolve", error=str(e)), ephemeral=True)
-
         if not tracks:
             return await interaction.followup.send(S("music.error.no_audio"), ephemeral=True)
 
@@ -452,23 +413,18 @@ class MusicCog(commands.Cog):
                      else S("music.queue.where_pos", pos=len(gp.queue)))
             t = tracks[0]
             return await interaction.followup.send(
-                S(
-                    "music.queued.single",
-                    title=discord.utils.escape_markdown(t.title),
-                    duration=fmt_duration(t.duration),
-                    where=where,
-                ),
-                ephemeral=True,
+                S("music.queued.single",
+                  title=discord.utils.escape_markdown(t.title),
+                  duration=fmt_duration(t.duration),
+                  where=where),
+                ephemeral=True
             )
 
         MAX_BULK = 50
         bundle = tracks[:MAX_BULK]
         gp.extend(bundle)
         more = max(0, len(tracks) - len(bundle))
-        await interaction.followup.send(
-            S("music.queued.bulk", count=len(bundle), more=more),
-            ephemeral=True,
-        )
+        await interaction.followup.send(S("music.queued.bulk", count=len(bundle), more=more), ephemeral=True)
 
     @app_commands.command(name="skip", description="Skip the current track.")
     async def skip(self, interaction: discord.Interaction):
@@ -524,12 +480,9 @@ class MusicCog(commands.Cog):
         if not gp.queue:
             return await interaction.response.send_message(S("music.queue.empty"), ephemeral=True)
         items = list(gp.queue)[:10]
-        lines = [
-            S("music.queue.line", idx=i + 1,
-              title=discord.utils.escape_markdown(t.title),
-              duration=fmt_duration(t.duration))
-            for i, t in enumerate(items)
-        ]
+        lines = [S("music.queue.line", idx=i+1,
+                   title=discord.utils.escape_markdown(t.title),
+                   duration=fmt_duration(t.duration)) for i, t in enumerate(items)]
         more = len(gp.queue) - len(items)
         txt = "\n".join(lines) + (S("music.queue.more", more=more) if more > 0 else "")
         await interaction.response.send_message(txt, ephemeral=True)
@@ -551,9 +504,7 @@ class MusicCog(commands.Cog):
         if before.channel and not after.channel:
             gp = self.players.get(member.guild.id)
             if gp:
-                gp.stop()
-                gp.vc = None
-
+                gp.stop(); gp.vc = None
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MusicCog(bot))
