@@ -35,6 +35,7 @@ if SPOTIFY_ENABLED:
         _sp = None
         SPOTIFY_ENABLED = False
 
+# ---- FFmpeg / yt-dlp config ----
 
 FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
@@ -63,7 +64,6 @@ YTDL_BASE = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
     "encoding": "utf-8",
-    # Use multiple clients to dodge occasional quirks
     "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     "socket_timeout": 20,
 }
@@ -96,6 +96,8 @@ def fmt_duration(seconds: Optional[int]) -> str:
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
 
+# ---- Types ----
+
 @dataclass
 class Track:
     title: str
@@ -116,6 +118,8 @@ def _ffmpeg_opts_for(track: Track, *, volume: float | None) -> dict:
     return opts
 
 
+# ---- Player ----
+
 class GuildPlayer:
     def __init__(self, bot: commands.Bot, guild: discord.Guild):
         self.bot = bot
@@ -126,9 +130,11 @@ class GuildPlayer:
         self._play_next = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
         self._stop_flag = False
+        self.volume: float = 0.95  # 1.0 = 100%
+
+        # Announcements
         self.announce_enabled: bool = True
         self.announce_channel_id: Optional[int] = None
-        self.volume: float = 0.95  # 1.0 = 100%
 
     def _ensure_task(self):
         if self._worker_task is None or self._worker_task.done():
@@ -142,6 +148,25 @@ class GuildPlayer:
             await self.vc.move_to(channel)
         else:
             self.vc = await channel.connect()
+
+    async def _announce_now_playing(self):
+        if not self.announce_enabled or not self.now or not self.announce_channel_id:
+            return
+        ch = self.bot.get_channel(self.announce_channel_id)
+        if not isinstance(ch, discord.TextChannel):
+            return
+        t = self.now
+        try:
+            await ch.send(
+                S(
+                    "music.now",
+                    title=discord.utils.escape_markdown(t.title),
+                    duration=fmt_duration(t.duration),
+                    url=t.webpage_url,
+                )
+            )
+        except Exception:
+            pass
 
     async def _worker(self):
         while not self._stop_flag:
@@ -165,6 +190,12 @@ class GuildPlayer:
             if not self.vc or not self.vc.is_connected():
                 self.now = None
                 continue
+
+            # Announce right before playback begins
+            try:
+                await self._announce_now_playing()
+            except Exception:
+                pass
 
             try:
                 source = await discord.FFmpegOpusAudio.from_probe(
@@ -224,6 +255,8 @@ class GuildPlayer:
         self.queue.clear()
         self.now = None
 
+
+# ---- Cog ----
 
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -430,6 +463,9 @@ class MusicCog(commands.Cog):
         gp = await self._require_voice(interaction, channel)
         if not gp:
             return
+        # Remember this text channel for announcements as soon as we join
+        if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+            gp.announce_channel_id = interaction.channel.id
         ch = gp.vc.channel if gp.vc else channel
         await interaction.followup.send(S("music.joined", name=(ch.name if ch else "voice")), ephemeral=True)
 
@@ -450,6 +486,9 @@ class MusicCog(commands.Cog):
         gp = await self._require_voice(interaction)
         if not gp:
             return
+        # Remember where to announce from this command
+        if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+            gp.announce_channel_id = interaction.channel.id
         try:
             tracks = await self.fetch_many(query, interaction.user.id, limit=100)
         except Exception as e:
@@ -519,14 +558,13 @@ class MusicCog(commands.Cog):
     async def now(self, interaction: discord.Interaction):
         gp = self._player(interaction.guild)
         if not gp.now:
-            return await interaction.response.send_message(S("music.error.nothing_playing"), ephemeral=True)
+            return await interaction.response.send_message(S("music.error.nothing_playing"))
         t = gp.now
         await interaction.response.send_message(
             S("music.now",
               title=discord.utils.escape_markdown(t.title),
               duration=fmt_duration(t.duration),
-              url=t.webpage_url),
-            ephemeral=True,
+              url=t.webpage_url)
         )
 
     @app_commands.command(name="queue", description="Show the next tracks in the queue (up to 10).")
@@ -554,6 +592,28 @@ class MusicCog(commands.Cog):
         p = 100 if percent is None else max(50, min(200, int(percent)))
         gp.volume = p / 100.0
         await interaction.response.send_message(f"Volume set to **{p}%**.", ephemeral=True)
+
+    @app_commands.command(name="announce", description="Enable/disable now-playing announcements and (optionally) set the channel.")
+    @app_commands.describe(
+        enabled="Turn announcements on or off",
+        channel="Channel to post announcements (defaults to the current channel if omitted)"
+    )
+    async def announce(self, interaction: discord.Interaction, enabled: Optional[bool] = None, channel: Optional[discord.TextChannel] = None):
+        if not interaction.guild:
+            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
+        gp = self._player(interaction.guild)
+
+        if enabled is not None:
+            gp.announce_enabled = bool(enabled)
+
+        if channel is None and isinstance(interaction.channel, discord.TextChannel):
+            channel = interaction.channel
+        if channel is not None:
+            gp.announce_channel_id = channel.id
+
+        status = "enabled" if gp.announce_enabled else "disabled"
+        where = f"<#{gp.announce_channel_id}>" if gp.announce_channel_id else "not set"
+        await interaction.response.send_message(f"Announcements **{status}**. Channel: {where}", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
