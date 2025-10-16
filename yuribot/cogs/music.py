@@ -126,6 +126,8 @@ class GuildPlayer:
         self._play_next = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
         self._stop_flag = False
+        self.announce_enabled: bool = True
+        self.announce_channel_id: Optional[int] = None
         self.volume: float = 0.95  # 1.0 = 100%
 
     def _ensure_task(self):
