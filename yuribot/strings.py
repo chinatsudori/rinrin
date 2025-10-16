@@ -372,5 +372,8 @@ _STRINGS.update({
     "move_any.summary":               "Copied **{copied}/{total}** message(s) from **{src}** → **{dst}**.",
     "move_any.summary_failed_tail":   "Failed: {failed}.",
     "move_any.summary_deleted_tail":  "Deleted original: {deleted}.",
+    "move_any.reply.header": "↩️ Replying to **{author}** · [jump]({jump})\n> {snippet}",
+    "move_any.reply.attach_only": "(attachment)",
 })
+
 
