@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Dict, Deque, List
 from collections import deque
-from urllib.parse import urlparse, urlsplit, urlunsplit, quote  # quote_plus not needed
+from urllib.parse import urlparse, urlsplit, urlunsplit, quote
 
 import discord
 from discord.ext import commands
@@ -46,24 +46,24 @@ YTDL_BASE = {
     "quiet": True,
     "noprogress": True,
     "no_warnings": True,
-    "cachedir": False,            
+    "cachedir": False,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  
     "encoding": "utf-8",
-    "extractor_args": {"youtube": {"player_client": ["web"]}},
+    "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
 }
 
 def _iri_to_uri(s: str) -> str:
     """
-    Percent-encode non-ASCII in URL parts so yt-dlp can handle IRI links
-    (e.g., titles/paths with Chinese/Japanese characters).
+    Percent-encode non-ASCII in URL parts so yt-dlp/ffmpeg can handle IRI links
+    (e.g., titles/paths with CJK characters).
     """
     try:
         parts = urlsplit(s)
         scheme = parts.scheme
         netloc = parts.netloc.encode("idna").decode("ascii")
-        path = quote(parts.path or "", safe="/%:@")        
-        query = quote(parts.query or "", safe="=&;%+/?:@") 
+        path = quote(parts.path or "", safe="/%:@")
+        query = quote(parts.query or "", safe="=&;%+/?:@")
         fragment = quote(parts.fragment or "", safe="")
         return urlunsplit((scheme, netloc, path, query, fragment))
     except Exception:
@@ -83,13 +83,27 @@ def fmt_duration(seconds: Optional[int]) -> str:
     h += td.days * 24
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
+
 @dataclass
 class Track:
     title: str
-    url: str            
-    webpage_url: str    
+    url: str                 
+    webpage_url: str          
     duration: Optional[int]
     requester_id: int
+    headers: Optional[Dict[str, str]] = None  
+
+def _ffmpeg_opts_for(track: Track) -> dict:
+    """
+    Merge global FFMPEG_OPTS with per-track HTTP headers so ffprobe/ffmpeg
+    uses the same headers yt-dlp used to obtain the signed media URL.
+    """
+    opts = dict(FFMPEG_OPTS)
+    if track.headers:
+        hdr_blob = "".join(f"{k}: {v}\r\n" for k, v in track.headers.items())
+        opts["before_options"] = FFMPEG_BEFORE + f' -headers "{hdr_blob}"'
+    return opts
+
 
 class GuildPlayer:
     def __init__(self, bot: commands.Bot, guild: discord.Guild):
@@ -139,17 +153,23 @@ class GuildPlayer:
                 continue
 
             try:
-                source = await discord.FFmpegOpusAudio.from_probe(self.now.url, **FFMPEG_OPTS)
+                source = await discord.FFmpegOpusAudio.from_probe(
+                    self.now.url, **_ffmpeg_opts_for(self.now)
+                )
             except Exception:
+                # try refetch (URL may have expired)
                 try:
                     refetched = await MusicCog.fetch_one(self.now.webpage_url, self.now.requester_id)
                     self.now = refetched
-                    source = await discord.FFmpegOpusAudio.from_probe(self.now.url, **FFMPEG_OPTS)
+                    source = await discord.FFmpegOpusAudio.from_probe(
+                        self.now.url, **_ffmpeg_opts_for(self.now)
+                    )
                 except Exception:
                     self.now = None
                     continue
 
             done = asyncio.Event()
+
             def _after(err: Exception | None):
                 try:
                     if err:
@@ -160,7 +180,7 @@ class GuildPlayer:
             self.vc.play(source, after=_after)
             await done.wait()
             try:
-                source.cleanup() 
+                source.cleanup()
             except Exception:
                 pass
             self.now = None
@@ -190,6 +210,7 @@ class GuildPlayer:
         self.queue.clear()
         self.now = None
 
+
 class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -201,6 +222,7 @@ class MusicCog(commands.Cog):
             gp = GuildPlayer(self.bot, guild)
             self.players[guild.id] = gp
         return gp
+
 
     @staticmethod
     def _is_url(s: str) -> bool:
@@ -218,40 +240,51 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     async def _ytdl_extract(query_or_url: str, allow_playlist: bool, requester_id: int) -> List[Track]:
+        """
+        Run yt-dlp in a thread, returning Track objects with media URL + headers.
+        """
         def _extract():
             y = _ytdl(noplaylist=not allow_playlist)
             info = y.extract_info(query_or_url, download=False)
             out: List[Track] = []
+
+            def _pick(e: dict):
+                url = e.get("url")
+                if not url and e.get("formats"):
+                    fmts = [f for f in e["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+                    fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
+                    url = fmts[0]["url"] if fmts else e["formats"][-1]["url"]
+                title = e.get("title") or "Unknown"
+                page = e.get("webpage_url") or e.get("original_url") or query_or_url
+                duration = e.get("duration")
+                headers = e.get("http_headers") or info.get("http_headers")
+                if url:
+                    out.append(
+                        Track(
+                            title=title,
+                            url=url,
+                            webpage_url=page,
+                            duration=duration,
+                            requester_id=requester_id,
+                            headers=headers,
+                        )
+                    )
+
             if "entries" in info:
                 for e in (e for e in info["entries"] if e):
-                    url = e.get("url")
-                    if not url and e.get("formats"):
-                        fmts = [f for f in e["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-                        fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
-                        url = fmts[0]["url"] if fmts else e["formats"][-1]["url"]
-                    title = e.get("title") or "Unknown"
-                    page = e.get("webpage_url") or e.get("original_url") or query_or_url
-                    duration = e.get("duration")
-                    if url:
-                        out.append(Track(title=title, url=url, webpage_url=page, duration=duration, requester_id=requester_id))
+                    _pick(e)
             else:
-                url = info.get("url")
-                if not url and info.get("formats"):
-                    fmts = [f for f in info["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-                    fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
-                    url = fmts[0]["url"] if fmts else info["formats"][-1]["url"]
-                title = info.get("title") or "Unknown"
-                page = info.get("webpage_url") or info.get("original_url") or query_or_url
-                duration = info.get("duration")
-                if url:
-                    out.append(Track(title=title, url=url, webpage_url=page, duration=duration, requester_id=requester_id))
+                _pick(info)
             return out
+
         return await asyncio.to_thread(_extract)
 
     @staticmethod
     def _spotify_oembed_title(url: str) -> Optional[str]:
         try:
-            with urllib.request.urlopen(f"https://open.spotify.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}") as resp:
+            with urllib.request.urlopen(
+                f"https://open.spotify.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}"
+            ) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("title")
         except Exception:
@@ -279,12 +312,10 @@ class MusicCog(commands.Cog):
             query_or_url = _iri_to_uri(query_or_url)
         domain = MusicCog._domain(query_or_url) if is_url else ""
 
-        # SoundCloud
         if "soundcloud.com" in domain:
             items = await MusicCog._ytdl_extract(query_or_url, allow_playlist=True, requester_id=requester_id)
             return items[:limit]
 
-        # Spotify
         if "open.spotify.com" in domain or "spotify.link" in domain:
             if SPOTIFY_ENABLED and _sp:
                 try:
@@ -320,7 +351,8 @@ class MusicCog(commands.Cog):
                             batch = ids[i:i+50]
                             meta = _sp.tracks(batch)["tracks"]
                             for t in meta:
-                                if not t: continue
+                                if not t:
+                                    continue
                                 title = f"{t['artists'][0]['name']} - {t['name']}"
                                 query = f"{title} audio"
                                 got = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
@@ -332,7 +364,7 @@ class MusicCog(commands.Cog):
                                 break
                         return results[:limit]
                 except Exception:
-                    pass  # fall through to oEmbed
+                    pass 
 
             title = MusicCog._spotify_oembed_title(query_or_url)
             query = MusicCog._search_query_from_spotify(title, query_or_url)
@@ -401,11 +433,13 @@ class MusicCog(commands.Cog):
                      else S("music.queue.where_pos", pos=len(gp.queue)))
             t = tracks[0]
             return await interaction.followup.send(
-                S("music.queued.single",
-                  title=discord.utils.escape_markdown(t.title),
-                  duration=fmt_duration(t.duration),
-                  where=where),
-                ephemeral=True
+                S(
+                    "music.queued.single",
+                    title=discord.utils.escape_markdown(t.title),
+                    duration=fmt_duration(t.duration),
+                    where=where,
+                ),
+                ephemeral=True,
             )
 
         MAX_BULK = 50
@@ -414,7 +448,7 @@ class MusicCog(commands.Cog):
         more = max(0, len(tracks) - len(bundle))
         await interaction.followup.send(
             S("music.queued.bulk", count=len(bundle), more=more),
-            ephemeral=True
+            ephemeral=True,
         )
 
     @app_commands.command(name="skip", description="Skip the current track.")
@@ -471,10 +505,12 @@ class MusicCog(commands.Cog):
         if not gp.queue:
             return await interaction.response.send_message(S("music.queue.empty"), ephemeral=True)
         items = list(gp.queue)[:10]
-        lines = [S("music.queue.line",
-                   idx=i+1,
-                   title=discord.utils.escape_markdown(t.title),
-                   duration=fmt_duration(t.duration)) for i, t in enumerate(items)]
+        lines = [
+            S("music.queue.line", idx=i + 1,
+              title=discord.utils.escape_markdown(t.title),
+              duration=fmt_duration(t.duration))
+            for i, t in enumerate(items)
+        ]
         more = len(gp.queue) - len(items)
         txt = "\n".join(lines) + (S("music.queue.more", more=more) if more > 0 else "")
         await interaction.response.send_message(txt, ephemeral=True)
@@ -488,6 +524,7 @@ class MusicCog(commands.Cog):
             if gp:
                 gp.stop()
                 gp.vc = None
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MusicCog(bot))
