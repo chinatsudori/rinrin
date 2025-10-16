@@ -44,13 +44,9 @@ FFMPEG_BEFORE = (
 
 FFMPEG_OPTS_BASE = {
     "before_options": FFMPEG_BEFORE,
-    # force 48kHz stereo, clean opus at 128k VBR, longer frames (smoother), audio profile
-    "options": (
-        "-vn -ar 48000 -ac 2 "
-        "-c:a libopus -b:a 128k -vbr on -compression_level 10 "
-        "-frame_duration 60 -application audio"
-    ),
+    "options": "-vn -ar 48000 -ac 2"
 }
+
 # Prefer highest-ABR audio-only; don’t force Opus if M4A/AAC has higher bitrate.
 YTDL_BASE = {
     "format": (
@@ -110,18 +106,15 @@ class Track:
     headers: Optional[Dict[str, str]] = None  # HTTP headers for ffmpeg (avoid 403)
 
 def _ffmpeg_opts_for(track: Track, *, volume: float | None) -> dict:
-    """
-    Merge base options with per-track headers.
-    If volume is provided (e.g., 1.25 for +25%), add a volume filter.
-    """
     opts = dict(FFMPEG_OPTS_BASE)
     if volume and abs(volume - 1.0) > 1e-3:
-        vol = max(0.0, min(volume, 3.0))  # clamp 0–300%
+        vol = max(0.0, min(volume, 3.0))
         opts["options"] = opts["options"] + f' -filter:a "volume={vol}"'
     if track.headers:
         hdr_blob = "".join(f"{k}: {v}\r\n" for k, v in track.headers.items())
         opts["before_options"] = FFMPEG_BEFORE + f' -headers "{hdr_blob}"'
     return opts
+
 
 class GuildPlayer:
     def __init__(self, bot: commands.Bot, guild: discord.Guild):
@@ -133,7 +126,7 @@ class GuildPlayer:
         self._play_next = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
         self._stop_flag = False
-        self.volume: float = 1.0  # 1.0 = 100%
+        self.volume: float = 0.95  # 1.0 = 100%
 
     def _ensure_task(self):
         if self._worker_task is None or self._worker_task.done():
