@@ -39,25 +39,29 @@ FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
     "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 )
-FFMPEG_OPTS = {"before_options": FFMPEG_BEFORE, "options": "-vn -af aresample=async=1"}
+
+FFMPEG_OPTS_BASE = {"before_options": FFMPEG_BEFORE, "options": "-vn"}
 
 YTDL_BASE = {
-    "format": "bestaudio/best",
+    "format": (
+        "bestaudio[acodec=opus][abr>=160]/"
+        "bestaudio[abr>=192]/"
+        "bestaudio[abr>=128]/"
+        "bestaudio/best"
+    ),
     "quiet": True,
     "noprogress": True,
     "no_warnings": True,
     "cachedir": False,
     "default_search": "ytsearch",
-    "source_address": "0.0.0.0",  
+    "source_address": "0.0.0.0",
     "encoding": "utf-8",
+
     "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
 }
 
 def _iri_to_uri(s: str) -> str:
-    """
-    Percent-encode non-ASCII in URL parts so yt-dlp/ffmpeg can handle IRI links
-    (e.g., titles/paths with CJK characters).
-    """
+    """Percent-encode non-ASCII URL parts (e.g., CJK paths) so yt-dlp/ffmpeg handle them."""
     try:
         parts = urlsplit(s)
         scheme = parts.scheme
@@ -83,26 +87,28 @@ def fmt_duration(seconds: Optional[int]) -> str:
     h += td.days * 24
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
-
 @dataclass
 class Track:
     title: str
     url: str                 
-    webpage_url: str          
+    webpage_url: str         
     duration: Optional[int]
     requester_id: int
-    headers: Optional[Dict[str, str]] = None  
-
-def _ffmpeg_opts_for(track: Track) -> dict:
+    headers: Optional[Dict[str, str]] = None 
+def _ffmpeg_opts_for(track: Track, *, volume: float | None) -> dict:
     """
-    Merge global FFMPEG_OPTS with per-track HTTP headers so ffprobe/ffmpeg
-    uses the same headers yt-dlp used to obtain the signed media URL.
+    Merge base options with per-track headers.
+    If volume is provided (e.g., 1.25 for +25%), add a volume filter.
     """
-    opts = dict(FFMPEG_OPTS)
+    opts = dict(FFMPEG_OPTS_BASE)
+    if volume and abs(volume - 1.0) > 1e-3:
+        vol = max(0.0, min(volume, 3.0))  
+        opts["options"] = opts["options"] + f' -filter:a "volume={vol}"'
     if track.headers:
         hdr_blob = "".join(f"{k}: {v}\r\n" for k, v in track.headers.items())
         opts["before_options"] = FFMPEG_BEFORE + f' -headers "{hdr_blob}"'
     return opts
+
 
 
 class GuildPlayer:
@@ -115,6 +121,7 @@ class GuildPlayer:
         self._play_next = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
         self._stop_flag = False
+        self.volume: float = 1.0 
 
     def _ensure_task(self):
         if self._worker_task is None or self._worker_task.done():
@@ -154,15 +161,14 @@ class GuildPlayer:
 
             try:
                 source = await discord.FFmpegOpusAudio.from_probe(
-                    self.now.url, **_ffmpeg_opts_for(self.now)
+                    self.now.url, **_ffmpeg_opts_for(self.now, volume=self.volume)
                 )
             except Exception:
-                # try refetch (URL may have expired)
                 try:
                     refetched = await MusicCog.fetch_one(self.now.webpage_url, self.now.requester_id)
                     self.now = refetched
                     source = await discord.FFmpegOpusAudio.from_probe(
-                        self.now.url, **_ffmpeg_opts_for(self.now)
+                        self.now.url, **_ffmpeg_opts_for(self.now, volume=self.volume)
                     )
                 except Exception:
                     self.now = None
@@ -223,7 +229,6 @@ class MusicCog(commands.Cog):
             self.players[guild.id] = gp
         return gp
 
-
     @staticmethod
     def _is_url(s: str) -> bool:
         try:
@@ -241,7 +246,9 @@ class MusicCog(commands.Cog):
     @staticmethod
     async def _ytdl_extract(query_or_url: str, allow_playlist: bool, requester_id: int) -> List[Track]:
         """
-        Run yt-dlp in a thread, returning Track objects with media URL + headers.
+        Run yt-dlp in a thread, returning Track objects with the best audio-only URL + headers.
+        We still manually select the best audio stream to avoid yt-dlp occasionally
+        returning a low-bitrate fallback.
         """
         def _extract():
             y = _ytdl(noplaylist=not allow_playlist)
@@ -249,24 +256,35 @@ class MusicCog(commands.Cog):
             out: List[Track] = []
 
             def _pick(e: dict):
-                url = e.get("url")
-                if not url and e.get("formats"):
-                    fmts = [f for f in e["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-                    fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
-                    url = fmts[0]["url"] if fmts else e["formats"][-1]["url"]
+                chosen_url = e.get("url")
+                chosen_headers = e.get("http_headers") or info.get("http_headers")
+                if e.get("formats"):
+                    afmts = [
+                        f for f in e["formats"]
+                        if f.get("vcodec") == "none" and f.get("acodec") != "none"
+                    ]
+                    def _score(f):
+                        is_opus = 1 if (f.get("acodec") or "").lower().startswith("opus") else 0
+                        abr = f.get("abr") or f.get("tbr") or 0
+                        return (is_opus, abr)
+                    afmts.sort(key=_score, reverse=True)
+                    if afmts:
+                        chosen_url = afmts[0].get("url") or chosen_url
+                        chosen_headers = (afmts[0].get("http_headers") or
+                                          e.get("http_headers") or info.get("http_headers"))
+
                 title = e.get("title") or "Unknown"
                 page = e.get("webpage_url") or e.get("original_url") or query_or_url
                 duration = e.get("duration")
-                headers = e.get("http_headers") or info.get("http_headers")
-                if url:
+                if chosen_url:
                     out.append(
                         Track(
                             title=title,
-                            url=url,
+                            url=chosen_url,
                             webpage_url=page,
                             duration=duration,
                             requester_id=requester_id,
-                            headers=headers,
+                            headers=chosen_headers,
                         )
                     )
 
@@ -291,240 +309,4 @@ class MusicCog(commands.Cog):
             return None
 
     @staticmethod
-    def _search_query_from_spotify(title: Optional[str], url: str) -> str:
-        if title and " - " in title:
-            return title
-        parsed = urlparse(url)
-        parts = [p for p in parsed.path.split("/") if p]
-        return f"spotify {parts[0] if parts else ''} {parts[1] if len(parts) > 1 else ''}".strip()
-
-    @staticmethod
-    async def fetch_one(query_or_url: str, requester_id: int) -> Track:
-        tracks = await MusicCog.fetch_many(query_or_url, requester_id, limit=1)
-        if not tracks:
-            raise RuntimeError("No audio found")
-        return tracks[0]
-
-    @staticmethod
-    async def fetch_many(query_or_url: str, requester_id: int, limit: int = 100) -> List[Track]:
-        is_url = MusicCog._is_url(query_or_url)
-        if is_url:
-            query_or_url = _iri_to_uri(query_or_url)
-        domain = MusicCog._domain(query_or_url) if is_url else ""
-
-        if "soundcloud.com" in domain:
-            items = await MusicCog._ytdl_extract(query_or_url, allow_playlist=True, requester_id=requester_id)
-            return items[:limit]
-
-        if "open.spotify.com" in domain or "spotify.link" in domain:
-            if SPOTIFY_ENABLED and _sp:
-                try:
-                    path = urlparse(query_or_url).path.strip("/")
-                    head = path.split("/")[0]
-                    out: List[Track] = []
-                    if head == "track":
-                        tid = path.split("/")[1].split("?")[0]
-                        t = _sp.track(tid)
-                        title = f"{t['artists'][0]['name']} - {t['name']}"
-                        query = f"{title} audio"
-                        out = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
-                    elif head in ("album", "playlist"):
-                        ids = []
-                        if head == "album":
-                            aid = path.split("/")[1].split("?")[0]
-                            res = _sp.album_tracks(aid, limit=50, offset=0)
-                            ids.extend([it["id"] for it in res["items"] if it.get("id")])
-                            while res.get("next"):
-                                res = _sp.next(res)
-                                ids.extend([it["id"] for it in res["items"] if it.get("id")])
-                        else:  # playlist
-                            pid = path.split("/")[1].split("?")[0]
-                            res = _sp.playlist_items(pid, limit=50)
-                            def _items(r): return [it["track"] for it in r["items"] if it.get("track")]
-                            tracks_meta = _items(res)
-                            while res.get("next"):
-                                res = _sp.next(res)
-                                tracks_meta.extend(_items(res))
-                            ids = [t["id"] for t in tracks_meta if t and t.get("id")]
-                        results: List[Track] = []
-                        for i in range(0, len(ids), 50):
-                            batch = ids[i:i+50]
-                            meta = _sp.tracks(batch)["tracks"]
-                            for t in meta:
-                                if not t:
-                                    continue
-                                title = f"{t['artists'][0]['name']} - {t['name']}"
-                                query = f"{title} audio"
-                                got = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
-                                if got:
-                                    results.append(got[0])
-                                    if len(results) >= limit:
-                                        break
-                            if len(results) >= limit:
-                                break
-                        return results[:limit]
-                except Exception:
-                    pass 
-
-            title = MusicCog._spotify_oembed_title(query_or_url)
-            query = MusicCog._search_query_from_spotify(title, query_or_url)
-            got = await MusicCog._ytdl_extract(query, allow_playlist=False, requester_id=requester_id)
-            return got[:1]
-
-        allow_playlist = is_url and ("youtube.com/playlist" in query_or_url or "list=" in query_or_url)
-        items = await MusicCog._ytdl_extract(query_or_url, allow_playlist=allow_playlist, requester_id=requester_id)
-        return items[:limit]
-
-    async def _require_voice(self, interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None) -> Optional[GuildPlayer]:
-        if not interaction.guild:
-            await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-            return None
-        gp = self._player(interaction.guild)
-        target = channel
-        if target is None:
-            mem = interaction.guild.get_member(interaction.user.id)
-            if mem and mem.voice and isinstance(mem.voice.channel, discord.VoiceChannel):
-                target = mem.voice.channel
-        if target is None:
-            await interaction.response.send_message(S("music.error.join_first"), ephemeral=True)
-            return None
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=True)
-        await gp.connect(target)
-        return gp
-
-    @app_commands.command(name="join", description="Summon the bot to a voice channel.")
-    @app_commands.describe(channel="Voice channel (optional; defaults to your current one)")
-    async def join(self, interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
-        gp = await self._require_voice(interaction, channel)
-        if not gp:
-            return
-        ch = gp.vc.channel if gp.vc else channel
-        await interaction.followup.send(S("music.joined", name=(ch.name if ch else "voice")), ephemeral=True)
-
-    @app_commands.command(name="leave", description="Disconnect from voice and clear the queue.")
-    async def leave(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-        gp = self._player(interaction.guild)
-        gp.stop()
-        if gp.vc and gp.vc.is_connected():
-            await gp.vc.disconnect(force=True)
-            gp.vc = None
-        await interaction.response.send_message(S("music.left"), ephemeral=True)
-
-    @app_commands.command(name="play", description="Play a track by URL or search query (YouTube, Spotify, SoundCloud).")
-    @app_commands.describe(query="URL or search query (Spotify/SC links supported)")
-    async def play(self, interaction: discord.Interaction, query: str):
-        gp = await self._require_voice(interaction)
-        if not gp:
-            return
-        try:
-            tracks = await self.fetch_many(query, interaction.user.id, limit=100)
-        except Exception as e:
-            return await interaction.followup.send(S("music.error.resolve", error=str(e)), ephemeral=True)
-
-        if not tracks:
-            return await interaction.followup.send(S("music.error.no_audio"), ephemeral=True)
-
-        if len(tracks) == 1:
-            gp.enqueue(tracks[0])
-            where = (S("music.queue.where_now") if gp.now is None and gp.vc and not gp.vc.is_playing()
-                     else S("music.queue.where_pos", pos=len(gp.queue)))
-            t = tracks[0]
-            return await interaction.followup.send(
-                S(
-                    "music.queued.single",
-                    title=discord.utils.escape_markdown(t.title),
-                    duration=fmt_duration(t.duration),
-                    where=where,
-                ),
-                ephemeral=True,
-            )
-
-        MAX_BULK = 50
-        bundle = tracks[:MAX_BULK]
-        gp.extend(bundle)
-        more = max(0, len(tracks) - len(bundle))
-        await interaction.followup.send(
-            S("music.queued.bulk", count=len(bundle), more=more),
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="skip", description="Skip the current track.")
-    async def skip(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-        gp = self._player(interaction.guild)
-        if not gp.vc or not (gp.vc.is_playing() or gp.vc.is_paused()):
-            return await interaction.response.send_message(S("music.error.nothing_playing"), ephemeral=True)
-        gp.skip()
-        await interaction.response.send_message(S("music.skipped"), ephemeral=True)
-
-    @app_commands.command(name="pause", description="Pause playback.")
-    async def pause(self, interaction: discord.Interaction):
-        gp = self._player(interaction.guild)
-        if not gp.vc or not gp.vc.is_playing():
-            return await interaction.response.send_message(S("music.error.nothing_playing"), ephemeral=True)
-        gp.vc.pause()
-        await interaction.response.send_message(S("music.paused"), ephemeral=True)
-
-    @app_commands.command(name="resume", description="Resume playback.")
-    async def resume(self, interaction: discord.Interaction):
-        gp = self._player(interaction.guild)
-        if not gp.vc or not gp.vc.is_paused():
-            return await interaction.response.send_message(S("music.error.nothing_to_resume"), ephemeral=True)
-        gp.vc.resume()
-        await interaction.response.send_message(S("music.resumed"), ephemeral=True)
-
-    @app_commands.command(name="stop", description="Stop playback and clear the queue.")
-    async def stop(self, interaction: discord.Interaction):
-        gp = self._player(interaction.guild)
-        if not gp.vc:
-            return await interaction.response.send_message(S("music.error.not_connected"), ephemeral=True)
-        gp.stop()
-        await interaction.response.send_message(S("music.stopped"), ephemeral=True)
-
-    @app_commands.command(name="now", description="Show the currently playing track.")
-    async def now(self, interaction: discord.Interaction):
-        gp = self._player(interaction.guild)
-        if not gp.now:
-            return await interaction.response.send_message(S("music.error.nothing_playing"), ephemeral=True)
-        t = gp.now
-        await interaction.response.send_message(
-            S("music.now",
-              title=discord.utils.escape_markdown(t.title),
-              duration=fmt_duration(t.duration),
-              url=t.webpage_url),
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="queue", description="Show the next tracks in the queue (up to 10).")
-    async def queue_cmd(self, interaction: discord.Interaction):
-        gp = self._player(interaction.guild)
-        if not gp.queue:
-            return await interaction.response.send_message(S("music.queue.empty"), ephemeral=True)
-        items = list(gp.queue)[:10]
-        lines = [
-            S("music.queue.line", idx=i + 1,
-              title=discord.utils.escape_markdown(t.title),
-              duration=fmt_duration(t.duration))
-            for i, t in enumerate(items)
-        ]
-        more = len(gp.queue) - len(items)
-        txt = "\n".join(lines) + (S("music.queue.more", more=more) if more > 0 else "")
-        await interaction.response.send_message(txt, ephemeral=True)
-
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if not member.guild.me or member.id != member.guild.me.id:
-            return
-        if before.channel and not after.channel:
-            gp = self.players.get(member.guild.id)
-            if gp:
-                gp.stop()
-                gp.vc = None
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MusicCog(bot))
+    def _search_query_from_spotify(title:
