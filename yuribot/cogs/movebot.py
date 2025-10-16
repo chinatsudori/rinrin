@@ -82,18 +82,42 @@ async def _send_copy(
     webhook: Optional[discord.Webhook],
     include_header: bool,
 ):
-    # Build body
+    reply_prefix = ""
+    try:
+        if source_msg.reference and source_msg.reference.message_id:
+            ref: Optional[discord.Message] = None
+            ref = getattr(source_msg.reference, "resolved", None)
+            if ref is None:
+                try:
+                    ref = await source_msg.channel.fetch_message(source_msg.reference.message_id)
+                except Exception:
+                    ref = None
+            if ref is not None:
+                snippet = (ref.content or "").strip().replace("\n", " ")
+                if len(snippet) > 140:
+                    snippet = snippet[:137] + "…"
+                if not snippet and ref.attachments:
+                    snippet = S("move_any.reply.attach_only")
+
+                reply_prefix = S(
+                    "move_any.reply.header",
+                    author=ref.author.display_name,
+                    jump=ref.jump_url,
+                    snippet=snippet
+                )
+    except Exception:
+        reply_prefix = ""
+
     content = source_msg.content or ""
     if include_header:
         jump = source_msg.jump_url
         ts = f"<t:{int(source_msg.created_at.timestamp())}:F>"
         author = source_msg.author.display_name
         header = S("move_any.header", author=author, ts=ts, jump=jump)
-        body = (header + ("\n" if content else "") + content).strip()
+        body = "\n".join([p for p in (reply_prefix, header, content) if p]).strip()
     else:
-        body = content
+        body = "\n".join([p for p in (reply_prefix, content) if p]).strip()
 
-    # Attachments
     files: List[discord.File] = []
     for att in source_msg.attachments:
         try:
@@ -102,7 +126,6 @@ async def _send_copy(
         except Exception as e:
             log.debug("copy: attachment read failed msg=%s att=%s err=%r", source_msg.id, att.filename, e)
 
-    # Stickers
     if source_msg.stickers:
         sticker_lines = []
         for s in source_msg.stickers:
@@ -113,19 +136,13 @@ async def _send_copy(
         if sticker_lines:
             body += ("\n\n" if body else "") + "\n".join(sticker_lines)
 
-    # kwargs without Nones
-    common_kwargs = {
-        "content": body or None,
-        "allowed_mentions": discord.AllowedMentions.none(),
-    }
+    common_kwargs = {"content": body or None, "allowed_mentions": discord.AllowedMentions.none()}
     if files:
         common_kwargs["files"] = files
 
-    # Send
     if use_webhook and webhook is not None:
         try:
             if isinstance(destination, discord.Thread):
-                log.debug("send_copy: webhook->thread=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
                 await webhook.send(
                     username=source_msg.author.display_name,
                     avatar_url=source_msg.author.display_avatar.url,
@@ -134,7 +151,6 @@ async def _send_copy(
                     **common_kwargs,
                 )
             else:
-                log.debug("send_copy: webhook->channel=%s msg=%s files=%d", destination.id, source_msg.id, len(files))
                 await webhook.send(
                     username=source_msg.author.display_name,
                     avatar_url=source_msg.author.display_avatar.url,
@@ -145,7 +161,6 @@ async def _send_copy(
             log.debug("send_copy: webhook send failed msg=%s err=%r (fallback)", source_msg.id, e)
             await destination.send(**common_kwargs)
     else:
-        log.debug("send_copy: direct send to %s msg=%s files=%d", destination.id, source_msg.id, len(files))
         await destination.send(**common_kwargs)
 
 
