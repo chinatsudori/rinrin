@@ -9,13 +9,12 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from ..strings import S  # string lookup helper
+from ..strings import S 
 
 log = logging.getLogger(__name__)
 
 GuildTextish = Union[discord.TextChannel, discord.Thread, discord.ForumChannel]
 
-# ---------- Utilities ----------
 
 async def _resolve_messageable_from_id(
     bot: commands.Bot, gid: int, ident: int
@@ -85,8 +84,7 @@ async def _send_copy(
     reply_prefix = ""
     try:
         if source_msg.reference and source_msg.reference.message_id:
-            ref: Optional[discord.Message] = None
-            ref = getattr(source_msg.reference, "resolved", None)
+            ref: Optional[discord.Message] = getattr(source_msg.reference, "resolved", None)
             if ref is None:
                 try:
                     ref = await source_msg.channel.fetch_message(source_msg.reference.message_id)
@@ -202,8 +200,6 @@ async def _maybe_create_destination_thread(
     return None, S("move_any.error.unsupported_destination")
 
 
-# ----- Pin matching helpers -----
-
 def _collapse_ws(s: str) -> str:
     return " ".join(s.split())
 
@@ -241,7 +237,6 @@ def _fuzzy_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-# ---------- Cog ----------
 
 class MoveAnyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -345,15 +340,24 @@ class MoveAnyCog(commands.Cog):
 
         before_msg = await _resolve_msg(before)
         after_msg = await _resolve_msg(after)
-        log.debug("movebot: history window before=%s after=%s limit=%s",
-                  getattr(before_msg, "id", None), getattr(after_msg, "id", None), limit)
+        log.debug(
+            "movebot: history window before=%s after=%s limit=%s",
+            getattr(before_msg, "id", None),
+            getattr(after_msg, "id", None),
+            limit,
+        )
+
+        ALLOWED_TYPES = {
+            discord.MessageType.default,
+            discord.MessageType.reply,
+        }
 
         to_copy: List[discord.Message] = []
         try:
             async for m in source.history(limit=limit, oldest_first=True, before=before_msg, after=after_msg):
-                if m.type != discord.MessageType.default:
+                if m.type not in ALLOWED_TYPES:
                     if debug:
-                        log.debug("movebot: skipping non-default message id=%s type=%s", m.id, m.type)
+                        log.debug("movebot: skipping message id=%s type=%s", m.id, m.type)
                     continue
                 to_copy.append(m)
         except discord.Forbidden:
@@ -438,8 +442,6 @@ class MoveAnyCog(commands.Cog):
 
         await interaction.followup.send(summary, ephemeral=True)
 
-    # ---- pinmatch command ----
-
     @group.command(
         name="pinmatch",
         description="Mirror pins from a source channel/thread into a destination by content matching (no mapping needed)."
@@ -499,7 +501,6 @@ class MoveAnyCog(commands.Cog):
         if not (destination.permissions_for(me).read_message_history and destination.permissions_for(me).manage_messages):
             return await interaction.followup.send("I need **Read Message History** and **Manage Messages** in the destination.", ephemeral=True)
 
-        # Load source pins
         try:
             src_pins = await source.pins()
         except discord.Forbidden:
@@ -508,12 +509,10 @@ class MoveAnyCog(commands.Cog):
         if not src_pins:
             return await interaction.followup.send("No pins in the source.", ephemeral=True)
 
-        # Preload destination messages (newest first)
         dest_msgs: List[discord.Message] = []
         async for m in destination.history(limit=search_depth, oldest_first=False):
             dest_msgs.append(m)
 
-        # Build indexes
         by_content: Dict[str, List[discord.Message]] = {}
         by_attach: Dict[str, List[discord.Message]] = {}
         for dm in dest_msgs:
@@ -539,11 +538,9 @@ class MoveAnyCog(commands.Cog):
 
             candidates: List[discord.Message] = []
 
-            # 1) exact content
             if src_key:
                 candidates = list(by_content.get(src_key, []))
 
-            # 2) attachment signature intersection/union
             if src_sig:
                 with_attach = by_attach.get(src_sig, [])
                 if candidates:
@@ -553,7 +550,6 @@ class MoveAnyCog(commands.Cog):
                 else:
                     candidates = list(with_attach)
 
-            # 3) fuzzy fallback
             if not candidates and src_key:
                 best: Optional[tuple[discord.Message, float]] = None
                 for dm in dest_msgs:
@@ -572,7 +568,6 @@ class MoveAnyCog(commands.Cog):
                 misses.append(sm.id)
                 continue
 
-            # choose closest timestamp (still pin even if outside slack)
             candidates.sort(key=lambda m: abs(int(m.created_at.timestamp()) - timestamp))
             target = candidates[0]
 
