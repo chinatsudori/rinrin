@@ -40,15 +40,15 @@ FFMPEG_BEFORE = (
     "-nostdin -loglevel warning "
     "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 )
-
 FFMPEG_OPTS_BASE = {"before_options": FFMPEG_BEFORE, "options": "-vn"}
 
+# Prefer highest-ABR audio-only; don’t force Opus if M4A/AAC has higher bitrate.
 YTDL_BASE = {
-    # Prefer Opus at >=160 kbps, then other high-ABR audio-only formats.
     "format": (
-        "bestaudio[acodec=opus][abr>=160]/"
+        "bestaudio[abr>=320]/"
+        "bestaudio[abr>=256]/"
         "bestaudio[abr>=192]/"
-        "bestaudio[abr>=128]/"
+        "bestaudio[abr>=160]/"
         "bestaudio/best"
     ),
     "quiet": True,
@@ -58,8 +58,9 @@ YTDL_BASE = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
     "encoding": "utf-8",
-
+    # Use multiple clients to dodge occasional quirks
     "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+    "socket_timeout": 20,
 }
 
 def _iri_to_uri(s: str) -> str:
@@ -106,7 +107,6 @@ def _ffmpeg_opts_for(track: Track, *, volume: float | None) -> dict:
     """
     opts = dict(FFMPEG_OPTS_BASE)
     if volume and abs(volume - 1.0) > 1e-3:
-        # Use a simple linear multiplier; keep filters minimal to avoid artifacts.
         vol = max(0.0, min(volume, 3.0))  # clamp 0–300%
         opts["options"] = opts["options"] + f' -filter:a "volume={vol}"'
     if track.headers:
@@ -251,8 +251,7 @@ class MusicCog(commands.Cog):
     async def _ytdl_extract(query_or_url: str, allow_playlist: bool, requester_id: int) -> List[Track]:
         """
         Run yt-dlp in a thread, returning Track objects with the best audio-only URL + headers.
-        We still manually select the best audio stream to avoid yt-dlp occasionally
-        returning a low-bitrate fallback.
+        Now prioritizes highest bitrate first (then Opus as a tiebreaker).
         """
         def _extract():
             y = _ytdl(noplaylist=not allow_playlist)
@@ -260,25 +259,26 @@ class MusicCog(commands.Cog):
             out: List[Track] = []
 
             def _pick(e: dict):
-                # Prefer audio-only formats with highest abr; prefer Opus.
                 chosen_url = e.get("url")
                 chosen_headers = e.get("http_headers") or info.get("http_headers")
+
                 if e.get("formats"):
                     afmts = [
                         f for f in e["formats"]
                         if f.get("vcodec") == "none" and f.get("acodec") != "none"
                     ]
-                    # sort: prefer opus, then higher abr, then higher tbr
+                    # Score: prefer higher abr/tbr first; use Opus as a tiebreaker; then higher sample rate.
                     def _score(f):
-                        is_opus = 1 if (f.get("acodec") or "").lower().startswith("opus") else 0
                         abr = f.get("abr") or f.get("tbr") or 0
-                        return (is_opus, abr)
+                        is_opus = 1 if (f.get("acodec") or "").lower().startswith("opus") else 0
+                        asr = f.get("asr") or 0
+                        return (abr, is_opus, asr)
+
                     afmts.sort(key=_score, reverse=True)
                     if afmts:
-                        chosen_url = afmts[0].get("url") or chosen_url
-                        # Some formats carry their own headers; fall back to top-level
-                        chosen_headers = (afmts[0].get("http_headers") or
-                                          e.get("http_headers") or info.get("http_headers"))
+                        top = afmts[0]
+                        chosen_url = top.get("url") or chosen_url
+                        chosen_headers = top.get("http_headers") or e.get("http_headers") or chosen_headers
 
                 title = e.get("title") or "Unknown"
                 page = e.get("webpage_url") or e.get("original_url") or query_or_url
@@ -464,8 +464,7 @@ class MusicCog(commands.Cog):
                     "music.queued.single",
                     title=discord.utils.escape_markdown(t.title),
                     duration=fmt_duration(t.duration),
-                    where=where,
-                ),
+                    where=where),
                 ephemeral=True,
             )
 
