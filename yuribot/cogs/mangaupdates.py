@@ -52,21 +52,13 @@ def _coerce_int(v) -> Optional[int]:
         return None
 
 
-def _sid_title_from_result(r: dict) -> Tuple[Optional[int], str]:
+def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
-    sid = (
-        r.get("series_id")
-        or r.get("id")
-        or rec.get("series_id")
-        or rec.get("id")
-    )
-    sid = _coerce_int(sid)
-    title = (
-        r.get("title")
-        or rec.get("title")
-        or "Unknown"
-    )
+    sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
+    sid = str(sid) if sid is not None else None
+    title = r.get("title") or rec.get("title") or "Unknown"
     return sid, title
+
 
 
 def _stringify_aliases(raw) -> List[str]:
@@ -178,33 +170,24 @@ class MUClient:
         results = data.get("results", data) if isinstance(data, dict) else data
         return results or []
 
-    async def get_series(self, series_id: int) -> dict:
+    async def get_series(self, series_id: str) -> dict:
         url = f"{API_BASE}/series/{series_id}"
-        async with self.session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=20),
-            headers=self._headers
-        ) as resp:
+        async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=20), headers=self._headers) as resp:
             if resp.status != 200:
                 raise RuntimeError(S("mu.error.series_http", sid=series_id, code=resp.status))
             return await resp.json()
 
-    async def fetch_series_releases(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
-
+    async def get_series_releases(self, series_id: str, page: int = 1, per_page: int = 50) -> dict:
         url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
-
         timeout = aiohttp.ClientTimeout(total=25)
-        attempts = 3
+
         last_txt = ""
-        for i in range(1, attempts + 1):
+        for i in range(1, 4):
             try:
-                async with self.session.get(
-                    url, params=params, timeout=timeout, headers=self._headers
-                ) as resp:
+                async with self.session.get(url, params=params, timeout=timeout, headers=self._headers) as resp:
                     if resp.status == 200:
                         return await resp.json()
-
                     if resp.status in (429, 500, 502, 503, 504):
                         try:
                             last_txt = (await resp.text())[:200]
@@ -212,29 +195,22 @@ class MUClient:
                             last_txt = ""
                         await asyncio.sleep(0.8 * i)
                         continue
-
                     try:
                         last_txt = (await resp.text())[:200]
                     except Exception:
                         last_txt = ""
-                    raise RuntimeError(
-                        S("mu.error.releases_http", sid=series_id, code=resp.status)
-                        + (f" ({last_txt})" if last_txt else "")
-                    )
+                    raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status) + (f" ({last_txt})" if last_txt else ""))
             except asyncio.TimeoutError:
-                if i < attempts:
+                if i < 3:
                     await asyncio.sleep(0.8 * i)
                     continue
                 raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="timeout"))
 
-        raise RuntimeError(
-            S("mu.error.releases_http", sid=series_id, code="unknown")
-            + (f" ({last_txt})" if last_txt else "")
-        )
+        raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="unknown") + (f" ({last_txt})" if last_txt else ""))
 
 @dataclass
 class WatchEntry:
-    series_id: int
+    series_id: str
     series_title: str
     aliases: List[str]
     forum_channel_id: int
@@ -316,22 +292,18 @@ class MUWatcher(commands.Cog):
         scored: List[Tuple[dict, float, List[str]]] = []
         for r in top:
             sid, title = _sid_title_from_result(r)
-            if sid is None:
+            if not sid:
                 continue
-            aliases: List[str] = []
+            aliases = []
             try:
-                full = await client.get_series(int(sid))
-                raw_aliases = (
-                    full.get("associated_names")
-                    or full.get("associated")
-                    or full.get("associated_names_ascii")
-                    or []
-                )
+                full = await client.get_series(sid)  # validate and also fetch aliases
+                raw_aliases = full.get("associated_names") or full.get("associated") or full.get("associated_names_ascii") or []
                 aliases = _stringify_aliases(raw_aliases)
                 score = _best_match_score(series, title, aliases)
             except Exception:
                 score = _best_match_score(series, title, [])
             scored.append(({"sid": sid, "title": title}, score, aliases))
+
 
         if not scored:
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
