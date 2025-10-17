@@ -83,6 +83,11 @@ def _stringify_aliases(raw) -> List[str]:
 
 
 def _is_english_release(rel: dict) -> bool:
+    """
+    JSON results: look at language fields.
+    RSS results: we add 'lang_hint' (lowercased title+description); check for English markers there.
+    """
+    # JSON fields first
     def _is_en(s: str) -> bool:
         s = (s or "").strip().lower()
         return s in {"english", "en", "eng"}
@@ -104,6 +109,12 @@ def _is_english_release(rel: dict) -> bool:
     grp = rel.get("group") or rel.get("group_name") or {}
     if isinstance(grp, dict):
         if any(_is_en(str(grp.get(f, ""))) for f in ("language", "lang", "name")):
+            return True
+
+    # RSS fallback hint
+    hint = (rel.get("lang_hint") or "").lower()
+    if hint:
+        if any(x in hint for x in ("english", " eng ", "(eng)", "[eng]", " en ")):
             return True
 
     return False
@@ -154,6 +165,7 @@ class MUClient:
             "Accept": "application/json, text/plain, */*",
             "User-Agent": "rinrin/1.0 (+discord bot; contact: you@example.com)",
         }
+        # Helps avoid weird "OPTIONS only" responses from their WAF/CDN
         self._corsish = {
             "Origin": "https://www.mangaupdates.com",
             "Referer": "https://www.mangaupdates.com/",
@@ -189,48 +201,16 @@ class MUClient:
 
     async def get_series_releases(self, series_id: str, page: int = 1, per_page: int = 50) -> dict:
         """
-        Prefer POST /releases/search (with browser-like headers to avoid 'OPTIONS'-only responses),
-        then fall back to GET /series/{id}/releases. Retries on 429/5xx/timeouts.
+        Try JSON endpoint; on failure, fall back to RSS and convert to JSON-like.
+        Retries on 429/5xx/timeouts before RSS fallback.
         """
         timeout = aiohttp.ClientTimeout(total=25)
 
-        post_url = f"{API_BASE}/releases/search"
-        base_payload = {
-            "page": page,
-            "per_page": per_page,
-            "sort": "id",
-            "order": "desc",
-            "search": {"series_id": series_id},
-        }
-
-        last_txt = ""
-        for i in range(1, 3): 
-            try:
-                async with self.session.post(
-                    post_url,
-                    json=base_payload,
-                    timeout=timeout,
-                    headers={**self._headers, **self._corsish},
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    if resp.status in (400, 401, 403, 404, 405, 409, 422, 429, 500, 502, 503, 504):
-                        try:
-                            last_txt = (await resp.text())[:300]
-                        except Exception:
-                            last_txt = ""
-                        await asyncio.sleep(0.6 * i)
-                        continue
-            except asyncio.TimeoutError:
-                await asyncio.sleep(0.6 * i)
-                continue
-            except Exception:
-                await asyncio.sleep(0.6 * i)
-                continue
-
+        # 1) Try GET /series/{id}/releases
         get_url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
 
+        last_txt = ""
         for i in range(1, 4):
             try:
                 async with self.session.get(
@@ -252,20 +232,120 @@ class MUClient:
                         last_txt = (await resp.text())[:300]
                     except Exception:
                         last_txt = ""
-                    raise RuntimeError(
-                        S("mu.error.releases_http", sid=series_id, code=resp.status)
-                        + (f" ({last_txt})" if last_txt else "")
-                    )
+                    # hard 4xx or odd body -> try RSS next
+                    break
             except asyncio.TimeoutError:
                 if i < 3:
                     await asyncio.sleep(0.8 * i)
                     continue
-                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="timeout"))
+                break  # fallback to RSS
 
-        raise RuntimeError(
-            S("mu.error.releases_http", sid=series_id, code="unknown")
-            + (f" ({last_txt})" if last_txt else "")
-        )
+        # 2) Fallback to RSS
+        return await self.get_series_releases_via_rss(series_id, limit=per_page)
+
+    async def get_series_releases_via_rss(self, series_id: str | int, *, limit: int = 50) -> dict:
+        """
+        Fetch the series release RSS and convert to a JSON-ish structure that matches
+        what the rest of the code expects: {"results": [release, ...]}.
+        """
+        url = f"{API_BASE}/series/{series_id}/rss"
+        timeout = aiohttp.ClientTimeout(total=20)
+
+        async with self.session.get(
+            url,
+            timeout=timeout,
+            headers={
+                **self._headers,
+                "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+            },
+        ) as resp:
+            if resp.status != 200:
+                txt = (await resp.text())[:300]
+                raise RuntimeError(S("mu.error.releases_http", sid=str(series_id), code=resp.status) + (f" ({txt})" if txt else ""))
+
+            xml_text = await resp.text()
+
+        import email.utils as eut
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.fromstring(xml_text)
+        except Exception:
+            xml_text_clean = xml_text.lstrip("\ufeff").strip()
+            root = ET.fromstring(xml_text_clean)
+
+        # Find <channel>
+        channel = None
+        if root.tag.lower().endswith("rss"):
+            channel = next((c for c in root if c.tag.lower().endswith("channel")), None)
+        elif root.tag.lower().endswith("channel"):
+            channel = root
+        else:
+            for c in root.iter():
+                if c.tag.lower().endswith("channel"):
+                    channel = c
+                    break
+
+        if channel is None:
+            return {"results": []}
+
+        items = [i for i in channel if i.tag.lower().endswith("item")]
+        releases = []
+
+        def _text(x, tag):
+            n = next((c for c in x if c.tag.lower().endswith(tag)), None)
+            return (n.text or "").strip() if n is not None and n.text else ""
+
+        for it in items[:limit]:
+            title = _text(it, "title")
+            link = _text(it, "link")
+            desc = _text(it, "description")
+            pub = _text(it, "pubdate") or _text(it, "pubDate")
+
+            # pubDate -> epoch
+            ts = None
+            try:
+                dt = eut.parsedate_to_datetime(pub) if pub else None
+                if dt is not None:
+                    ts = int(dt.timestamp())
+            except Exception:
+                ts = None
+
+            raw = f"{title} {desc}".strip()
+            m_ch = re.search(r"(?:ch(?:apter)?\.?\s*)(\d+(?:\.\d+)?)", raw, re.I)
+            m_vol = re.search(r"(?:v|vol(?:ume)?)\.?\s*(\d+)", raw, re.I)
+
+            chapter = m_ch.group(1) if m_ch else ""
+            volume = m_vol.group(1) if m_vol else ""
+
+            m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
+            group = (m_group.group(1).strip() if m_group else "")
+
+            # synthetic id: numeric from link if available, else pubDate, else hash
+            rid = None
+            if link:
+                m_id_in_link = re.search(r"(\d{6,})", link)
+                if m_id_in_link:
+                    rid = int(m_id_in_link.group(1))
+            if rid is None:
+                rid = ts or int(abs(hash((title, link))) % 10_000_000_000)
+
+            releases.append({
+                "id": rid,
+                "release_id": rid,
+                "chapter": chapter or "",
+                "volume": volume or "",
+                "subchapter": "",
+                "group": group or "",
+                "url": link or "",
+                "release_date": (datetime.utcfromtimestamp(ts).isoformat() + "Z") if ts else "",
+                "title": title or "",
+                "raw_title": title or "",
+                "description": desc or "",
+                "lang_hint": raw.lower(),
+            })
+
+        return {"results": releases}
 
 
 @dataclass
@@ -304,7 +384,6 @@ class MUWatcher(commands.Cog):
     def cog_unload(self):
         if self._task:
             self._task.cancel()
-        # close session cleanly
         if self._session and not self._session.closed:
             asyncio.create_task(self._session.close())
 
@@ -369,7 +448,7 @@ class MUWatcher(commands.Cog):
 
         scored.sort(key=lambda t: t[1], reverse=True)
         choice, score, aliases = scored[0]
-        sid = choice["sid"]                 # keep as str
+        sid = choice["sid"]  # keep as str
         title = choice["title"]
 
         gid = str(interaction.guild_id)
@@ -377,7 +456,7 @@ class MUWatcher(commands.Cog):
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != target_thread.id]
         g["entries"].append(
             {
-                "series_id": sid,          # store as str
+                "series_id": sid,  # store as str
                 "series_title": title,
                 "aliases": aliases,
                 "forum_channel_id": target_thread.parent.id,
@@ -481,7 +560,7 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # English-only
+        # English-only (works for JSON, and uses RSS lang_hint when present)
         results_en = [r for r in results if _is_english_release(r)]
         if not results_en:
             return await interaction.followup.send(S("mu.error.no_releases_lang"), ephemeral=True)
@@ -580,7 +659,6 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            # English-only
             results_en = [r for r in results if _is_english_release(r)]
             if not results_en:
                 continue
