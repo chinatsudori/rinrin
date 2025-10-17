@@ -18,6 +18,9 @@ API_BASE = "https://api.mangaupdates.com/v1"
 DATA_FILE = Path("./data/mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
+# Turn EN filter on/off (we're turning it OFF per your request)
+FILTER_ENGLISH_ONLY = False
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -83,6 +86,7 @@ def _stringify_aliases(raw) -> List[str]:
 
 
 def _is_english_release(rel: dict) -> bool:
+    """Kept for future use; no-op when FILTER_ENGLISH_ONLY=False."""
     def _is_en(s: str) -> bool:
         s = (s or "").strip().lower()
         return s in {"english", "en", "eng"}
@@ -100,46 +104,64 @@ def _is_english_release(rel: dict) -> bool:
             if isinstance(item, dict):
                 if any(_is_en(str(item.get(f, ""))) for f in ("name", "code", "lang", "language")):
                     return True
-
     grp = rel.get("group") or rel.get("group_name") or {}
     if isinstance(grp, dict):
         if any(_is_en(str(grp.get(f, ""))) for f in ("language", "lang", "name")):
             return True
+    return False
 
-    non_en_codes = {"es", "spa", "es-la", "pt", "pt-br", "fr", "fra", "id", "ind", "tr", "tur",
-                    "ar", "ara", "ru", "rus", "de", "ger", "vi", "vie", "th", "tha", "fil", "tl",
-                    "cn", "zh", "jp", "ja", "ko"}
-    for k in ("language", "lang", "lang_name"):
-        v = rel.get(k)
-        if isinstance(v, str) and v.strip().lower() in non_en_codes:
-            return False
 
-    hint = " ".join(str(rel.get(k, "")) for k in ("title", "raw_title", "description")).lower()
-    hint += " " + (rel.get("lang_hint") or "")
+def _rid(x) -> Optional[int]:
+    v = x.get("id") or x.get("release_id")
+    try:
+        return int(v)
+    except Exception:
+        return None
 
-    non_en_keywords = {
-        "español", "espanol", "latino", "português", "portugues", "français", "francais",
-        "indonesia", "bahasa", "türkçe", "turkce", "العربية", "русский", "deutsch",
-        "tiếng việt", "vietnamese", "ไทย", "thai", "filipino", "tagalog",
-        "中文", "简体", "繁體", "日本語", "raw japanese", "한국어", "korean",
-        "(es)", "[es]", "(pt)", "[pt]", "(fr)", "[fr]", "(id)", "[id]", "(tr)", "[tr]",
-        "(ar)", "(ru)", "(de)", "(vi)", "(th)", "(tl)", "(cn)", "(jp)", "(ja)", "(ko)"
-    }
 
-    if any(tok in hint for tok in non_en_keywords):
-        return False
-
-    if any(tok in hint for tok in {" english", "(eng)", "[eng]", " en "}):
-        return True
-
-    return True
-
+def _has_ch(x) -> int:
+    """Return 1 if release looks like a chapter (not just volume)."""
+    if x.get("chapter"):
+        return 1
+    title = f"{x.get('title','')} {x.get('raw_title','')}".lower()
+    return 1 if re.search(r"\b(?:c|ch(?:apter)?)\b", title) else 0
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
+    """
+    Build a 'vX • ch Y • Z' string. If structured fields are missing,
+    fall back to parsing from title/description (handles decimals like 25.5).
+    """
     vol = _strip(str(rel.get("volume") or ""))
     ch = _strip(str(rel.get("chapter") or ""))
     sub = _strip(str(rel.get("subchapter") or ""))
+
+    # Fallback parse from textual title/desc if needed
+    if not (vol or ch):
+        title_str = " ".join([
+            str(rel.get("title", "")),
+            str(rel.get("raw_title", "")),
+            str(rel.get("description", "")),
+        ])
+        tl = title_str.lower()
+
+        if not vol:
+            # v5, vol 5, volume 5
+            mv = re.search(r"\b(?:v|vol(?:ume)?)\.?\s*([0-9]+(?:\.[0-9]+)?)\b", tl)
+            if mv:
+                vol = mv.group(1)
+
+        if not ch:
+            # ch 25, chapter 25, c25, ch.25
+            mc = re.search(r"\b(?:c|ch(?:apter)?)\.?\s*([0-9]+(?:\.[0-9]+)?)\b", tl)
+            if mc:
+                ch = mc.group(1)
+
+        # If chapter includes decimal, split to ch/sub
+        if ch and "." in ch and not sub:
+            base, frac = ch.split(".", 1)
+            ch, sub = base, frac
+
     bits = []
     if vol:
         bits.append(f"v{vol}")
@@ -147,20 +169,24 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
         bits.append(f"ch {ch}")
     if sub:
         bits.append(sub)
+
     chbits = " • ".join(bits) if bits else S("mu.release.generic")
 
+    # group name (robust across shapes)
     group_raw = rel.get("group") or rel.get("group_name") or ""
     if isinstance(group_raw, dict):
         group = _strip(group_raw.get("name") or group_raw.get("group_name") or "")
     else:
         group = _strip(str(group_raw))
 
-    url = _strip(rel.get("url") or rel.get("release_url") or "")
+    # url (robust)
+    url = _strip(rel.get("url") or rel.get("release_url") or rel.get("link") or "")
+
     extras = []
     if group:
         extras.append(S("mu.release.group", group=discord.utils.escape_markdown(group)))
 
-    rdate = rel.get("release_date") or rel.get("date")
+    rdate = rel.get("release_date") or rel.get("date") or rel.get("pubDate")
     if rdate:
         try:
             dt = datetime.fromisoformat(str(rdate).replace("Z", "+00:00"))
@@ -576,22 +602,16 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # English-only (works for JSON, and uses RSS lang_hint when present)
-        results_en = [r for r in results if _is_english_release(r)]
-        if not results_en:
-            return await interaction.followup.send(S("mu.error.no_releases_lang"), ephemeral=True)
-
-        def _rid(x) -> Optional[int]:
-            v = x.get("id") or x.get("release_id")
-            try:
-                return int(v)
-            except Exception:
-                return None
+        # Use language filter only if enabled
+        use = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
+        if not use:
+            msg_key = "mu.error.no_releases_lang" if FILTER_ENGLISH_ONLY else "mu.error.no_releases"
+            return await interaction.followup.send(S(msg_key), ephemeral=True)
 
         top_new = []
         top_seen = we.last_release_id or 0
 
-        for r in results_en:
+        for r in use:
             rid = _rid(r)
             if rid is None:
                 continue
@@ -600,7 +620,8 @@ class MUWatcher(commands.Cog):
                 top_new.append(r)
 
         if top_new:
-            for r in sorted(top_new, key=lambda x: _rid(x) or 0):
+            # Prefer chapters first
+            for r in sorted(top_new, key=lambda x: (-_has_ch(x), _rid(x) or 0)):
                 await self._post_release(tgt, we, r)
 
             for e in self.state[gid]["entries"]:
@@ -610,7 +631,7 @@ class MUWatcher(commands.Cog):
             _save_state(self.state)
             return await interaction.followup.send(S("mu.check.posted", count=len(top_new)), ephemeral=True)
 
-        latest = max(results_en, key=lambda x: _rid(x) or 0)
+        latest = max(use, key=lambda x: _rid(x) or 0)
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
             title=S("mu.latest.title", series=we.series_title, chbits=chbits),
@@ -675,20 +696,13 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            results_en = [r for r in results if _is_english_release(r)]
-            if not results_en:
+            scan = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
+            if not scan:
                 continue
-
-            def _rid(x) -> Optional[int]:
-                v = x.get("id") or x.get("release_id")
-                try:
-                    return int(v)
-                except Exception:
-                    return None
 
             new_items = []
             top_seen = we.last_release_id or 0
-            for r in results_en:
+            for r in scan:
                 rid = _rid(r)
                 if rid is None:
                     continue
@@ -707,7 +721,8 @@ class MUWatcher(commands.Cog):
                 _save_state(self.state)
                 continue
 
-            for r in sorted(new_items, key=lambda x: _rid(x) or 0):
+            # Prefer chapters first
+            for r in sorted(new_items, key=lambda x: (-_has_ch(x), _rid(x) or 0)):
                 try:
                     await self._post_release(thread, we, r)
                 except Exception:
