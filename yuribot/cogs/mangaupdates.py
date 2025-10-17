@@ -18,7 +18,7 @@ API_BASE = "https://api.mangaupdates.com/v1"
 DATA_FILE = Path("./data/mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
-# Turn EN filter on/off (we're turning it OFF per your request)
+# Turn EN filter on/off (OFF per your request)
 FILTER_ENGLISH_ONLY = False
 
 
@@ -124,7 +124,8 @@ def _has_ch(x) -> int:
     if x.get("chapter"):
         return 1
     title = f"{x.get('title','')} {x.get('raw_title','')}".lower()
-    return 1 if re.search(r"\b(?:c|ch(?:apter)?)\b", title) else 0
+    # match c25, c.25, ch 25, ch.25, chapter 25, with optional decimals
+    return 1 if re.search(r"\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?\b", title) else 0
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
@@ -152,7 +153,7 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
                 vol = mv.group(1)
 
         if not ch:
-            # ch 25, chapter 25, c25, ch.25
+            # c25, ch 25, chapter 25, ch.25
             mc = re.search(r"\b(?:c|ch(?:apter)?)\.?\s*([0-9]+(?:\.[0-9]+)?)\b", tl)
             if mc:
                 ch = mc.group(1)
@@ -354,8 +355,9 @@ class MUClient:
                 ts = None
 
             raw = f"{title} {desc}".strip()
-            m_ch = re.search(r"(?:ch(?:apter)?\.?\s*)(\d+(?:\.\d+)?)", raw, re.I)
-            m_vol = re.search(r"(?:v|vol(?:ume)?)\.?\s*(\d+)", raw, re.I)
+            # ✅ Accept c###, ch ###, chapter ### (with optional decimals)
+            m_ch = re.search(r"(?:c|ch(?:apter)?)\.?\s*([0-9]+(?:\.[0-9]+)?)", raw, re.I)
+            m_vol = re.search(r"(?:v|vol(?:ume)?)\.?\s*([0-9]+(?:\.[0-9]+)?)", raw, re.I)
 
             chapter = m_ch.group(1) if m_ch else ""
             volume = m_vol.group(1) if m_vol else ""
@@ -750,6 +752,10 @@ class MUWatcher(commands.Cog):
         rid = rel.get("id") or rel.get("release_id")
         chbits, extras = _format_rel_bits(rel)
 
+        # Ping @here only for items that look like CHAPTERS
+        mention_content = "@here" if _has_ch(rel) else None
+        allowed = discord.AllowedMentions(everyone=True) if mention_content else discord.AllowedMentions.none()
+
         embed = discord.Embed(
             title=S("mu.release.title", series=we.series_title, chbits=chbits),
             description=extras or None,
@@ -757,7 +763,7 @@ class MUWatcher(commands.Cog):
             timestamp=_now_utc(),
         )
         embed.set_footer(text=S("mu.release.footer", rid=rid))
-        await thread.send(embed=embed)
+        await thread.send(content=mention_content, embed=embed, allowed_mentions=allowed)
 
 
 async def setup(bot: commands.Bot):
