@@ -44,6 +44,28 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
             best = max(best, 0.8)
     return best
 
+def _coerce_int(v) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+def _sid_title_from_result(r: dict) -> Tuple[Optional[int], str]:
+    rec = r.get("record") or {}
+    sid = (
+        r.get("series_id")
+        or r.get("id")
+        or rec.get("series_id")
+        or rec.get("id")
+    )
+    sid = _coerce_int(sid)
+    title = (
+        r.get("title")
+        or rec.get("title")
+        or "Unknown"
+    )
+    return sid, title
+
 
 def _is_english_release(rel: dict) -> bool:
 
@@ -225,8 +247,9 @@ class MUWatcher(commands.Cog):
         top = results[:5]
         scored: List[Tuple[dict, float, List[str]]] = []
         for r in top:
-            sid = r.get("series_id") or r.get("id")
-            title = r.get("title") or r.get("record", {}).get("title") or "Unknown"
+            sid, title = _sid_title_from_result(r)
+            if sid is None:
+                continue
             aliases: List[str] = []
             try:
                 full = await client.get_series(int(sid))
@@ -234,12 +257,15 @@ class MUWatcher(commands.Cog):
                 score = _best_match_score(series, title, aliases)
             except Exception:
                 score = _best_match_score(series, title, [])
-            scored.append((r, score, aliases))
+            scored.append(({"sid": sid, "title": title}, score, aliases))
+
+        if not scored:
+            return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
         scored.sort(key=lambda t: t[1], reverse=True)
         choice, score, aliases = scored[0]
-        sid = int(choice.get("series_id") or choice.get("id"))
-        title = choice.get("title") or "Unknown"
+        sid = int(choice["sid"])
+        title = choice["title"]
 
         gid = str(interaction.guild_id)
         g = self.state.setdefault(gid, {"entries": []})
@@ -448,9 +474,11 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            results_en = [r for r in results if _is_english_release(r)]
+            raw_results = rels.get("results", []) if isinstance(rels, dict) else rels
+            results_en = [r for r in raw_results or [] if _is_english_release(r)]
             if not results_en:
                 continue
+
 
             def _rid(x) -> Optional[int]:
                 v = x.get("id") or x.get("release_id")
