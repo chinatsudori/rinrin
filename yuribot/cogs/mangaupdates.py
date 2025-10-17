@@ -55,10 +55,9 @@ def _coerce_int(v) -> Optional[int]:
 def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
     sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
-    sid = str(sid) if sid is not None else None
+    sid = str(sid) if sid is not None else None  # keep as string
     title = r.get("title") or rec.get("title") or "Unknown"
     return sid, title
-
 
 
 def _stringify_aliases(raw) -> List[str]:
@@ -178,6 +177,9 @@ class MUClient:
             return await resp.json()
 
     async def get_series_releases(self, series_id: str, page: int = 1, per_page: int = 50) -> dict:
+        """
+        Single source of truth: GET /series/{id}/releases with light retry on 429/5xx.
+        """
         url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
         timeout = aiohttp.ClientTimeout(total=25)
@@ -207,6 +209,7 @@ class MUClient:
                 raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="timeout"))
 
         raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="unknown") + (f" ({last_txt})" if last_txt else ""))
+
 
 @dataclass
 class WatchEntry:
@@ -304,13 +307,12 @@ class MUWatcher(commands.Cog):
                 score = _best_match_score(series, title, [])
             scored.append(({"sid": sid, "title": title}, score, aliases))
 
-
         if not scored:
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
         scored.sort(key=lambda t: t[1], reverse=True)
         choice, score, aliases = scored[0]
-        sid = int(choice["sid"])
+        sid = choice["sid"]                 # keep as str
         title = choice["title"]
 
         gid = str(interaction.guild_id)
@@ -318,7 +320,7 @@ class MUWatcher(commands.Cog):
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != target_thread.id]
         g["entries"].append(
             {
-                "series_id": sid,
+                "series_id": sid,          # store as str
                 "series_title": title,
                 "aliases": aliases,
                 "forum_channel_id": target_thread.parent.id,
@@ -403,7 +405,7 @@ class MUWatcher(commands.Cog):
             return await interaction.followup.send(S("mu.check.not_linked"), ephemeral=True)
 
         we = WatchEntry(
-            series_id=int(entry["series_id"]),
+            series_id=str(entry["series_id"]),   # keep as str
             series_title=entry.get("series_title", "Unknown"),
             aliases=entry.get("aliases", []) or [],
             forum_channel_id=int(entry["forum_channel_id"]),
@@ -414,7 +416,7 @@ class MUWatcher(commands.Cog):
         session = await self._session_ensure()
         client = MUClient(session)
         try:
-            rels = await client.fetch_series_releases(we.series_id, page=1, per_page=25)
+            rels = await client.get_series_releases(we.series_id, page=1, per_page=25)
         except Exception as e:
             return await interaction.followup.send(S("mu.error.generic", msg=str(e)), ephemeral=True)
 
@@ -436,7 +438,7 @@ class MUWatcher(commands.Cog):
 
         top_new = []
         top_seen = we.last_release_id or 0
-        
+
         for r in results_en:
             rid = _rid(r)
             if rid is None:
@@ -489,7 +491,7 @@ class MUWatcher(commands.Cog):
             for e in blob.get("entries", []):
                 try:
                     we = WatchEntry(
-                        series_id=int(e["series_id"]),
+                        series_id=str(e["series_id"]),  # keep as str
                         series_title=e.get("series_title", "Unknown"),
                         aliases=e.get("aliases", []) or [],
                         forum_channel_id=int(e["forum_channel_id"]),
@@ -513,7 +515,7 @@ class MUWatcher(commands.Cog):
                 continue
 
             try:
-                rels = await client.fetch_series_releases(we.series_id, page=1, per_page=25)
+                rels = await client.get_series_releases(we.series_id, page=1, per_page=25)
             except Exception:
                 continue
 
