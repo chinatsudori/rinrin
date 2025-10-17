@@ -83,11 +83,6 @@ def _stringify_aliases(raw) -> List[str]:
 
 
 def _is_english_release(rel: dict) -> bool:
-    """
-    JSON results: look at language fields.
-    RSS results: we add 'lang_hint' (lowercased title+description); check for English markers there.
-    """
-    # JSON fields first
     def _is_en(s: str) -> bool:
         s = (s or "").strip().lower()
         return s in {"english", "en", "eng"}
@@ -111,13 +106,34 @@ def _is_english_release(rel: dict) -> bool:
         if any(_is_en(str(grp.get(f, ""))) for f in ("language", "lang", "name")):
             return True
 
-    # RSS fallback hint
-    hint = (rel.get("lang_hint") or "").lower()
-    if hint:
-        if any(x in hint for x in ("english", " eng ", "(eng)", "[eng]", " en ")):
-            return True
+    non_en_codes = {"es", "spa", "es-la", "pt", "pt-br", "fr", "fra", "id", "ind", "tr", "tur",
+                    "ar", "ara", "ru", "rus", "de", "ger", "vi", "vie", "th", "tha", "fil", "tl",
+                    "cn", "zh", "jp", "ja", "ko"}
+    for k in ("language", "lang", "lang_name"):
+        v = rel.get(k)
+        if isinstance(v, str) and v.strip().lower() in non_en_codes:
+            return False
 
-    return False
+    hint = " ".join(str(rel.get(k, "")) for k in ("title", "raw_title", "description")).lower()
+    hint += " " + (rel.get("lang_hint") or "")
+
+    non_en_keywords = {
+        "español", "espanol", "latino", "português", "portugues", "français", "francais",
+        "indonesia", "bahasa", "türkçe", "turkce", "العربية", "русский", "deutsch",
+        "tiếng việt", "vietnamese", "ไทย", "thai", "filipino", "tagalog",
+        "中文", "简体", "繁體", "日本語", "raw japanese", "한국어", "korean",
+        "(es)", "[es]", "(pt)", "[pt]", "(fr)", "[fr]", "(id)", "[id]", "(tr)", "[tr]",
+        "(ar)", "(ru)", "(de)", "(vi)", "(th)", "(tl)", "(cn)", "(jp)", "(ja)", "(ko)"
+    }
+
+    if any(tok in hint for tok in non_en_keywords):
+        return False
+
+    if any(tok in hint for tok in {" english", "(eng)", "[eng]", " en "}):
+        return True
+
+    return True
+
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
