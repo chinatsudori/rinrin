@@ -66,6 +66,26 @@ def _sid_title_from_result(r: dict) -> Tuple[Optional[int], str]:
     )
     return sid, title
 
+def _stringify_aliases(raw) -> List[str]:
+    """Normalize MU alias lists to a de-duplicated list[str]."""
+    out: List[str] = []
+    for x in (raw or []):
+        if isinstance(x, str):
+            s = x.strip()
+        elif isinstance(x, dict):
+            s = (x.get("name") or x.get("title") or x.get("value") or x.get("text") or "").strip()
+        else:
+            s = ""
+        if s:
+            out.append(s)
+    seen = set()
+    uniq: List[str] = []
+    for s in out:
+        k = s.casefold()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(s)
+    return uniq
 
 def _is_english_release(rel: dict) -> bool:
 
@@ -253,8 +273,15 @@ class MUWatcher(commands.Cog):
             aliases: List[str] = []
             try:
                 full = await client.get_series(int(sid))
-                aliases = full.get("associated_names", []) or full.get("associated", []) or []
+                raw_aliases = (
+                    full.get("associated_names")
+                    or full.get("associated")
+                    or full.get("associated_names_ascii")
+                    or []
+                )
+                aliases = _stringify_aliases(raw_aliases)
                 score = _best_match_score(series, title, aliases)
+
             except Exception:
                 score = _best_match_score(series, title, [])
             scored.append(({"sid": sid, "title": title}, score, aliases))
