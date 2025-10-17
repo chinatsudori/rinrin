@@ -374,7 +374,41 @@ _STRINGS.update({
     "move_any.summary_deleted_tail":  "Deleted original: {deleted}.",
     "move_any.reply.header": "Replying to **{author}** · {jump}\n> {snippet}",
     "move_any.reply.attach_only": "(attachment)",
+    # Link / Unlink / Status
+    "mu.link.need_forum": "Please run this inside a **Forum post** or pass the `thread:` option with a forum post.",
+    "mu.link.no_results": "No results on MangaUpdates for **{q}**.",
+    "mu.link.no_aliases": "—",
+    "mu.link.linked_ok": "Linked **{title}** (id `{sid}`) to forum post **{thread}**.\nAliases: {aliases}",
+    "mu.unlink.need_thread": "Run this inside a forum post, or pass a `thread:` to choose one.",
+    "mu.unlink.done": "Unlinked **{count}** mapping(s).",
+    "mu.status.none": "No threads are currently linked.",
+    "mu.status.line": "- **{title}** (`{sid}`) → {thread}",
+
+    # Check
+    "mu.check.need_thread": "Use this inside a **forum post thread**, or pass `thread:`.",
+    "mu.check.not_linked": "This thread is not linked to any MangaUpdates series. Use `/mu link` here.",
+    "mu.check.posted": "Posted **{count}** new release(s).",
+    "mu.check.no_new": "No new releases — posted the latest known chapter instead.",
+
+    # Releases & Latest
+    "mu.release.generic": "New release",
+    "mu.release.group": "Group: **{group}**",
+    "mu.release.date_rel": "Date: <t:{ts}:D>",
+    "mu.release.date_raw": "Date: {date}",
+    "mu.release.title": "{series} — {chbits}",
+    "mu.release.footer": "MangaUpdates • Release ID {rid}",
+
+    "mu.latest.title": "{series} — Latest: {chbits}",
+    "mu.latest.footer": "Latest known (no new releases)",
+
+    # Errors
+    "mu.error.generic": "MangaUpdates error: {msg}",
+    "mu.error.no_releases": "No releases were found for that series.",
+    "mu.error.search_http": "MangaUpdates search failed (HTTP {code}).",
+    "mu.error.series_http": "MangaUpdates series {sid} failed (HTTP {code}).",
+    "mu.error.releases_http": "MangaUpdates releases for {sid} failed (HTTP {code}).",
 })
+
 
 
 
