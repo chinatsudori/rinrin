@@ -174,13 +174,44 @@ class MUClient:
                 raise RuntimeError(S("mu.error.series_http", sid=series_id, code=resp.status))
             return await resp.json()
 
-    async def get_releases_for_series(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
+    async def fetch_series_releases(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
+        """
+        Prefer POST /releases/search (more stable) and fall back to GET /series/{id}/releases.
+        Retries once on 5xx.
+        """
+        timeout = aiohttp.ClientTimeout(total=25)
+
+        async def _post_once() -> Optional[dict]:
+            url = f"{API_BASE}/releases/search"
+            payload = {
+                "page": page,
+                "per_page": per_page,
+                "sort": "id",
+                "order": "desc",
+                "search": {"series_id": int(series_id)},
+            }
+            async with self.session.post(url, json=payload, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                if 500 <= resp.status <= 599:
+                    return None
+                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status))
+
+        data = await _post_once()
+        if data is None:
+            await asyncio.sleep(1.0)
+            data = await _post_once()
+
+        if data is not None:
+            return data
+
         url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
-        async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        async with self.session.get(url, params=params, timeout=timeout) as resp:
             if resp.status != 200:
                 raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status))
             return await resp.json()
+
 
 
 @dataclass
