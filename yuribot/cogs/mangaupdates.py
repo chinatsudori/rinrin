@@ -119,13 +119,58 @@ def _rid(x) -> Optional[int]:
         return None
 
 
+# ---------- NEW: robust chapter/volume extraction helpers ----------
+
+_CH_PATTERNS = [
+    r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",  # ch 25 / c25 / ch.25
+    r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",  # 21-25 / 21–25 / 21—25
+]
+_VOL_PATTERNS = [
+    r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",   # v5 / vol 5
+]
+
+def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
+    nums: List[float] = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, flags=re.I):
+            groups = [g for g in m.groups() if g]
+            for g in groups:
+                try:
+                    nums.append(float(g))
+                except Exception:
+                    pass
+    return nums
+
+def _extract_max_chapter(text: str) -> Tuple[str, str]:
+    """Return (chapter, subchapter) choosing the MAX chapter mentioned (handles ranges & decimals)."""
+    nums = _find_all_numbers(text, _CH_PATTERNS)
+    if not nums:
+        return "", ""
+    mx = max(nums)
+    s = f"{mx}".rstrip("0").rstrip(".")  # keep 25.5, but 25.0 -> 25
+    if "." in s:
+        ch, sub = s.split(".", 1)
+        return ch, sub
+    return s, ""
+
+def _extract_max_volume(text: str) -> str:
+    nums = _find_all_numbers(text, _VOL_PATTERNS)
+    if not nums:
+        return ""
+    mx = max(nums)
+    s = f"{mx}".rstrip("0").rstrip(".")
+    return s
+
+# ------------------------------------------------------------------
+
+
 def _has_ch(x) -> int:
     """Return 1 if release looks like a chapter (not just volume)."""
     if x.get("chapter"):
         return 1
-    title = f"{x.get('title','')} {x.get('raw_title','')}".lower()
-    # match c25, c.25, ch 25, ch.25, chapter 25, with optional decimals
-    return 1 if re.search(r"\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?\b", title) else 0
+    title = f"{x.get('title','')} {x.get('raw_title','')} {x.get('description','')}".lower()
+    # match c25, c.25, ch 25, chapter 25, or ranges 21-25 (etc), with optional decimals
+    return 1 if re.search(r"(?:\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?\b)|(\b\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\b)", title) else 0
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
@@ -147,21 +192,10 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
         tl = title_str.lower()
 
         if not vol:
-            # v5, vol 5, volume 5
-            mv = re.search(r"\b(?:v|vol(?:ume)?)\.?\s*([0-9]+(?:\.[0-9]+)?)\b", tl)
-            if mv:
-                vol = mv.group(1)
+            vol = _extract_max_volume(tl)
 
         if not ch:
-            # c25, ch 25, chapter 25, ch.25
-            mc = re.search(r"\b(?:c|ch(?:apter)?)\.?\s*([0-9]+(?:\.[0-9]+)?)\b", tl)
-            if mc:
-                ch = mc.group(1)
-
-        # If chapter includes decimal, split to ch/sub
-        if ch and "." in ch and not sub:
-            base, frac = ch.split(".", 1)
-            ch, sub = base, frac
+            ch, sub = _extract_max_chapter(tl)
 
     bits = []
     if vol:
@@ -355,12 +389,10 @@ class MUClient:
                 ts = None
 
             raw = f"{title} {desc}".strip()
-            # ✅ Accept c###, ch ###, chapter ### (with optional decimals)
-            m_ch = re.search(r"(?:c|ch(?:apter)?)\.?\s*([0-9]+(?:\.[0-9]+)?)", raw, re.I)
-            m_vol = re.search(r"(?:v|vol(?:ume)?)\.?\s*([0-9]+(?:\.[0-9]+)?)", raw, re.I)
 
-            chapter = m_ch.group(1) if m_ch else ""
-            volume = m_vol.group(1) if m_vol else ""
+            # NEW: take the HIGHEST chapter/volume mentioned (ranges, multiple mentions, decimals)
+            chapter, subchapter = _extract_max_chapter(raw)
+            volume = _extract_max_volume(raw)
 
             m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
             group = (m_group.group(1).strip() if m_group else "")
@@ -379,7 +411,7 @@ class MUClient:
                 "release_id": rid,
                 "chapter": chapter or "",
                 "volume": volume or "",
-                "subchapter": "",
+                "subchapter": subchapter or "",
                 "group": group or "",
                 "url": link or "",
                 "release_date": (datetime.utcfromtimestamp(ts).isoformat() + "Z") if ts else "",
@@ -752,7 +784,7 @@ class MUWatcher(commands.Cog):
         rid = rel.get("id") or rel.get("release_id")
         chbits, extras = _format_rel_bits(rel)
 
-        # Ping @here only for items that look like CHAPTERS
+        # Ping @here only for items that look like CHAPTERS (and note: this method is only used for *new* posts)
         mention_content = "@here" if _has_ch(rel) else None
         allowed = discord.AllowedMentions(everyone=True) if mention_content else discord.AllowedMentions.none()
 
