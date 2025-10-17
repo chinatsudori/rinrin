@@ -44,11 +44,13 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
             best = max(best, 0.8)
     return best
 
+
 def _coerce_int(v) -> Optional[int]:
     try:
         return int(v)
     except Exception:
         return None
+
 
 def _sid_title_from_result(r: dict) -> Tuple[Optional[int], str]:
     rec = r.get("record") or {}
@@ -65,6 +67,7 @@ def _sid_title_from_result(r: dict) -> Tuple[Optional[int], str]:
         or "Unknown"
     )
     return sid, title
+
 
 def _stringify_aliases(raw) -> List[str]:
     """Normalize MU alias lists to a de-duplicated list[str]."""
@@ -87,8 +90,8 @@ def _stringify_aliases(raw) -> List[str]:
             uniq.append(s)
     return uniq
 
-def _is_english_release(rel: dict) -> bool:
 
+def _is_english_release(rel: dict) -> bool:
     def _is_en(s: str) -> bool:
         s = (s or "").strip().lower()
         return s in {"english", "en", "eng"}
@@ -213,7 +216,6 @@ class MUClient:
             return await resp.json()
 
 
-
 @dataclass
 class WatchEntry:
     series_id: int
@@ -241,7 +243,6 @@ def _save_state(state: Dict[str, dict]) -> None:
 
 
 class MUWatcher(commands.Cog):
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.state = _load_state()
@@ -257,7 +258,7 @@ class MUWatcher(commands.Cog):
 
     async def _session_ensure(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers={"User-Agent": "rinrin/1.0 (discord bot)"})
         return self._session
 
     group = app_commands.Group(name="mu", description="MangaUpdates watcher")
@@ -312,7 +313,6 @@ class MUWatcher(commands.Cog):
                 )
                 aliases = _stringify_aliases(raw_aliases)
                 score = _best_match_score(series, title, aliases)
-
             except Exception:
                 score = _best_match_score(series, title, [])
             scored.append(({"sid": sid, "title": title}, score, aliases))
@@ -426,7 +426,7 @@ class MUWatcher(commands.Cog):
         session = await self._session_ensure()
         client = MUClient(session)
         try:
-            rels = await client.get_releases_for_series(we.series_id, page=1, per_page=25)
+            rels = await client.fetch_series_releases(we.series_id, page=1, per_page=25)
         except Exception as e:
             return await interaction.followup.send(S("mu.error.generic", msg=str(e)), ephemeral=True)
 
@@ -448,6 +448,7 @@ class MUWatcher(commands.Cog):
 
         top_new = []
         top_seen = we.last_release_id or 0
+        
         for r in results_en:
             rid = _rid(r)
             if rid is None:
@@ -524,7 +525,7 @@ class MUWatcher(commands.Cog):
                 continue
 
             try:
-                rels = await client.get_releases_for_series(we.series_id, page=1, per_page=25)
+                rels = await client.fetch_series_releases(we.series_id, page=1, per_page=25)
             except Exception:
                 continue
 
@@ -532,11 +533,10 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            raw_results = rels.get("results", []) if isinstance(rels, dict) else rels
-            results_en = [r for r in raw_results or [] if _is_english_release(r)]
+            # English-only
+            results_en = [r for r in results if _is_english_release(r)]
             if not results_en:
                 continue
-
 
             def _rid(x) -> Optional[int]:
                 v = x.get("id") or x.get("release_id")
