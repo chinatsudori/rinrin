@@ -159,79 +159,78 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
 class MUClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
+        self._headers = {
+            "Accept": "application/json",
+            "User-Agent": "rinrin/1.0 (+discord bot; contact: you@example.com)"
+        }
 
     async def search_series(self, term: str) -> List[dict]:
         url = f"{API_BASE}/series/search"
         payload = {"search": term}
-        async with self.session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        async with self.session.post(
+            url, json=payload,
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers=self._headers
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError(S("mu.error.search_http", code=resp.status))
             data = await resp.json()
-        return (data.get("results", data) if isinstance(data, dict) else data) or []
+        results = data.get("results", data) if isinstance(data, dict) else data
+        return results or []
 
     async def get_series(self, series_id: int) -> dict:
         url = f"{API_BASE}/series/{series_id}"
-        async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        async with self.session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers=self._headers
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError(S("mu.error.series_http", sid=series_id, code=resp.status))
             return await resp.json()
 
     async def fetch_series_releases(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
-        timeout = aiohttp.ClientTimeout(total=25)
-        sid_int = int(series_id)
 
-        async def _post(payload) -> Optional[dict]:
-            url = f"{API_BASE}/releases/search"
-            async with self.session.post(url, json=payload, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                if resp.status in (400, 404, 422) or 500 <= resp.status <= 599:
-                    return None  # try next shape / fallback
-                try:
-                    txt = await resp.text()
-                except Exception:
-                    txt = ""
-                raise RuntimeError(
-                    S("mu.error.releases_http", sid=series_id, code=resp.status)
-                    + (f" ({txt[:120]})" if txt else "")
-                )
-
-        base = {"page": page, "per_page": per_page, "sort": "id", "order": "desc"}
-        shapes = [
-            {**base, "search": {"series_id": sid_int}},
-            {**base, "search": {"series_id": str(sid_int)}},
-            {**base, "search": {"series_id": [sid_int]}},
-            {**base, "search": {"series": sid_int}},
-            {**base, "search": {"series": str(sid_int)}},
-        ]
-
-        for payload in shapes:
-            data = await _post(payload)
-            if data is not None:
-                return data
-        await asyncio.sleep(0.5)
-        for payload in shapes:
-            data = await _post(payload)
-            if data is not None:
-                return data
-
-        url = f"{API_BASE}/series/{sid_int}/releases"
+        url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
-        async with self.session.get(url, params=params, timeout=timeout) as resp:
-            if resp.status == 200:
-                return await resp.json()
+
+        timeout = aiohttp.ClientTimeout(total=25)
+        attempts = 3
+        last_txt = ""
+        for i in range(1, attempts + 1):
             try:
-                txt = await resp.text()
-            except Exception:
-                txt = ""
-            raise RuntimeError(
-                S("mu.error.releases_http", sid=series_id, code=resp.status)
-                + (f" ({txt[:120]})" if txt else "")
-            )
+                async with self.session.get(
+                    url, params=params, timeout=timeout, headers=self._headers
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
 
-    async def get_releases_for_series(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
-        return await self.fetch_series_releases(series_id, page, per_page)
+                    if resp.status in (429, 500, 502, 503, 504):
+                        try:
+                            last_txt = (await resp.text())[:200]
+                        except Exception:
+                            last_txt = ""
+                        await asyncio.sleep(0.8 * i)
+                        continue
 
+                    try:
+                        last_txt = (await resp.text())[:200]
+                    except Exception:
+                        last_txt = ""
+                    raise RuntimeError(
+                        S("mu.error.releases_http", sid=series_id, code=resp.status)
+                        + (f" ({last_txt})" if last_txt else "")
+                    )
+            except asyncio.TimeoutError:
+                if i < attempts:
+                    await asyncio.sleep(0.8 * i)
+                    continue
+                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code="timeout"))
+
+        raise RuntimeError(
+            S("mu.error.releases_http", sid=series_id, code="unknown")
+            + (f" ({last_txt})" if last_txt else "")
+        )
 
 @dataclass
 class WatchEntry:
