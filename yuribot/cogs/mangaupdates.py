@@ -177,43 +177,55 @@ class MUClient:
                 raise RuntimeError(S("mu.error.series_http", sid=series_id, code=resp.status))
             return await resp.json()
 
-    async def fetch_series_releases(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
+        async def fetch_series_releases(self, series_id: int, page: int = 1, per_page: int = 50) -> dict:
         """
-        Prefer POST /releases/search (more stable) and fall back to GET /series/{id}/releases.
-        Retries once on 5xx.
+        Robust fetch: try POST /releases/search with a few payload shapes,
+        fall back to GET /series/{id}/releases. Retries once before fallback.
         """
         timeout = aiohttp.ClientTimeout(total=25)
 
-        async def _post_once() -> Optional[dict]:
+        async def _post(payload) -> Optional[dict]:
             url = f"{API_BASE}/releases/search"
-            payload = {
-                "page": page,
-                "per_page": per_page,
-                "sort": "id",
-                "order": "desc",
-                "search": {"series_id": int(series_id)},
-            }
             async with self.session.post(url, json=payload, timeout=timeout) as resp:
                 if resp.status == 200:
                     return await resp.json()
-                if 500 <= resp.status <= 599:
+                if resp.status in (400, 404, 422) or 500 <= resp.status <= 599:
                     return None
-                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status))
+                try:
+                    txt = await resp.text()
+                except Exception:
+                    txt = ""
+                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status) + (f" ({txt[:120]})" if txt else ""))
 
-        data = await _post_once()
-        if data is None:
-            await asyncio.sleep(1.0)
-            data = await _post_once()
+        base = {"page": page, "per_page": per_page, "sort": "id", "order": "desc"}
+        tries = [
+            {**base, "search": {"series_id": int(series_id)}},
+            {**base, "search": {"series_id": str(series_id)}},
+            {**base, "search": {"series_id": [int(series_id)]}},
+        ]
 
-        if data is not None:
-            return data
+        for payload in tries:
+            data = await _post(payload)
+            if data is not None:
+                return data
+
+        await asyncio.sleep(1.0)
+        for payload in tries:
+            data = await _post(payload)
+            if data is not None:
+                return data
 
         url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
         async with self.session.get(url, params=params, timeout=timeout) as resp:
-            if resp.status != 200:
-                raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status))
-            return await resp.json()
+            if resp.status == 200:
+                return await resp.json()
+            try:
+                txt = await resp.text()
+            except Exception:
+                txt = ""
+            raise RuntimeError(S("mu.error.releases_http", sid=series_id, code=resp.status) + (f" ({txt[:120]})" if txt else ""))
+
 
 
 @dataclass
