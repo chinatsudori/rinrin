@@ -48,13 +48,6 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
     return best
 
 
-def _coerce_int(v) -> Optional[int]:
-    try:
-        return int(v)
-    except Exception:
-        return None
-
-
 def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
     sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
@@ -85,56 +78,23 @@ def _stringify_aliases(raw) -> List[str]:
     return uniq
 
 
-def _is_english_release(rel: dict) -> bool:
-    """Kept for future use; no-op when FILTER_ENGLISH_ONLY=False."""
-    def _is_en(s: str) -> bool:
-        s = (s or "").strip().lower()
-        return s in {"english", "en", "eng"}
-
-    for k in ("language", "lang", "lang_name"):
-        v = rel.get(k)
-        if isinstance(v, str) and _is_en(v):
-            return True
-
-    v = rel.get("languages") or rel.get("langs")
-    if isinstance(v, list):
-        for item in v:
-            if isinstance(item, str) and _is_en(item):
-                return True
-            if isinstance(item, dict):
-                if any(_is_en(str(item.get(f, ""))) for f in ("name", "code", "lang", "language")):
-                    return True
-    grp = rel.get("group") or rel.get("group_name") or {}
-    if isinstance(grp, dict):
-        if any(_is_en(str(grp.get(f, ""))) for f in ("language", "lang", "name")):
-            return True
-    return False
-
-
-def _rid(x) -> Optional[int]:
-    v = x.get("id") or x.get("release_id")
-    try:
-        return int(v)
-    except Exception:
-        return None
-
-
-# ---------- NEW: robust chapter/volume extraction helpers ----------
+# ---------------- chapter/volume parsing ----------------
 
 _CH_PATTERNS = [
-    r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",  # ch 25 / c25 / ch.25
-    r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",  # 21-25 / 21–25 / 21—25
+    r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",      # ch 25 / c25 / ch.25
+    r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",     # 21-25 / 21–25
 ]
 _VOL_PATTERNS = [
-    r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",   # v5 / vol 5
+    r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",      # v5 / vol 5
 ]
 
 def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
     nums: List[float] = []
     for pat in patterns:
         for m in re.finditer(pat, text, flags=re.I):
-            groups = [g for g in m.groups() if g]
-            for g in groups:
+            for g in m.groups():
+                if not g:
+                    continue
                 try:
                     nums.append(float(g))
                 except Exception:
@@ -142,12 +102,12 @@ def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
     return nums
 
 def _extract_max_chapter(text: str) -> Tuple[str, str]:
-    """Return (chapter, subchapter) choosing the MAX chapter mentioned (handles ranges & decimals)."""
+    """Return (chapter, subchapter) choosing the MAX chapter mentioned (ranges & decimals supported)."""
     nums = _find_all_numbers(text, _CH_PATTERNS)
     if not nums:
         return "", ""
     mx = max(nums)
-    s = f"{mx}".rstrip("0").rstrip(".")  # keep 25.5, but 25.0 -> 25
+    s = f"{mx}".rstrip("0").rstrip(".")
     if "." in s:
         ch, sub = s.split(".", 1)
         return ch, sub
@@ -158,31 +118,61 @@ def _extract_max_volume(text: str) -> str:
     if not nums:
         return ""
     mx = max(nums)
-    s = f"{mx}".rstrip("0").rstrip(".")
-    return s
+    return f"{mx}".rstrip("0").rstrip(".")
 
-# ------------------------------------------------------------------
+# -------------------------------------------------------
+
+
+def _parse_ts(value: Optional[str]) -> Optional[int]:
+    """Parse an ISO/RFC date string to epoch seconds; return None if unknown."""
+    if not value:
+        return None
+    try:
+        # Accept "Z"
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    except Exception:
+        pass
+    # RSS often uses pubDate (RFC2822)
+    try:
+        import email.utils as eut
+        dt = eut.parsedate_to_datetime(str(value))
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
+def _release_ts(rel: dict) -> int:
+    """Uniform accessor; unknown timestamps sort as very old."""
+    v = rel.get("release_ts")
+    if isinstance(v, (int, float)):
+        return int(v)
+    # try canonical fields
+    for key in ("release_date", "date", "pubDate", "pubdate"):
+        if key in rel and rel[key]:
+            ts = _parse_ts(rel[key])
+            if ts is not None:
+                return ts
+    return -1  # unknown -> treat as oldest
 
 
 def _has_ch(x) -> int:
     """Return 1 if release looks like a chapter (not just volume)."""
-    if x.get("chapter"):
+    if _strip(str(x.get("chapter") or "")):
         return 1
     title = f"{x.get('title','')} {x.get('raw_title','')} {x.get('description','')}".lower()
-    # match c25, c.25, ch 25, chapter 25, or ranges 21-25 (etc), with optional decimals
-    return 1 if re.search(r"(?:\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?\b)|(\b\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\b)", title) else 0
+    return 1 if re.search(r"(?:\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?)|(\b\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\b)", title) else 0
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     """
     Build a 'vX • ch Y • Z' string. If structured fields are missing,
-    fall back to parsing from title/description (handles decimals like 25.5).
+    fall back to parsing from title/description (handles ranges like 21–25 and decimals).
     """
     vol = _strip(str(rel.get("volume") or ""))
     ch = _strip(str(rel.get("chapter") or ""))
     sub = _strip(str(rel.get("subchapter") or ""))
 
-    # Fallback parse from textual title/desc if needed
     if not (vol or ch):
         title_str = " ".join([
             str(rel.get("title", "")),
@@ -190,10 +180,8 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
             str(rel.get("description", "")),
         ])
         tl = title_str.lower()
-
         if not vol:
             vol = _extract_max_volume(tl)
-
         if not ch:
             ch, sub = _extract_max_chapter(tl)
 
@@ -207,21 +195,19 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
 
     chbits = " • ".join(bits) if bits else S("mu.release.generic")
 
-    # group name (robust across shapes)
     group_raw = rel.get("group") or rel.get("group_name") or ""
     if isinstance(group_raw, dict):
         group = _strip(group_raw.get("name") or group_raw.get("group_name") or "")
     else:
         group = _strip(str(group_raw))
 
-    # url (robust)
     url = _strip(rel.get("url") or rel.get("release_url") or rel.get("link") or "")
 
     extras = []
     if group:
         extras.append(S("mu.release.group", group=discord.utils.escape_markdown(group)))
 
-    rdate = rel.get("release_date") or rel.get("date") or rel.get("pubDate")
+    rdate = rel.get("release_date") or rel.get("date") or rel.get("pubDate") or rel.get("pubdate")
     if rdate:
         try:
             dt = datetime.fromisoformat(str(rdate).replace("Z", "+00:00"))
@@ -242,7 +228,6 @@ class MUClient:
             "Accept": "application/json, text/plain, */*",
             "User-Agent": "rinrin/1.0 (+discord bot; contact: you@example.com)",
         }
-        # Helps avoid weird "OPTIONS only" responses from their WAF/CDN
         self._corsish = {
             "Origin": "https://www.mangaupdates.com",
             "Referer": "https://www.mangaupdates.com/",
@@ -279,15 +264,12 @@ class MUClient:
     async def get_series_releases(self, series_id: str, page: int = 1, per_page: int = 50) -> dict:
         """
         Try JSON endpoint; on failure, fall back to RSS and convert to JSON-like.
-        Retries on 429/5xx/timeouts before RSS fallback.
         """
         timeout = aiohttp.ClientTimeout(total=25)
 
-        # 1) Try GET /series/{id}/releases
         get_url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
 
-        last_txt = ""
         for i in range(1, 4):
             try:
                 async with self.session.get(
@@ -297,34 +279,26 @@ class MUClient:
                     headers=self._headers,
                 ) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        data = await resp.json()
+                        # normalize timestamps if present
+                        for r in data.get("results", []) if isinstance(data, dict) else []:
+                            ts = _parse_ts(r.get("release_date") or r.get("date"))
+                            if ts is not None:
+                                r["release_ts"] = ts
+                        return data
                     if resp.status in (429, 500, 502, 503, 504):
-                        try:
-                            last_txt = (await resp.text())[:300]
-                        except Exception:
-                            last_txt = ""
                         await asyncio.sleep(0.8 * i)
                         continue
-                    try:
-                        last_txt = (await resp.text())[:300]
-                    except Exception:
-                        last_txt = ""
-                    # hard 4xx or odd body -> try RSS next
                     break
             except asyncio.TimeoutError:
                 if i < 3:
                     await asyncio.sleep(0.8 * i)
                     continue
-                break  # fallback to RSS
+                break
 
-        # 2) Fallback to RSS
         return await self.get_series_releases_via_rss(series_id, limit=per_page)
 
     async def get_series_releases_via_rss(self, series_id: str | int, *, limit: int = 50) -> dict:
-        """
-        Fetch the series release RSS and convert to a JSON-ish structure that matches
-        what the rest of the code expects: {"results": [release, ...]}.
-        """
         url = f"{API_BASE}/series/{series_id}/rss"
         timeout = aiohttp.ClientTimeout(total=20)
 
@@ -351,7 +325,6 @@ class MUClient:
             xml_text_clean = xml_text.lstrip("\ufeff").strip()
             root = ET.fromstring(xml_text_clean)
 
-        # Find <channel>
         channel = None
         if root.tag.lower().endswith("rss"):
             channel = next((c for c in root if c.tag.lower().endswith("channel")), None)
@@ -379,7 +352,6 @@ class MUClient:
             desc = _text(it, "description")
             pub = _text(it, "pubdate") or _text(it, "pubDate")
 
-            # pubDate -> epoch
             ts = None
             try:
                 dt = eut.parsedate_to_datetime(pub) if pub else None
@@ -390,14 +362,12 @@ class MUClient:
 
             raw = f"{title} {desc}".strip()
 
-            # NEW: take the HIGHEST chapter/volume mentioned (ranges, multiple mentions, decimals)
             chapter, subchapter = _extract_max_chapter(raw)
             volume = _extract_max_volume(raw)
 
             m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
             group = (m_group.group(1).strip() if m_group else "")
 
-            # synthetic id: numeric from link if available, else pubDate, else hash
             rid = None
             if link:
                 m_id_in_link = re.search(r"(\d{6,})", link)
@@ -415,6 +385,7 @@ class MUClient:
                 "group": group or "",
                 "url": link or "",
                 "release_date": (datetime.utcfromtimestamp(ts).isoformat() + "Z") if ts else "",
+                "release_ts": ts if ts is not None else -1,
                 "title": title or "",
                 "raw_title": title or "",
                 "description": desc or "",
@@ -431,7 +402,8 @@ class WatchEntry:
     aliases: List[str]
     forum_channel_id: int
     thread_id: int
-    last_release_id: Optional[int] = None
+    last_release_id: Optional[int] = None      # kept for backward compat (unused for logic now)
+    last_release_ts: Optional[int] = None      # NEW: what we actually compare
 
 
 def _load_state() -> Dict[str, dict]:
@@ -511,7 +483,7 @@ class MUWatcher(commands.Cog):
                 continue
             aliases = []
             try:
-                full = await client.get_series(sid)  # validate and also fetch aliases
+                full = await client.get_series(sid)
                 raw_aliases = full.get("associated_names") or full.get("associated") or full.get("associated_names_ascii") or []
                 aliases = _stringify_aliases(raw_aliases)
                 score = _best_match_score(series, title, aliases)
@@ -524,20 +496,21 @@ class MUWatcher(commands.Cog):
 
         scored.sort(key=lambda t: t[1], reverse=True)
         choice, score, aliases = scored[0]
-        sid = choice["sid"]  # keep as str
+        sid = choice["sid"]
         title = choice["title"]
 
         gid = str(interaction.guild_id)
         g = self.state.setdefault(gid, {"entries": []})
-        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != target_thread.id]
+        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != (target_thread.id if target_thread else -1)]
         g["entries"].append(
             {
-                "series_id": sid,  # store as str
+                "series_id": sid,
                 "series_title": title,
                 "aliases": aliases,
                 "forum_channel_id": target_thread.parent.id,
                 "thread_id": target_thread.id,
                 "last_release_id": None,
+                "last_release_ts": None,
             }
         )
         _save_state(self.state)
@@ -617,12 +590,13 @@ class MUWatcher(commands.Cog):
             return await interaction.followup.send(S("mu.check.not_linked"), ephemeral=True)
 
         we = WatchEntry(
-            series_id=str(entry["series_id"]),   # keep as str
+            series_id=str(entry["series_id"]),
             series_title=entry.get("series_title", "Unknown"),
             aliases=entry.get("aliases", []) or [],
             forum_channel_id=int(entry["forum_channel_id"]),
             thread_id=int(entry["thread_id"]),
             last_release_id=entry.get("last_release_id"),
+            last_release_ts=entry.get("last_release_ts"),
         )
 
         session = await self._session_ensure()
@@ -636,36 +610,37 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # Use language filter only if enabled
+        # normalize timestamps for JSON path if missing
+        for r in results:
+            if "release_ts" not in r or r["release_ts"] is None:
+                ts = _release_ts(r)
+                r["release_ts"] = ts
+
         use = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
         if not use:
             msg_key = "mu.error.no_releases_lang" if FILTER_ENGLISH_ONLY else "mu.error.no_releases"
             return await interaction.followup.send(S(msg_key), ephemeral=True)
 
-        top_new = []
-        top_seen = we.last_release_id or 0
+        # Determine new items by timestamp
+        last_ts = we.last_release_ts or -1
+        new_items = [r for r in use if _release_ts(r) > last_ts]
 
-        for r in use:
-            rid = _rid(r)
-            if rid is None:
-                continue
-            top_seen = max(top_seen, rid)
-            if we.last_release_id is None or rid > (we.last_release_id or 0):
-                top_new.append(r)
-
-        if top_new:
-            # Prefer chapters first
-            for r in sorted(top_new, key=lambda x: (-_has_ch(x), _rid(x) or 0)):
+        if new_items:
+            # Post oldest -> newest; ping @here only for chapters
+            for r in sorted(new_items, key=lambda x: _release_ts(x)):
                 await self._post_release(tgt, we, r)
 
+            # update state with newest ts
+            top_seen_ts = max(_release_ts(r) for r in use)
             for e in self.state[gid]["entries"]:
                 if int(e.get("thread_id")) == we.thread_id:
-                    e["last_release_id"] = top_seen
+                    e["last_release_ts"] = top_seen_ts
                     break
             _save_state(self.state)
-            return await interaction.followup.send(S("mu.check.posted", count=len(top_new)), ephemeral=True)
+            return await interaction.followup.send(S("mu.check.posted", count=len(new_items)), ephemeral=True)
 
-        latest = max(use, key=lambda x: _rid(x) or 0)
+        # No new — post latest known (by timestamp)
+        latest = max(use, key=lambda x: _release_ts(x))
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
             title=S("mu.latest.title", series=we.series_title, chbits=chbits),
@@ -679,10 +654,10 @@ class MUWatcher(commands.Cog):
         except Exception:
             pass
 
-        if we.last_release_id is None:
+        if we.last_release_ts is None:
             for e in self.state[gid]["entries"]:
                 if int(e.get("thread_id")) == we.thread_id:
-                    e["last_release_id"] = _rid(latest)
+                    e["last_release_ts"] = _release_ts(latest)
                     break
             _save_state(self.state)
 
@@ -698,12 +673,13 @@ class MUWatcher(commands.Cog):
             for e in blob.get("entries", []):
                 try:
                     we = WatchEntry(
-                        series_id=str(e["series_id"]),  # keep as str
+                        series_id=str(e["series_id"]),
                         series_title=e.get("series_title", "Unknown"),
                         aliases=e.get("aliases", []) or [],
                         forum_channel_id=int(e["forum_channel_id"]),
                         thread_id=int(e["thread_id"]),
                         last_release_id=e.get("last_release_id"),
+                        last_release_ts=e.get("last_release_ts"),
                     )
                 except Exception:
                     continue
@@ -730,43 +706,43 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
+            for r in results:
+                if "release_ts" not in r or r["release_ts"] is None:
+                    r["release_ts"] = _release_ts(r)
+
             scan = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
             if not scan:
                 continue
 
-            new_items = []
-            top_seen = we.last_release_id or 0
-            for r in scan:
-                rid = _rid(r)
-                if rid is None:
-                    continue
-                top_seen = max(top_seen, rid)
-                if we.last_release_id is None or rid > we.last_release_id:
-                    new_items.append(r)
+            last_ts = we.last_release_ts or -1
+            new_items = [r for r in scan if _release_ts(r) > last_ts]
 
             gid_str = str(gid)
             guild_blob = self.state.setdefault(gid_str, {"entries": []})
 
-            if we.last_release_id is None:
+            if we.last_release_ts is None:
+                # initialize to newest ts silently
+                init_ts = max((_release_ts(r) for r in scan), default=-1)
                 for ee in guild_blob["entries"]:
                     if int(ee["thread_id"]) == we.thread_id:
-                        ee["last_release_id"] = top_seen
+                        ee["last_release_ts"] = init_ts
                         break
                 _save_state(self.state)
                 continue
 
-            # Prefer chapters first
-            for r in sorted(new_items, key=lambda x: (-_has_ch(x), _rid(x) or 0)):
+            for r in sorted(new_items, key=lambda x: _release_ts(x)):
                 try:
                     await self._post_release(thread, we, r)
                 except Exception:
                     pass
 
-            for ee in guild_blob["entries"]:
-                if int(ee["thread_id"]) == we.thread_id:
-                    ee["last_release_id"] = top_seen
-                    break
-            _save_state(self.state)
+            if new_items:
+                top_seen_ts = max((_release_ts(r) for r in scan), default=we.last_release_ts or -1)
+                for ee in guild_blob["entries"]:
+                    if int(ee["thread_id"]) == we.thread_id:
+                        ee["last_release_ts"] = top_seen_ts
+                        break
+                _save_state(self.state)
 
     @poll_updates.before_loop
     async def _before_poll(self):
@@ -784,7 +760,6 @@ class MUWatcher(commands.Cog):
         rid = rel.get("id") or rel.get("release_id")
         chbits, extras = _format_rel_bits(rel)
 
-        # Ping @here only for items that look like CHAPTERS (and note: this method is only used for *new* posts)
         mention_content = "@here" if _has_ch(rel) else None
         allowed = discord.AllowedMentions(everyone=True) if mention_content else discord.AllowedMentions.none()
 
