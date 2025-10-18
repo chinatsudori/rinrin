@@ -484,4 +484,13 @@ _STRINGS.update({
     "tools.timestamp.label.date_short": "Date (short)",
     "tools.timestamp.label.time": "Time",
     "tools.timestamp.label.time_short": "Time (short)",
+
+        # ---- Role Welcome ----
+    "rolewelcome.title": "Welcome aboard!",
+    "rolewelcome.desc": (
+        "You’ve just been granted access. Take a minute to read pinned messages, "
+        "introduce yourself, and check the channels unlocked for you."
+    ),
+    "rolewelcome.footer": "{guild}",
 })
+
