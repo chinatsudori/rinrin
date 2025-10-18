@@ -3,6 +3,7 @@ import os, sqlite3
 from .config import DB_PATH
 
 def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str):
+    cur = con.cursor
     cur = con.cursor()
     cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})")]
     if column not in cols:
@@ -15,8 +16,14 @@ def _table_sql(con: sqlite3.Connection, table: str) -> str | None:
 
 def ensure_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(DB_PATH, timeout=5) as con:
         cur = con.cursor()
+
+        # Pragmas: better concurrency + durability
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA busy_timeout=3000")
 
         # --- clubs (no CHECK on club_type) ---
         cur.execute("""
@@ -63,6 +70,7 @@ def ensure_db():
             status TEXT CHECK(status IN ('open','closed')) DEFAULT 'open'
         )""")
         _ensure_column(con, "collections", "club_id", "INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_collections_guild_club_status ON collections (guild_id, club_id, status)")
 
         # submissions
         cur.execute("""
@@ -78,6 +86,7 @@ def ensure_db():
             created_at TEXT
         )""")
         _ensure_column(con, "submissions", "club_id", "INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_submissions_collection ON submissions (collection_id)")
 
         # polls
         cur.execute("""
@@ -92,6 +101,8 @@ def ensure_db():
             status TEXT CHECK(status IN ('open','closed')) DEFAULT 'open'
         )""")
         _ensure_column(con, "polls", "club_id", "INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_polls_guild_status ON polls (guild_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_polls_channel_message ON polls (channel_id, message_id)")
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS poll_options (
@@ -121,6 +132,7 @@ def ensure_db():
             status TEXT CHECK(status IN ('active','queued','completed')) DEFAULT 'active'
         )""")
         _ensure_column(con, "series", "club_id", "INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_series_guild_club_status ON series (guild_id, club_id, status)")
 
         # schedule_sections
         cur.execute("""
@@ -135,7 +147,10 @@ def ensure_db():
         )""")
         _ensure_column(con, "schedule_sections", "discussion_thread_id", "INTEGER")
         _ensure_column(con, "schedule_sections", "posted", "INTEGER DEFAULT 0")
-# --- Guild-wide settings (mod logs channel) ---
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_series ON schedule_sections (series_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_due ON schedule_sections (posted, discussion_start)")
+
+        # --- Guild-wide settings ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -144,7 +159,8 @@ def ensure_db():
         )""")
         _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
         _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
-# --- Moderation actions log ---
+
+        # --- Moderation actions log ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS mod_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,7 +175,9 @@ def ensure_db():
             actor_user_id INTEGER NOT NULL,
             created_at TEXT NOT NULL
         )""")
-# --- Emoji / Sticker monthly usage ---
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mod_actions_lookup ON mod_actions (guild_id, target_user_id, id DESC)")
+
+        # --- Emoji / Sticker monthly usage ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS emoji_usage_monthly (
             guild_id INTEGER NOT NULL,
@@ -181,7 +199,8 @@ def ensure_db():
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (guild_id, month, sticker_id)
         )""")
-# --- Member message activity (monthly + total) ---
+
+        # --- Member message activity (monthly + total) ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_activity_monthly (
             guild_id INTEGER NOT NULL,
@@ -190,7 +209,6 @@ def ensure_db():
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (guild_id, user_id, month)
         )""")
-
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_activity_total (
             guild_id INTEGER NOT NULL,
@@ -200,6 +218,8 @@ def ensure_db():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_month ON member_activity_monthly (guild_id, month, count DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_total ON member_activity_total (guild_id, count DESC)")
+
+        # --- Movie events ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS movie_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,13 +227,28 @@ def ensure_db():
             club_id INTEGER NOT NULL,
             title TEXT NOT NULL,
             link TEXT,
-            show_date TEXT NOT NULL,            -- the Saturday ISO date (YYYY-MM-DD)
-            event_id_morning INTEGER,           -- guild scheduled event id
-            event_id_evening INTEGER            -- guild scheduled event id
+            show_date TEXT NOT NULL,            -- YYYY-MM-DD
+            event_id_morning INTEGER,
+            event_id_evening INTEGER
+        )""")
+
+        # --- Role welcome (first-time DM tracking) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS role_welcome_sent (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            role_id  INTEGER NOT NULL,
+            sent_at  TEXT    NOT NULL,
+            PRIMARY KEY (guild_id, user_id, role_id)
         )""")
 
         con.commit()
 
 def connect():
-    return sqlite3.connect(DB_PATH)
-
+    # Centralize consistent pragmas for all connections
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA busy_timeout=3000")
+    return con
