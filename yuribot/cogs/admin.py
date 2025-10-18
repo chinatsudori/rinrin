@@ -243,6 +243,42 @@ class AdminCog(commands.Cog):
                 },
             )
             await interaction.followup.send(S("common.error_generic"), ephemeral=True)
+    @app_commands.command(
+        name="set_mu_forum",
+        description="Set the forum channel where MangaUpdates posts should be created."
+    )
+    @app_commands.describe(
+        forum="Target forum channel (e.g., #ongoing-reading-room)",
+        post="If true, post publicly in this channel"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_mu_forum(
+        self,
+        interaction: discord.Interaction,
+        forum: discord.ForumChannel,
+        post: bool = False,
+    ):
+        if not await _require_guild(interaction):
+            return
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(S("common.need_manage_server"), ephemeral=True)
 
+        await interaction.response.defer(ephemeral=not post)
+        try:
+            models.set_mu_forum_channel(interaction.guild_id, forum.id)
+            await interaction.followup.send(
+                S("admin.mu_forum.set_ok", channel=forum.mention),
+                ephemeral=not post,
+            )
+            log.info(
+                "admin.set_mu_forum.used",
+                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "forum_id": forum.id, "post": post},
+            )
+        except Exception:
+            log.exception(
+                "admin.set_mu_forum.failed",
+                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "forum_id": getattr(forum, 'id', None)},
+            )
+            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
