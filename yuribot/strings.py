@@ -188,6 +188,59 @@ _STRINGS.update({
     "modlog.history.row": "**Rule:** {rule}\n**Offense:** {offense}\n**Action:** {action}\n**When:** {when}\n**By:** <@{actor_id}>",
     "modlog.history.details": "**Details:** {details}",
     "modlog.history.evidence": "**Evidence:** {url}",
+    # errors / setup
+    "modlog.err.perms": "Insufficient permissions.",
+    "modlog.err.no_channel": "Mod logs channel not set. Run `/set_mod_logs` first.",
+    "modlog.err.bad_channel": "Configured mod logs channel is invalid. Re-run `/set_mod_logs`.",
+
+# temperature labels
+    "modlog.temp.gentle": "🟢 Gentle Nudge",
+    "modlog.temp.formal": "💙 Formal Warning",
+    "modlog.temp.escalated": "💜 Escalated Warning",
+    "modlog.temp.critical": "❤️ Critical / Harmful Behavior",
+    "modlog.temp.unknown": "Temp {n}",
+
+# embed content
+    "modlog.embed.title": "Moderation — {temp}",
+    "modlog.embed.user": "User",
+    "modlog.embed.rule": "Rule",
+    "modlog.embed.temperature": "Temperature",
+    "modlog.embed.reason": "Reason",
+    "modlog.embed.details": "Details",
+    "modlog.embed.actions": "Actions",
+    "modlog.embed.footer": "Actor: {actor} ({actor_id})",
+
+# DM (optional)
+    "modlog.dm.title": "Moderation Notice",
+    "modlog.dm.rule": "Rule",
+    "modlog.dm.status": "Status",
+    "modlog.dm.status_open": "Open — You can reply to this DM to discuss or request mediation. A moderator will review.",
+    "modlog.dm.reason": "Reason",
+    "modlog.dm.detail": "Detail",
+    "modlog.dm.actions": "Actions",
+    "modlog.dm.actions_warning": "Warning recorded",
+    "modlog.dm.could_not_dm": "Could not DM {user} (privacy settings).",
+
+# action reasons / outcomes
+    "modlog.reason.timeout_default": "Timed out by moderator.",
+    "modlog.reason.ban_default": "Banned by moderator.",
+    "modlog.action.timeout.denied_perm": "Timeout requested ({m}m) — **denied** (missing permission).",
+    "modlog.action.timeout.ok": "Timeout: {m} minutes",
+    "modlog.action.timeout.forbidden": "Timeout requested ({m}m) — **forbidden**.",
+    "modlog.action.timeout.http": "Timeout requested ({m}m) — **HTTP error**: {err}",
+    "modlog.action.ban.denied_perm": "Ban requested — **denied** (missing permission).",
+    "modlog.action.ban.ok": "Ban: **applied**",
+    "modlog.action.ban.forbidden": "Ban requested — **forbidden**.",
+    "modlog.action.ban.http": "Ban requested — **HTTP error**: {err}",
+
+# relay
+    "modlog.relay.title": "User Reply (DM)",
+    "modlog.relay.footer": "From: {author} ({author_id})",
+    "modlog.relay.attachments": "Attachments",
+    "modlog.relay.closed": "Relay for {user} closed.",
+
+# command confirmations
+    "modlog.done": "Logged.",
 
     # ---- Movie club ----
     "movie.location.default": "Projection Booth",
@@ -408,6 +461,7 @@ _STRINGS.update({
     "mu.error.series_http": "MangaUpdates series {sid} failed (HTTP {code}).",
     "mu.error.releases_http": "MangaUpdates releases for {sid} failed (HTTP {code}).",
 })
+
 
 
 
