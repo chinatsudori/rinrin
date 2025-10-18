@@ -4,6 +4,12 @@ from typing import Any, Mapping
 
 
 class _NeutralMap(dict[str, str]):
+    """
+    A dict that accepts values as either plain strings or mappings.
+    If a mapping is provided, it prefers the 'neutral' key; otherwise
+    it falls back to the first string value found. Non-strings are
+    stringified conservatively.
+    """
 
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(key, self._flatten(value))
@@ -22,13 +28,11 @@ class _NeutralMap(dict[str, str]):
         if isinstance(value, Mapping):
             if "neutral" in value and isinstance(value["neutral"], str):
                 return value["neutral"]
-            # Fallback to first value in the mapping, if it's a string
             try:
                 first_val = next(iter(value.values()))
                 return first_val if isinstance(first_val, str) else ""
             except StopIteration:
                 return ""
-        # Unknown type → stringify conservatively
         return str(value)
 
 
@@ -37,12 +41,15 @@ _STRINGS: dict[str, str] = _NeutralMap()
 
 
 def S(key: str, /, **fmt: Any) -> str:
+    """
+    Fetch and format a localized string by key. If formatting fails
+    (e.g., missing arg), return the raw template to avoid hard failures.
+    """
     text = _STRINGS.get(key, key)
     if fmt:
         try:
             return text.format(**fmt)
         except Exception:
-            # Return the raw template if formatting failed (missing arg, etc.)
             return text
     return text
 
@@ -50,12 +57,19 @@ def S(key: str, /, **fmt: Any) -> str:
 # Optional short alias
 T = S
 
-_STRINGS.update({
-    # ---- Common ----
-    "common.guild_only": "This command can only be used in a server.",
-    "common.need_manage_server": "You need **more permissions for that.**.",
 
-    # ---- Activity ----
+# ===============================================================
+# String table
+# ===============================================================
+
+_STRINGS.update({
+    # ---------------- Common ----------------
+    "common.guild_only": "This command can only be used in a server.",
+    "common.need_manage_server": "You need **Manage Server** (or higher) permission.",
+    "common.need_manage_server_v2": "You need **Manage Server** (or higher) permission.",
+    "common.error_generic": "Something went wrong. Try again or ping a moderator.",
+
+    # ---------------- Activity ----------------
     "activity.leaderboard.title": "Activity Leaderboard",
     "activity.leaderboard.row": "{i}. {name} — **{count}**",
     "activity.leaderboard.empty": "No data.",
@@ -69,7 +83,7 @@ _STRINGS.update({
     "activity.reset.need_month": "Provide `month` (YYYY-MM) for monthly reset.",
     "activity.reset.done": "Stats wiped.",
 
-    # ---- Admin ----
+    # ---------------- Admin ----------------
     "admin.welcome.set_ok": "Welcome messages will post in {channel} using image `{filename}`.",
     "admin.botlogs.set_ok": "Bot logs will be posted in {channel}.",
     "admin.modlogs.set_ok": "Mod logs will be posted in {channel}.",
@@ -81,7 +95,7 @@ _STRINGS.update({
         "- Discussion forum: {discussion}"
     ),
 
-    # ---- Botlog (audit) ----
+    # ---------------- Botlog (audit) ----------------
     "botlog.common.none": "(none)",
     "botlog.common.unknown": "(unknown)",
 
@@ -140,7 +154,7 @@ _STRINGS.update({
     "botlog.change.channel_topic": "Topic changed",
     "botlog.change.channel_nsfw": "NSFW: {before} → {after}",
 
-    # ---- Collection ----
+    # ---------------- Collection ----------------
     "collection.error.no_cfg_with_hint": "No config for club '{club}'. Run /club setup.",
     "collection.error.no_cfg": "No config for club '{club}'.",
     "collection.error.no_open": "No open collection.",
@@ -158,7 +172,7 @@ _STRINGS.update({
     "collection.common.no_link": "(no link)",
     "collection.thread.registered": "Registered this **{club_upper}** submission for the current collection.",
 
-    # ---- Emoji / Sticker stats ----
+    # ---------------- Emoji / Sticker stats ----------------
     "emoji.title": "Emoji usage — {month}",
     "emoji.none_for_month": "No emoji usage for **{month}**.",
     "emoji.row": "{display} — **{count}** ({src})",
@@ -169,38 +183,20 @@ _STRINGS.update({
     "sticker.none_for_month": "No sticker usage for **{month}**.",
     "sticker.row": "{name} — **{count}**",
 
-    # ---- Modlog ----
-    "modlog.error.perms": "Insufficient permissions.",
-    "modlog.error.no_channel_set": "Mod logs channel not set. Run `/set_mod_logs` first.",
-    "modlog.error.bad_channel_config": "Configured mod logs channel is invalid. Re-run `/set_mod_logs`.",
-    "modlog.reply.logged": "Logged.",
-
-    "modlog.title": "Moderation Action",
-    "modlog.field.user": "User",
-    "modlog.field.rule": "Rule",
-    "modlog.field.offense": "Offense",
-    "modlog.field.action": "Action",
-    "modlog.field.details": "Details",
-    "modlog.footer.actor": "Actor: {actor} ({actor_id})",
-
-    "modlog.history.none": "No entries.",
-    "modlog.history.title": "Modlog — {user} (`{user_id}`)",
-    "modlog.history.row": "**Rule:** {rule}\n**Offense:** {offense}\n**Action:** {action}\n**When:** {when}\n**By:** <@{actor_id}>",
-    "modlog.history.details": "**Details:** {details}",
-    "modlog.history.evidence": "**Evidence:** {url}",
-    # errors / setup
+    # ---------------- Modlog (new) ----------------
     "modlog.err.perms": "Insufficient permissions.",
     "modlog.err.no_channel": "Mod logs channel not set. Run `/set_mod_logs` first.",
     "modlog.err.bad_channel": "Configured mod logs channel is invalid. Re-run `/set_mod_logs`.",
+    "modlog.done": "Logged.",
 
-# temperature labels
+    # Temperature labels
     "modlog.temp.gentle": "🟢 Gentle Nudge",
     "modlog.temp.formal": "💙 Formal Warning",
     "modlog.temp.escalated": "💜 Escalated Warning",
     "modlog.temp.critical": "❤️ Critical / Harmful Behavior",
     "modlog.temp.unknown": "Temp {n}",
 
-# embed content
+    # Embed content
     "modlog.embed.title": "Moderation — {temp}",
     "modlog.embed.user": "User",
     "modlog.embed.rule": "Rule",
@@ -210,7 +206,7 @@ _STRINGS.update({
     "modlog.embed.actions": "Actions",
     "modlog.embed.footer": "Actor: {actor} ({actor_id})",
 
-# DM (optional)
+    # DM (optional)
     "modlog.dm.title": "Moderation Notice",
     "modlog.dm.rule": "Rule",
     "modlog.dm.status": "Status",
@@ -221,7 +217,7 @@ _STRINGS.update({
     "modlog.dm.actions_warning": "Warning recorded",
     "modlog.dm.could_not_dm": "Could not DM {user} (privacy settings).",
 
-# action reasons / outcomes
+    # Action reasons / outcomes
     "modlog.reason.timeout_default": "Timed out by moderator.",
     "modlog.reason.ban_default": "Banned by moderator.",
     "modlog.action.timeout.denied_perm": "Timeout requested ({m}m) — **denied** (missing permission).",
@@ -233,16 +229,13 @@ _STRINGS.update({
     "modlog.action.ban.forbidden": "Ban requested — **forbidden**.",
     "modlog.action.ban.http": "Ban requested — **HTTP error**: {err}",
 
-# relay
+    # Relay
     "modlog.relay.title": "User Reply (DM)",
     "modlog.relay.footer": "From: {author} ({author_id})",
     "modlog.relay.attachments": "Attachments",
     "modlog.relay.closed": "Relay for {user} closed.",
 
-# command confirmations
-    "modlog.done": "Logged.",
-
-    # ---- Movie club ----
+    # ---------------- Movie club ----------------
     "movie.location.default": "Projection Booth",
     "movie.error.perms": "You need **Manage Server** or **Manage Events** to schedule movie showings.",
     "movie.error.forbidden": "I’m missing permission to create scheduled events in this server.",
@@ -261,7 +254,7 @@ _STRINGS.update({
     "movie.field.events": "Events",
     "movie.value.events_links": "[Morning]({am_url}) • [Evening]({pm_url})",
 
-    # ---- Music ----
+    # ---------------- Music ----------------
     "music.duration.live": "live/unknown",
     "music.error.join_first": "Join a voice channel first (or pass one).",
     "music.error.resolve": "Failed to resolve audio: `{error}`",
@@ -284,7 +277,7 @@ _STRINGS.update({
     "music.queued.single": "Queued **{title}** ({duration}) — {where}.",
     "music.queued.bulk": "Queued **{count}** tracks{more_text}.",
 
-    # ---- Polls ----
+    # ---------------- Polls ----------------
     "poll.create.error.no_cfg": "No config for club '{club}'. Run /club setup.",
     "poll.create.error.no_collection": "No collection found.",
     "poll.create.error.no_valid_numbers": "No valid numbers.",
@@ -299,7 +292,7 @@ _STRINGS.update({
     "poll.close.result_line": "{label}: **{count}**",
     "poll.close.closed": "Poll #{id} closed.",
 
-    # ---- Series ----
+    # ---------------- Series ----------------
     "series.error.no_cfg": "No config for club '{club}'.",
     "series.error.no_collection": "No collection found.",
     "series.error.bad_number": "Invalid number.",
@@ -322,32 +315,39 @@ _STRINGS.update({
     ),
     "series.plan.summary_fail_tail": " {fail} failed.",
 
-    # ---- Discuss thread auto-post ----
+    # ---------------- Discuss thread auto-post ----------------
     "discuss.thread.title": "{title} — {label} Discussion",
     "discuss.thread.body.header": "Discussion for **{title} {label}**.",
     "discuss.thread.body.ref": "Reference: {link}",
     "discuss.thread.body.event": "Event link: {url}",
 
-    # ---- Stats (/ping, /uptime, /botinfo) ----
-    "stats.common.na": "n/a",
+    # ---------------- Stats (/ping, /uptime, /botinfo) ----------------
     "stats.ping.message": "🏓 **Ping**\n• Gateway: `{gw_ms} ms`\n• Round-trip: `{rt_ms} ms`",
+
     "stats.uptime.title": "⏱️ Uptime",
     "stats.uptime.field.uptime": "Uptime",
     "stats.uptime.field.since": "Since (UTC)",
+
     "stats.botinfo.title": "Bot Info",
+    "stats.botinfo.na": "n/a",
     "stats.botinfo.field.guilds": "Guilds",
-    "stats.botinfo.field.members": "Members (cached)",
+    "stats.botinfo.field.members_cached": "Members (cached)",
     "stats.botinfo.field.humans_bots": "Humans / Bots",
     "stats.botinfo.value.humans_bots": "{humans} / {bots}",
     "stats.botinfo.field.commands": "Commands",
     "stats.botinfo.field.shard": "Shard",
-    "stats.botinfo.field.gateway": "Gateway Ping",
+    "stats.botinfo.field.gateway_ping": "Gateway Ping",
     "stats.botinfo.field.memory": "Memory",
     "stats.botinfo.field.cpu": "CPU",
     "stats.botinfo.field.runtime": "Runtime",
     "stats.botinfo.value.runtime": "py {py} · discord.py {dpy}",
 
-    # ---- Timeout (moderation) ----
+    # Backward-compatible aliases (do not remove if older code uses them)
+    "stats.common.na": "n/a",
+    "stats.botinfo.field.members": "Members (cached)",
+    "stats.botinfo.field.gateway": "Gateway Ping",
+
+    # ---------------- Timeout (moderation) ----------------
     "timeout.error.self": "You can’t timeout yourself.",
     "timeout.error.owner": "You can’t timeout the server owner.",
     "timeout.error.actor_perms": "You need **Moderate Members** (or higher) permission.",
@@ -363,7 +363,8 @@ _STRINGS.update({
     "timeout.dm.title": "You’ve been timed out in {guild}",
     "timeout.dm.no_reason": "No reason provided.",
     "timeout.dm.field.duration": "Duration",
-    "timeout.dm.value.duration": "{d}d {h}h {m}m",
+    # seconds-aware
+    "timeout.dm.value.duration": "{d}d {h}h {m}m {s}s",
     "timeout.dm.field.until": "Until (UTC)",
     "timeout.audit.default_reason": "Timed out by moderator.",
     "timeout.audit.remove_reason": "Timeout removed by moderator.",
@@ -373,61 +374,73 @@ _STRINGS.update({
     "timeout.log.field.duration": "Duration",
     "timeout.log.field.until": "Until (UTC)",
     "timeout.log.field.reason": "Reason",
-    "timeout.done": "Timed out {user} for **{d}d {h}h {m}m** (until <t:{until_ts}:F> UTC).",
+    # seconds-aware
+    "timeout.done": "Timed out {user} for **{d}d {h}h {m}m {s}s** (until <t:{until_ts}:F> UTC).",
     "timeout.remove.title": "Timeout Removed",
     "timeout.remove.done": "Removed timeout from {user}.",
 
-    # ---- Welcome ----
+    # ---------------- Welcome ----------------
     "welcome.title": "Welcome!",
     "welcome.desc": "Hey {mention}, you’re our **{ordinal}** member. Glad you’re here.",
     "welcome.content": "{mention}",
-    # Coin
+
+    # ---------------- Fun: Coin ----------------
     "fun.coin.title": "🪙 Coin Flip",
     "fun.coin.results": "{heads} Heads, {tails} Tails",
     "fun.coin.sequence": "{seq}",
     "fun.coin.limit": "You can flip between 1 and {max} coins.",
     "fun.coin.invalid_count": "Enter a number between 1 and {max}.",
 
-    # Dice
+    # ---------------- Fun: Dice ----------------
     "fun.dice.title": "🎲 Dice Roll",
     "fun.dice.rolls_line": "{spec}: {rolls}{mod_text} → **{total}**",
     "fun.dice.mod_text": " (modifier {mod})",
     "fun.dice.total": "Grand total: **{total}**",
     "fun.dice.limit": "Too many dice requested (max {max_dice} dice total).",
     "fun.dice.invalid_spec": "Couldn’t parse `{text}`. Try formats like `d20`, `2d6`, or `3d8+2`.",
-    "move_any.header":              "**{author}** — {ts}\n{jump}",
-    "move_any.sticker.line_with_url": "[Sticker: {name}]({url})",
-    "move_any.sticker.line_no_url":   "(Sticker: {name})",
-    #movebot
-    "move_any.thread.created_body":   "Post created by bot to receive copied messages.",
-    "move_any.thread.starter_msg":    "Starting thread **{title}** for copied messages…",
 
-    "move_any.error.bad_ids":         "Invalid source_id or destination_id.",
+    # ---------------- MoveAny / ThreadTools ----------------
+    "move_any.header": "**{author}** — {ts}\n{jump}",
+    "move_any.sticker.line_with_url": "[Sticker: {name}]({url})",
+    "move_any.sticker.line_no_url": "(Sticker: {name})",
+
+    "move_any.thread.created_body": "Post created by bot to receive copied messages.",
+    "move_any.thread.starter_msg": "Starting thread **{title}** for copied messages…",
+
+    "move_any.error.bad_ids": "Invalid source_id or destination_id.",
+    "move_any.error.bad_ids_neutral": "Bad IDs. Pass channel/thread IDs or jump URLs.",
     "move_any.error.bad_source_type": "Source must be a Text Channel or Thread.",
-    "move_any.error.bad_dest_type":   "Destination must be a Text Channel, Thread, or Forum Channel.",
+    "move_any.error.bad_dest_type": "Destination must be a Text Channel, Thread, or Forum Channel.",
+    "move_any.error.bad_dest_type_text_or_thread": "Destination must be a Text Channel or Thread.",
     "move_any.error.need_read_history": "I need **Read Message History** in the source.",
     "move_any.error.need_send_messages": "I need **Send Messages** in the destination.",
-    "move_any.error.need_attach_files":  "I need **Attach Files** in the destination.",
+    "move_any.error.need_attach_files": "I need **Attach Files** in the destination.",
     "move_any.error.forbidden_read_source": "Forbidden to read the source history.",
     "move_any.error.forum_needs_title": "Destination is a forum. Please provide `dest_thread_title` to create a post.",
-    "move_any.error.forbidden_forum":  "Forbidden: cannot create a post in that forum.",
+    "move_any.error.forbidden_forum": "Forbidden: cannot create a post in that forum.",
     "move_any.error.create_forum_failed": "Failed to create forum post: {err}",
     "move_any.error.forbidden_thread": "Forbidden: cannot create a thread in that channel.",
     "move_any.error.create_thread_failed": "Failed to create thread: {err}",
     "move_any.error.unsupported_destination": "Unsupported destination channel type.",
 
-    "move_any.info.none_matched":     "No messages matched that range.",
-    "move_any.info.dry_run":          "Dry run: would copy **{count}** message(s) from **{src}** → **{dst}**.",
+    "move_any.info.none_matched": "No messages matched that range.",
+    "move_any.info.dry_run": "Dry run: would copy **{count}** message(s) from **{src}** → **{dst}**.",
     "move_any.info.webhook_fallback": "Couldn’t use a webhook (missing permission or create failed); falling back to normal sending.",
 
     "move_any.notice.cant_delete_source": "Note: Could not delete originals (missing **Manage Messages** in source).",
 
-    "move_any.summary":               "Copied **{copied}/{total}** message(s) from **{src}** → **{dst}**.",
-    "move_any.summary_failed_tail":   "Failed: {failed}.",
-    "move_any.summary_deleted_tail":  "Deleted original: {deleted}.",
+    "move_any.summary": "Copied **{copied}/{total}** message(s) from **{src}** → **{dst}**.",
+    "move_any.summary_failed_tail": "Failed: {failed}.",
+    "move_any.summary_deleted_tail": "Deleted original: {deleted}.",
+
     "move_any.reply.header": "Replying to **{author}** · {jump}\n> {snippet}",
     "move_any.reply.attach_only": "(attachment)",
-    # Link / Unlink / Status
+
+    # pinmatch summaries
+    "move_any.pin.summary": "Pinned **{pinned}** out of **{total}** source pin(s) in {dst}.",
+    "move_any.pin.summary_misses_tail": "\nMissed **{missed}** (first {shown} IDs):\n```\n{sample}\n```",
+
+    # ---------------- MU (linking) ----------------
     "mu.link.need_forum": "Please run this inside a **Forum post** or pass the `thread:` option with a forum post.",
     "mu.link.no_results": "No results on MangaUpdates for **{q}**.",
     "mu.link.no_aliases": "—",
@@ -437,13 +450,11 @@ _STRINGS.update({
     "mu.status.none": "No threads are currently linked.",
     "mu.status.line": "- **{title}** (`{sid}`) → {thread}",
 
-    # Check
     "mu.check.need_thread": "Use this inside a **forum post thread**, or pass `thread:`.",
     "mu.check.not_linked": "This thread is not linked to any MangaUpdates series. Use `/mu link` here.",
     "mu.check.posted": "Posted **{count}** new release(s).",
     "mu.check.no_new": "No new releases — posted the latest known chapter instead.",
 
-    # Releases & Latest
     "mu.release.generic": "New release",
     "mu.release.group": "Group: **{group}**",
     "mu.release.date_rel": "Date: <t:{ts}:D>",
@@ -454,15 +465,23 @@ _STRINGS.update({
     "mu.latest.title": "{series} — Latest: {chbits}",
     "mu.latest.footer": "Latest known (no new releases)",
 
-    # Errors
     "mu.error.generic": "MangaUpdates error: {msg}",
     "mu.error.no_releases": "No releases were found for that series.",
     "mu.error.search_http": "MangaUpdates search failed (HTTP {code}).",
     "mu.error.series_http": "MangaUpdates series {sid} failed (HTTP {code}).",
     "mu.error.releases_http": "MangaUpdates releases for {sid} failed (HTTP {code}).",
+
+    # ---------------- Tools: Timestamp ----------------
+    "tools.timestamp.invalid_dt": "Invalid date/time. Use `YYYY-MM-DD` and `HH:MM` (or `HH:MM:SS`).",
+    "tools.timestamp.build_failed": "Could not build that date/time. Double-check values.",
+    "tools.timestamp.title": "🕰 Timestamp Builder",
+    "tools.timestamp.copy_field": "Copy-paste",
+    "tools.timestamp.footer": "Local input: {local_iso}  •  TZ: {tz}",
+    "tools.timestamp.label.relative": "Relative",
+    "tools.timestamp.label.full": "Full",
+    "tools.timestamp.label.short_dt": "Short DT",
+    "tools.timestamp.label.date": "Date",
+    "tools.timestamp.label.date_short": "Date (short)",
+    "tools.timestamp.label.time": "Time",
+    "tools.timestamp.label.time_short": "Time (short)",
 })
-
-
-
-
-
