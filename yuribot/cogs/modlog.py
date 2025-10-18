@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Optional, Dict, Tuple
 from datetime import timedelta
+import logging
 
 import discord
 from discord.ext import commands
@@ -8,6 +9,9 @@ from discord import app_commands
 
 from .. import models
 from ..utils.time import now_local, to_iso
+from ..strings import S
+
+log = logging.getLogger(__name__)
 
 # ---- helpers ---------------------------------------------------------
 
@@ -39,19 +43,19 @@ def _color_for_temp(temp: int) -> discord.Color:
 
 def _temp_label(temp: int) -> str:
     return {
-        1: " Gentle Nudge",
-        2: "💙 Formal Warning",
-        3: "💜 Escalated Warning",
-        4: "❤️ Critical / Harmful Behavior",
-    }.get(temp, f"Temp {temp}")
+        1: S("modlog.temp.gentle"),
+        2: S("modlog.temp.formal"),
+        3: S("modlog.temp.escalated"),
+        4: S("modlog.temp.critical"),
+    }.get(temp, S("modlog.temp.unknown", n=temp))
 
 # ---- Cog -------------------------------------------------------------
 
 class ModLogCog(commands.Cog):
     """
     Moderation logging with temperature (1-4), optional timeout & ban.
-    DMs the user with Reason/Details/Actions/Status and relays DM replies
-    back to the guild's mod-logs channel.
+    DMs are optional and OFF by default (dm_user=False).
+    Can relay user DM replies back to the mod-logs channel while open.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -59,7 +63,6 @@ class ModLogCog(commands.Cog):
         # user_id -> (guild_id, modlog_channel_id)
         self._dm_relays: Dict[int, Tuple[int, int]] = {}
 
-    # -------------------- /modlog --------------------
 
     @app_commands.command(
         name="modlog",
@@ -72,8 +75,10 @@ class ModLogCog(commands.Cog):
         reason="Short reason to show to the user",
         details="Optional detailed context",
         evidence="Optional image/screenshot",
-        timeout_minutes="Optional timeout (minutes)",
-        ban="Ban the user (yes/no)"
+        timeout_minutes="Optional timeout (minutes, up to ~28 days)",
+        ban="Ban the user (yes/no)",
+        dm_user="Attempt to DM the user (OFF by default)",
+        post="If true, post publicly in this channel"
     )
     @app_commands.choices(
         rule=[app_commands.Choice(name=r, value=r) for r in RULE_CHOICES]
@@ -89,23 +94,23 @@ class ModLogCog(commands.Cog):
         evidence: Optional[discord.Attachment] = None,
         timeout_minutes: Optional[app_commands.Range[int, 1, 40320]] = None,  # up to ~28 days
         ban: Optional[bool] = False,
+        dm_user: bool = False,
+        post: bool = False,
     ):
+        if not interaction.guild:
+            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
         if not _perm_ok(interaction.user):
-            return await interaction.response.send_message("Insufficient permissions.", ephemeral=True)
+            return await interaction.response.send_message(S("modlog.err.perms"), ephemeral=True)
 
         # Resolve mod-log channel
         channel_id = models.get_mod_logs_channel(interaction.guild_id)
         if not channel_id:
-            return await interaction.response.send_message(
-                "Mod logs channel not set. Run `/set_mod_logs` first.", ephemeral=True
-            )
+            return await interaction.response.send_message(S("modlog.err.no_channel"), ephemeral=True)
         ch = interaction.guild.get_channel(channel_id)
         if not isinstance(ch, discord.TextChannel):
-            return await interaction.response.send_message(
-                "Configured mod logs channel is invalid. Re-run `/set_mod_logs`.", ephemeral=True
-            )
+            return await interaction.response.send_message(S("modlog.err.bad_channel"), ephemeral=True)
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
 
         # Optional enforcement
         actions_taken: list[str] = []
@@ -113,60 +118,60 @@ class ModLogCog(commands.Cog):
 
         # timeout
         if timeout_minutes and timeout_minutes > 0:
-            # permission check for timeout
             if not interaction.user.guild_permissions.moderate_members:
-                actions_taken.append(f"Timeout requested ({timeout_minutes}m) — **denied** (missing permission).")
+                actions_taken.append(S("modlog.action.timeout.denied_perm", m=int(timeout_minutes)))
             else:
                 try:
                     until = discord.utils.utcnow() + timedelta(minutes=int(timeout_minutes))
-                    await user.timeout(until, reason=reason or "Timed out by moderator.")
-                    actions_taken.append(f"Timeout: {int(timeout_minutes)} minutes")
+                    await user.timeout(until, reason=reason or S("modlog.reason.timeout_default"))
+                    actions_taken.append(S("modlog.action.timeout.ok", m=int(timeout_minutes)))
                 except discord.Forbidden:
-                    actions_taken.append(f"Timeout requested ({timeout_minutes}m) — **forbidden**.")
+                    actions_taken.append(S("modlog.action.timeout.forbidden", m=int(timeout_minutes)))
                 except discord.HTTPException as e:
-                    actions_taken.append(f"Timeout requested ({timeout_minutes}m) — **HTTP error**: {e}")
+                    actions_taken.append(S("modlog.action.timeout.http", m=int(timeout_minutes), err=e))
 
         # ban
         if ban:
             if not interaction.user.guild_permissions.ban_members:
-                actions_taken.append("Ban requested — **denied** (missing permission).")
+                actions_taken.append(S("modlog.action.ban.denied_perm"))
             else:
                 try:
-                    await interaction.guild.ban(user, reason=reason or "Banned by moderator.", delete_message_days=0)
-                    actions_taken.append("Ban: **applied**")
+                    await interaction.guild.ban(user, reason=reason or S("modlog.reason.ban_default"), delete_message_days=0)
+                    actions_taken.append(S("modlog.action.ban.ok"))
                 except discord.Forbidden:
-                    actions_taken.append("Ban requested — **forbidden**.")
+                    actions_taken.append(S("modlog.action.ban.forbidden"))
                 except discord.HTTPException as e:
-                    actions_taken.append(f"Ban requested — **HTTP error**: {e}")
+                    actions_taken.append(S("modlog.action.ban.http", err=e))
 
         # evidence image
         if evidence and evidence.content_type and evidence.content_type.startswith("image/"):
             evidence_url = evidence.url
 
         # Compose moderation embed for mod channel
-        temp_label = _temp_label(int(temperature))
-        color = _color_for_temp(int(temperature))
-
+        temp_i = int(temperature)
         mod_embed = discord.Embed(
-            title=f"Moderation — {temp_label}",
-            color=color,
+            title=S("modlog.embed.title", temp=_temp_label(temp_i)),
+            color=_color_for_temp(temp_i),
             timestamp=now_local(),
         )
-        mod_embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
-        mod_embed.add_field(name="Rule", value=rule.value, inline=True)
-        mod_embed.add_field(name="Temperature", value=str(int(temperature)), inline=True)
-        mod_embed.add_field(name="Reason", value=reason[:1000], inline=False)
+        mod_embed.add_field(name=S("modlog.embed.user"), value=f"{user.mention} (`{user.id}`)", inline=False)
+        mod_embed.add_field(name=S("modlog.embed.rule"), value=rule.value, inline=True)
+        mod_embed.add_field(name=S("modlog.embed.temperature"), value=str(temp_i), inline=True)
+        mod_embed.add_field(name=S("modlog.embed.reason"), value=reason[:1000], inline=False)
         if details:
-            mod_embed.add_field(name="Details", value=details[:1000], inline=False)
+            mod_embed.add_field(name=S("modlog.embed.details"), value=details[:1000], inline=False)
         if actions_taken:
-            mod_embed.add_field(name="Actions", value="\n".join(actions_taken)[:1000], inline=False)
-        mod_embed.set_footer(text=f"Actor: {interaction.user} ({interaction.user.id})")
+            mod_embed.add_field(name=S("modlog.embed.actions"), value="\n".join(actions_taken)[:1000], inline=False)
+        mod_embed.set_footer(text=S("modlog.embed.footer", actor=str(interaction.user), actor_id=interaction.user.id))
         if evidence_url:
             mod_embed.set_image(url=evidence_url)
 
-        await ch.send(embed=mod_embed)
+        try:
+            await ch.send(embed=mod_embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            log.exception("modlog.post_failed", extra={"guild_id": interaction.guild_id, "channel_id": ch.id})
 
-        # Persist (store temperature in the old 'offense' slot)
+        # Persist (store temperature in 'offense')
         try:
             models.add_mod_action(
                 guild_id=interaction.guild_id,
@@ -181,60 +186,56 @@ class ModLogCog(commands.Cog):
                 created_at=to_iso(now_local()),
             )
         except Exception:
-            # DB is optional – don't fail the command if it hiccups
-            pass
+            log.exception("modlog.persist_failed", extra={"guild_id": interaction.guild_id})
 
-        # DM the user (Reason / Details / Actions / Status)
-        dm_actions_lines = []
-        if reason:
-            dm_actions_lines.append(f"• **Reason:** {reason}")
-        if details:
-            dm_actions_lines.append(f"• **Detail:** {details}")
-        if actions_taken:
-            dm_actions_lines.append(f"• **Actions:** " + "; ".join(actions_taken))
-        else:
-            dm_actions_lines.append("• **Actions:** Warning recorded")
+        # DM the user (optional; OFF by default)
+        if dm_user:
+            dm_embed = discord.Embed(
+                title=S("modlog.dm.title"),
+                description=_temp_label(temp_i),
+                color=_color_for_temp(temp_i),
+            )
+            dm_embed.add_field(name=S("modlog.dm.rule"), value=rule.value, inline=True)
+            dm_embed.add_field(name=S("modlog.dm.status"), value=S("modlog.dm.status_open"), inline=False)
+            dm_embed.add_field(name=S("modlog.dm.reason"), value=reason[:1000] if reason else "—", inline=False)
+            if details:
+                dm_embed.add_field(name=S("modlog.dm.detail"), value=details[:1000], inline=False)
+            dm_embed.add_field(
+                name=S("modlog.dm.actions"),
+                value=("\n".join(actions_taken) if actions_taken else S("modlog.dm.actions_warning")),
+                inline=False
+            )
+            try:
+                await user.send(embed=dm_embed)
+                # Register relay so replies go to modlog channel
+                self._dm_relays[user.id] = (interaction.guild_id, ch.id)
+            except Exception:
+                await ch.send(S("modlog.dm.could_not_dm", user=user.mention), allowed_mentions=discord.AllowedMentions.none())
 
-        status_text = (
-            "Open — You can reply to this DM if you want to discuss or request mediation. "
-            "A moderator will review your message."
+        await interaction.followup.send(S("modlog.done"), ephemeral=not post)
+
+        log.info(
+            "modlog.add.used",
+            extra={
+                "guild_id": interaction.guild_id,
+                "channel_id": ch.id,
+                "actor_id": interaction.user.id,
+                "target_id": user.id,
+                "rule": rule.value,
+                "temp": temp_i,
+                "timeout_m": int(timeout_minutes) if timeout_minutes else 0,
+                "ban": bool(ban),
+                "dm_user": bool(dm_user),
+                "post": bool(post),
+                "has_evidence": bool(evidence_url),
+            },
         )
 
-        dm_embed = discord.Embed(
-            title="Moderation Notice",
-            description=_temp_label(int(temperature)),
-            color=color,
-        )
-        dm_embed.add_field(name="Rule", value=rule.value, inline=True)
-        dm_embed.add_field(name="Status", value=status_text, inline=False)
-        # break out Reason / Detail / Actions as requested
-        dm_embed.add_field(name="Reason", value=reason[:1000] if reason else "—", inline=False)
-        if details:
-            dm_embed.add_field(name="Detail", value=details[:1000], inline=False)
-        dm_embed.add_field(
-            name="Actions",
-            value=("\n".join(actions_taken) if actions_taken else "Warning recorded"),
-            inline=False
-        )
-
-        try:
-            await user.send(embed=dm_embed)
-            # Register relay so replies go to modlog channel
-            self._dm_relays[user.id] = (interaction.guild_id, ch.id)
-        except Exception:
-            # DMs closed; tell staff
-            await ch.send(f"Could not DM {user.mention} (privacy settings).")
-
-        await interaction.followup.send("Logged.", ephemeral=True)
-
-    # -------------------- DM reply relay --------------------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         # Only handle DMs from users with an active relay
-        if message.guild is not None:
-            return
-        if message.author.bot:
+        if message.guild is not None or message.author.bot:
             return
 
         relay = self._dm_relays.get(message.author.id)
@@ -250,34 +251,42 @@ class ModLogCog(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
 
-        # Forward the user's DM to the modlog channel
         emb = discord.Embed(
-            title="User Reply (DM)",
-            description=message.content[:2000] if message.content else " ",
+            title=S("modlog.relay.title"),
+            description=(message.content[:2000] if message.content else " "),
             color=discord.Color.blurple(),
             timestamp=now_local(),
         )
-        emb.set_footer(text=f"From: {message.author} ({message.author.id})")
-        # Include attachments
-        files = []
+        emb.set_footer(text=S("modlog.relay.footer", author=str(message.author), author_id=message.author.id))
         if message.attachments:
-            # Just include links inline to keep it simple
             links = "\n".join(a.url for a in message.attachments)
-            emb.add_field(name="Attachments", value=links[:1000], inline=False)
+            emb.add_field(name=S("modlog.relay.attachments"), value=links[:1000], inline=False)
 
         try:
-            await channel.send(embed=emb)
+            await channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
-            pass
+            log.exception("modlog.relay.post_failed", extra={"guild_id": guild_id, "channel_id": modlog_channel_id})
 
-    # Optional: command for moderators to close a relay
+
     @app_commands.command(name="modlog_close_dm", description="Stop relaying DM replies from a user to the modlog channel.")
-    async def modlog_close_dm(self, interaction: discord.Interaction, user: discord.Member):
+    @app_commands.describe(user="User to stop relaying", post="If true, post publicly in this channel")
+    async def modlog_close_dm(self, interaction: discord.Interaction, user: discord.Member, post: bool = False):
         if not _perm_ok(interaction.user):
-            return await interaction.response.send_message("Insufficient permissions.", ephemeral=True)
+            return await interaction.response.send_message(S("modlog.err.perms"), ephemeral=True)
+
+        await interaction.response.defer(ephemeral=not post, thinking=False)
         self._dm_relays.pop(user.id, None)
-        await interaction.response.send_message(f"Relay for {user.mention} closed.", ephemeral=True)
+        await interaction.followup.send(S("modlog.relay.closed", user=user.mention), ephemeral=not post)
+
+        log.info(
+            "modlog.relay.closed",
+            extra={
+                "guild_id": getattr(interaction, "guild_id", None),
+                "actor_id": interaction.user.id,
+                "user_id": user.id,
+                "post": post,
+            },
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ModLogCog(bot))
-
