@@ -71,17 +71,6 @@ class YuriBot(commands.Bot):
         # Start background jobs (store for shutdown)
         # If discussion_poster_loop is an async coroutine → create_task it.
         # If it's a discord.ext.tasks.Loop → .start()
-        try:
-            if hasattr(discussion_poster_loop, "start"):
-                discussion_poster_loop.start(self)  # type: ignore[attr-defined]
-                log.info("Started tasks.Loop discussion_poster_loop.")
-            else:
-                task = asyncio.create_task(discussion_poster_loop(self))
-                self._bg_tasks.append(task)
-                log.info("Started background task discussion_poster_loop.")
-        except Exception:
-            log.exception("Failed to start discussion_poster_loop.")
-
         # Command sync
         await self._sync_commands()
 
