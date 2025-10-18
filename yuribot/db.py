@@ -242,6 +242,17 @@ def ensure_db():
             PRIMARY KEY (guild_id, user_id, role_id)
         )""")
 
+        # --- Guild-wide settings ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            mod_logs_channel_id INTEGER,
+            bot_logs_channel_id INTEGER
+        )""")
+        _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
+        _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
+        _ensure_column(con, "guild_settings", "mu_forum_channel_id", "INTEGER")
+
         con.commit()
 
 def connect():
