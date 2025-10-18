@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from ..strings import S 
+from ..strings import S
 
 log = logging.getLogger(__name__)
 
@@ -19,23 +19,23 @@ GuildTextish = Union[discord.TextChannel, discord.Thread, discord.ForumChannel]
 async def _resolve_messageable_from_id(
     bot: commands.Bot, gid: int, ident: int
 ) -> Optional[GuildTextish]:
-    log.debug("resolve_messageable: gid=%s ident=%s", gid, ident)
+    log.debug("movebot.resolve_messageable start gid=%s ident=%s", gid, ident)
     ch = bot.get_channel(ident)
     if isinstance(ch, (discord.TextChannel, discord.ForumChannel)) and ch.guild and ch.guild.id == gid:
-        log.debug("resolve_messageable: cache hit (text/forum) %s (%s)", ch.id, type(ch).__name__)
+        log.debug("movebot.resolve_messageable cache_hit channel=%s type=%s", ch.id, type(ch).__name__)
         return ch
     thr = bot.get_channel(ident)
     if isinstance(thr, discord.Thread) and thr.guild and thr.guild.id == gid:
-        log.debug("resolve_messageable: cache hit (thread) %s", thr.id)
+        log.debug("movebot.resolve_messageable cache_hit thread=%s", thr.id)
         return thr
     try:
         fetched = await bot.fetch_channel(ident)
         if isinstance(fetched, (discord.TextChannel, discord.Thread, discord.ForumChannel)) and fetched.guild and fetched.guild.id == gid:
-            log.debug("resolve_messageable: fetch hit %s (%s)", fetched.id, type(fetched).__name__)
+            log.debug("movebot.resolve_messageable fetch_hit id=%s type=%s", fetched.id, type(fetched).__name__)
             return fetched
-        log.debug("resolve_messageable: fetched object not usable: %s", type(fetched).__name__)
+        log.debug("movebot.resolve_messageable unusable type=%s", type(fetched).__name__)
     except Exception as e:
-        log.debug("resolve_messageable: fetch_channel failed: %r", e)
+        log.debug("movebot.resolve_messageable fetch_channel failed err=%r", e)
     return None
 
 
@@ -56,20 +56,20 @@ async def _get_or_create_webhook(
     name: str = "YuriBot Relay"
 ) -> Optional[discord.Webhook]:
     try:
-        log.debug("webhook: checking/creating on parent=%s", parent.id)
+        log.debug("movebot.webhook check parent=%s", parent.id)
         hooks = await parent.webhooks()
         for wh in hooks:
             if wh.user and wh.user.id == me.id:
-                log.debug("webhook: reusing webhook id=%s", wh.id)
+                log.debug("movebot.webhook reuse id=%s", wh.id)
                 return wh
         wh = await parent.create_webhook(name=name)
-        log.debug("webhook: created webhook id=%s", wh.id)
+        log.debug("movebot.webhook created id=%s", wh.id)
         return wh
     except discord.Forbidden:
-        log.debug("webhook: forbidden on parent=%s", getattr(parent, "id", "n/a"))
+        log.debug("movebot.webhook forbidden parent=%s", getattr(parent, "id", "n/a"))
         return None
     except Exception as e:
-        log.debug("webhook: unexpected error: %r", e)
+        log.debug("movebot.webhook unexpected err=%r", e)
         return None
 
 
@@ -122,7 +122,7 @@ async def _send_copy(
             b = await att.read()
             files.append(discord.File(io.BytesIO(b), filename=att.filename))
         except Exception as e:
-            log.debug("copy: attachment read failed msg=%s att=%s err=%r", source_msg.id, att.filename, e)
+            log.debug("movebot.copy att_read_failed msg=%s att=%s err=%r", source_msg.id, att.filename, e)
 
     if source_msg.stickers:
         sticker_lines = []
@@ -156,7 +156,7 @@ async def _send_copy(
                     **common_kwargs,
                 )
         except Exception as e:
-            log.debug("send_copy: webhook send failed msg=%s err=%r (fallback)", source_msg.id, e)
+            log.debug("movebot.send_copy webhook_send_failed msg=%s err=%r (fallback)", source_msg.id, e)
             await destination.send(**common_kwargs)
     else:
         await destination.send(**common_kwargs)
@@ -187,7 +187,7 @@ async def _maybe_create_destination_thread(
     if isinstance(destination, discord.TextChannel):
         if dest_thread_title:
             try:
-                starter = await destination.send(S("move_any.thread.starter_msg", title=dest_thread_title))
+                starter = await destination.send(S("move_any.thread.starter_msg", title=dest_thread_title), allowed_mentions=discord.AllowedMentions.none())
                 created = await destination.create_thread(name=dest_thread_title, message=starter)
                 return created, None
             except discord.Forbidden:
@@ -237,7 +237,6 @@ def _fuzzy_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-
 class MoveAnyCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -257,6 +256,7 @@ class MoveAnyCog(commands.Cog):
         after="Only copy messages created after this message ID or jump URL (in the source).",
         dry_run="Count messages only; don’t send anything.",
         debug="Include a short failure digest and emit detailed logs.",
+        post="If true, post publicly in this channel",
     )
     async def move_any(
         self,
@@ -272,12 +272,19 @@ class MoveAnyCog(commands.Cog):
         after: Optional[str] = None,
         dry_run: bool = False,
         debug: bool = False,
+        post: bool = False,
     ):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        log.debug("movebot: invoked by %s (%s) guild=%s", interaction.user, interaction.user.id, interaction.guild_id)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
+        log.info("movebot.invoked", extra={
+            "guild_id": interaction.guild_id,
+            "actor_id": interaction.user.id,
+            "source_id": source_id, "destination_id": destination_id,
+            "use_webhook": use_webhook, "backlink": backlink, "delete_original": delete_original,
+            "limit": limit, "before": before, "after": after, "dry_run": dry_run, "debug": debug, "post": post,
+        })
 
         def _parse_id(s: str) -> Optional[int]:
             s = s.strip()
@@ -291,36 +298,32 @@ class MoveAnyCog(commands.Cog):
 
         src_id = _parse_id(source_id)
         dst_id = _parse_id(destination_id)
-        log.debug("movebot: parsed ids src=%s dst=%s", src_id, dst_id)
         if not src_id or not dst_id:
-            return await interaction.followup.send(S("move_any.error.bad_ids"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_ids"), ephemeral=not post)
 
         source = await _resolve_messageable_from_id(self.bot, interaction.guild_id, src_id)
         if not isinstance(source, (discord.TextChannel, discord.Thread)):
-            return await interaction.followup.send(S("move_any.error.bad_source_type"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_source_type"), ephemeral=not post)
 
         destination_raw = await _resolve_messageable_from_id(self.bot, interaction.guild_id, dst_id)
         if not isinstance(destination_raw, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
-            return await interaction.followup.send(S("move_any.error.bad_dest_type"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_dest_type"), ephemeral=not post)
 
         me = interaction.guild.me
         src_perms = source.permissions_for(me)
-        log.debug("movebot: src perms read_history=%s manage_messages=%s", src_perms.read_message_history, src_perms.manage_messages)
         if not src_perms.read_message_history:
-            return await interaction.followup.send(S("move_any.error.need_read_history"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.need_read_history"), ephemeral=not post)
 
         destination, err = await _maybe_create_destination_thread(destination_raw, dest_thread_title=dest_thread_title)
-        log.debug("movebot: destination prepared err=%r type=%s", err, type(destination).__name__ if destination else None)
         if err:
-            return await interaction.followup.send(err, ephemeral=True)
+            return await interaction.followup.send(err, ephemeral=not post)
         assert destination is not None
 
         dst_perms = destination.permissions_for(me)
-        log.debug("movebot: dst perms send_messages=%s attach_files=%s", dst_perms.send_messages, dst_perms.attach_files)
         if not dst_perms.send_messages:
-            return await interaction.followup.send(S("move_any.error.need_send_messages"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.need_send_messages"), ephemeral=not post)
         if not dst_perms.attach_files:
-            return await interaction.followup.send(S("move_any.error.need_attach_files"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.need_attach_files"), ephemeral=not post)
 
         async def _resolve_msg(ref: Optional[str]) -> Optional[discord.Message]:
             if not ref:
@@ -340,12 +343,6 @@ class MoveAnyCog(commands.Cog):
 
         before_msg = await _resolve_msg(before)
         after_msg = await _resolve_msg(after)
-        log.debug(
-            "movebot: history window before=%s after=%s limit=%s",
-            getattr(before_msg, "id", None),
-            getattr(after_msg, "id", None),
-            limit,
-        )
 
         ALLOWED_TYPES = {
             discord.MessageType.default,
@@ -357,34 +354,30 @@ class MoveAnyCog(commands.Cog):
             async for m in source.history(limit=limit, oldest_first=True, before=before_msg, after=after_msg):
                 if m.type not in ALLOWED_TYPES:
                     if debug:
-                        log.debug("movebot: skipping message id=%s type=%s", m.id, m.type)
+                        log.debug("movebot.skip msg id=%s type=%s", m.id, m.type)
                     continue
                 to_copy.append(m)
         except discord.Forbidden:
-            log.debug("movebot: forbidden reading source history")
-            return await interaction.followup.send(S("move_any.error.forbidden_read_source"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.forbidden_read_source"), ephemeral=not post)
 
-        log.debug("movebot: matched messages=%d", len(to_copy))
         if not to_copy:
-            return await interaction.followup.send(S("move_any.info.none_matched"), ephemeral=True)
+            return await interaction.followup.send(S("move_any.info.none_matched"), ephemeral=not post)
 
         if dry_run:
-            where = destination.name
+            where = getattr(destination, "name", getattr(destination, "id", "dst"))
             return await interaction.followup.send(
                 S("move_any.info.dry_run", count=len(to_copy), src=source.name, dst=where),
-                ephemeral=True
+                ephemeral=not post
             )
 
         webhook: Optional[discord.Webhook] = None
         if use_webhook:
             parent = _parent_for_destination(destination)
             can_hooks = parent and parent.permissions_for(me).manage_webhooks
-            log.debug("movebot: webhook requested; can_manage_webhooks=%s", bool(can_hooks))
             if parent and can_hooks:
                 webhook = await _get_or_create_webhook(parent, me)
             if webhook is None:
-                log.debug("movebot: webhook unavailable; falling back to bot identity")
-                await interaction.followup.send(S("move_any.info.webhook_fallback"), ephemeral=True)
+                await interaction.followup.send(S("move_any.info.webhook_fallback"), ephemeral=not post)
                 use_webhook = False
 
         copied = 0
@@ -399,19 +392,18 @@ class MoveAnyCog(commands.Cog):
                     include_header=backlink,
                 )
                 copied += 1
-                if debug:
-                    log.debug("movebot: copied msg id=%s", msg.id)
+                if debug and (i % 25 == 0):
+                    log.debug("movebot.progress copied=%s/%s", copied, len(to_copy))
             except Exception as e:
                 failed.append((msg.id, repr(e)))
-                log.debug("movebot: FAILED copy msg id=%s err=%r", msg.id, e)
+                log.debug("movebot.copy_failed id=%s err=%r", msg.id, e)
             if (i % 5) == 0:
                 await asyncio.sleep(0.7)
 
         deleted = 0
         if delete_original and copied:
             if not src_perms.manage_messages:
-                log.debug("movebot: cannot delete originals (missing manage_messages)")
-                await interaction.followup.send(S("move_any.notice.cant_delete_source"), ephemeral=True)
+                await interaction.followup.send(S("move_any.notice.cant_delete_source"), ephemeral=not post)
             else:
                 for msg in to_copy:
                     if any(fid == msg.id for fid, _ in failed):
@@ -420,10 +412,10 @@ class MoveAnyCog(commands.Cog):
                         await msg.delete()
                         deleted += 1
                     except Exception as e:
-                        log.debug("movebot: delete failed msg id=%s err=%r", msg.id, e)
+                        log.debug("movebot.delete_failed id=%s err=%r", msg.id, e)
                     await asyncio.sleep(0.2)
 
-        dest_name = destination.name
+        dest_name = getattr(destination, "name", str(getattr(destination, "id", "dst")))
         summary = S(
             "move_any.summary",
             copied=copied,
@@ -440,7 +432,12 @@ class MoveAnyCog(commands.Cog):
             top = "\n".join(f"- {mid}: {err}" for mid, err in failed[:10])
             summary += f"\n```\nFailures (first {min(10, len(failed))}):\n{top}\n```"
 
-        await interaction.followup.send(summary, ephemeral=True)
+        await interaction.followup.send(summary, ephemeral=not post)
+        log.info("movebot.done", extra={
+            "guild_id": interaction.guild_id, "actor_id": interaction.user.id,
+            "copied": copied, "total": len(to_copy), "failed": len(failed),
+            "deleted": deleted, "post": post, "webhook": use_webhook
+        })
 
     @group.command(
         name="pinmatch",
@@ -455,6 +452,7 @@ class MoveAnyCog(commands.Cog):
         collapse_ws="Collapse whitespace for matching (default true).",
         min_fuzzy="Minimum fuzzy ratio (0.0–1.0) if exact content match fails (default 0.88).",
         ts_slack_seconds="Timestamp slack for choosing among candidates (default 240s).",
+        post="If true, post publicly in this channel",
     )
     async def pinmatch(
         self,
@@ -467,10 +465,11 @@ class MoveAnyCog(commands.Cog):
         collapse_ws: bool = True,
         min_fuzzy: float = 0.88,
         ts_slack_seconds: int = 240,
+        post: bool = False,
     ):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
 
         def _parse_id(s: str) -> Optional[int]:
             s = s.strip()
@@ -486,28 +485,28 @@ class MoveAnyCog(commands.Cog):
         src_ident = _parse_id(source_id)
         dst_ident = _parse_id(destination_id)
         if not src_ident or not dst_ident:
-            return await interaction.followup.send("Bad IDs. Pass channel/thread IDs or jump URLs.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_ids"), ephemeral=not post)
 
         source = await _resolve_messageable_from_id(self.bot, gid, src_ident)
         destination = await _resolve_messageable_from_id(self.bot, gid, dst_ident)
         if not isinstance(source, (discord.TextChannel, discord.Thread)):
-            return await interaction.followup.send("Source must be a TextChannel or Thread.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_source_type"), ephemeral=not post)
         if not isinstance(destination, (discord.TextChannel, discord.Thread)):
-            return await interaction.followup.send("Destination must be a TextChannel or Thread.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.bad_dest_type_text_or_thread"), ephemeral=not post)
 
         me = interaction.guild.me
         if not source.permissions_for(me).read_message_history:
-            return await interaction.followup.send("I need **Read Message History** in the source.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.need_read_history"), ephemeral=not post)
         if not (destination.permissions_for(me).read_message_history and destination.permissions_for(me).manage_messages):
-            return await interaction.followup.send("I need **Read Message History** and **Manage Messages** in the destination.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.need_read_and_manage_dest"), ephemeral=not post)
 
         try:
             src_pins = await source.pins()
         except discord.Forbidden:
-            return await interaction.followup.send("Forbidden reading source pins.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.error.forbidden_read_pins"), ephemeral=not post)
 
         if not src_pins:
-            return await interaction.followup.send("No pins in the source.", ephemeral=True)
+            return await interaction.followup.send(S("move_any.info.no_pins_source"), ephemeral=not post)
 
         dest_msgs: List[discord.Message] = []
         async for m in destination.history(limit=search_depth, oldest_first=False):
@@ -568,6 +567,7 @@ class MoveAnyCog(commands.Cog):
                 misses.append(sm.id)
                 continue
 
+            # pick closest in time (within slack preference)
             candidates.sort(key=lambda m: abs(int(m.created_at.timestamp()) - timestamp))
             target = candidates[0]
 
@@ -578,11 +578,15 @@ class MoveAnyCog(commands.Cog):
             except Exception:
                 misses.append(sm.id)
 
-        summary = f"Pinned **{pinned}** out of **{len(src_pins)}** source pin(s) in {destination.mention}."
+        summary = S("move_any.pin.summary", pinned=pinned, total=len(src_pins), dst=destination.mention)
         if misses:
             sample = "\n".join(f"- {mid}" for mid in misses[:10])
-            summary += f"\nMissed **{len(misses)}** (first 10 IDs):\n```\n{sample}\n```"
-        await interaction.followup.send(summary, ephemeral=True)
+            summary += S("move_any.pin.summary_misses_tail", missed=len(misses), sample=sample, shown=min(10, len(misses)))
+        await interaction.followup.send(summary, ephemeral=not post)
+        log.info("pinmatch.done", extra={
+            "guild_id": interaction.guild_id, "actor_id": interaction.user.id,
+            "pinned": pinned, "total_src_pins": len(src_pins), "misses": len(misses), "post": post
+        })
 
 
 async def setup(bot: commands.Bot):
