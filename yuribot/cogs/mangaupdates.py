@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import asyncio
+import io
 import json
 import re
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 
+from .. import models
 from ..strings import S
 
 API_BASE = "https://api.mangaupdates.com/v1"
@@ -20,6 +23,9 @@ POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
 # Turn EN filter on/off (OFF per your request)
 FILTER_ENGLISH_ONLY = False
+
+# Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit for many guilds)
+MAX_COVER_BYTES = 7_500_000
 
 
 def _now_utc() -> datetime:
@@ -403,7 +409,7 @@ class WatchEntry:
     forum_channel_id: int
     thread_id: int
     last_release_id: Optional[int] = None      # kept for backward compat (unused for logic now)
-    last_release_ts: Optional[int] = None      # NEW: what we actually compare
+    last_release_ts: Optional[int] = None      # what we actually compare
 
 
 def _load_state() -> Dict[str, dict]:
@@ -420,6 +426,72 @@ def _save_state(state: Dict[str, dict]) -> None:
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with DATA_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
+
+def _is_english_release(rel: dict) -> bool:
+    """Very heuristic: check for 'eng' hints in language or title."""
+    txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
+    return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
+
+
+def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
+    # 1) DB-configured forum via admin /set_mu_forum
+    ch_id = models.get_mu_forum_channel(guild.id)
+    if ch_id:
+        ch = guild.get_channel(ch_id)
+        if isinstance(ch, discord.ForumChannel):
+            return ch
+    # 2) Optional fallback by name if you still want it
+    lname = "ongoing-reading-room"
+    for ch in guild.channels:
+        if isinstance(ch, discord.ForumChannel) and ch.name.lower().strip() == lname:
+            return ch
+    return None
+
+
+async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) -> Optional[discord.File]:
+    """
+    Try to locate and fetch a series cover from the series JSON.
+    Returns a discord.File (in-memory) or None if not available/too large.
+    """
+    # Look for common fields
+    urls: List[str] = []
+    # New MU API sometimes returns thumbnails/art under different keys
+    for key in ("cover", "image", "image_url", "thumbnail", "thumbnail_url"):
+        val = series_json.get(key)
+        if isinstance(val, str) and val.startswith(("http://", "https://")):
+            urls.append(val)
+        elif isinstance(val, dict):
+            for v in val.values():
+                if isinstance(v, str) and v.startswith(("http://", "https://")):
+                    urls.append(v)
+
+    # De-dup while preserving order
+    seen = set()
+    urls = [u for u in urls if not (u in seen or seen.add(u))]
+
+    for url in urls:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                if resp.status != 200:
+                    continue
+                ctype = resp.headers.get("Content-Type", "").lower()
+                if not any(x in ctype for x in ("image/", "jpeg", "png", "webp")):
+                    continue
+                # Limit size
+                raw = await resp.read()
+                if len(raw) > MAX_COVER_BYTES:
+                    continue
+                ext = ".png"
+                if "jpeg" in ctype or "jpg" in ctype:
+                    ext = ".jpg"
+                elif "webp" in ctype:
+                    ext = ".webp"
+                filename = f"cover{ext}"
+                return discord.File(io.BytesIO(raw), filename=filename)
+        except Exception:
+            continue
+    return None
 
 
 class MUWatcher(commands.Cog):
@@ -444,34 +516,35 @@ class MUWatcher(commands.Cog):
 
     @group.command(
         name="link",
-        description="Link this forum post (or a target thread) to a series and start posting new releases.",
+        description="Link a series to a forum post and start posting new releases. Creates a new post in the configured MU forum.",
     )
     @app_commands.describe(
         series="Series name or alias (MangaUpdates)",
-        thread="Target forum post (use if you aren't running this inside the post)",
     )
     async def link(
         self,
         interaction: discord.Interaction,
         series: str,
-        thread: Optional[discord.Thread] = None,
     ):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        target_thread: Optional[discord.Thread] = thread
-        if target_thread is None and isinstance(interaction.channel, discord.Thread):
-            target_thread = interaction.channel
-
-        if not isinstance(target_thread, discord.Thread) or not isinstance(target_thread.parent, discord.ForumChannel):
-            return await interaction.response.send_message(S("mu.link.need_forum"), ephemeral=True)
-
         await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # Resolve the configured forum from DB
+        forum = _resolve_mu_forum(interaction.guild)
+        if not isinstance(forum, discord.ForumChannel):
+            return await interaction.followup.send(S("mu.link.forum_missing"), ephemeral=True)
 
         session = await self._session_ensure()
         client = MUClient(session)
 
-        results = await client.search_series(series)
+        # Search & pick the best match
+        try:
+            results = await client.search_series(series)
+        except Exception as e:
+            return await interaction.followup.send(S("mu.error.generic", msg=str(e)), ephemeral=True)
+
         if not results:
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
@@ -482,6 +555,7 @@ class MUWatcher(commands.Cog):
             if not sid:
                 continue
             aliases = []
+            score = 0.0
             try:
                 full = await client.get_series(sid)
                 raw_aliases = full.get("associated_names") or full.get("associated") or full.get("associated_names_ascii") or []
@@ -499,25 +573,61 @@ class MUWatcher(commands.Cog):
         sid = choice["sid"]
         title = choice["title"]
 
+        # Fetch full series for cover (best effort)
+        full_json: dict = {}
+        try:
+            full_json = await client.get_series(sid)
+        except Exception:
+            full_json = {}
+
+        cover_file: Optional[discord.File] = await _fetch_cover_image(session, full_json)
+
+        # Create the forum post (first message content)
+        # Description defaults to MU series page if available
+        mu_url = full_json.get("url") or full_json.get("series_url") or f"https://www.mangaupdates.com/series.html?id={sid}"
+        first_msg = f"Discussion thread for **{title}**\nLink: {mu_url}"
+
+        try:
+            if cover_file:
+                created = await forum.create_thread(
+                    name=title,
+                    content=first_msg,
+                    file=cover_file,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                created = await forum.create_thread(
+                    name=title,
+                    content=first_msg,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except discord.Forbidden:
+            return await interaction.followup.send("Forbidden creating a forum post here (check permissions).", ephemeral=True)
+        except discord.HTTPException as e:
+            return await interaction.followup.send(f"HTTP error creating forum post: {e}", ephemeral=True)
+
+        # Persist watch mapping (guild → entries list)
         gid = str(interaction.guild_id)
         g = self.state.setdefault(gid, {"entries": []})
-        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != (target_thread.id if target_thread else -1)]
+        # replace any existing watch tied to this new thread id (shouldn't exist, but be safe)
+        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != created.id]
         g["entries"].append(
             {
                 "series_id": sid,
                 "series_title": title,
                 "aliases": aliases,
-                "forum_channel_id": target_thread.parent.id,
-                "thread_id": target_thread.id,
+                "forum_channel_id": forum.id,
+                "thread_id": created.id,
                 "last_release_id": None,
                 "last_release_ts": None,
             }
         )
         _save_state(self.state)
 
+        # Confirmation
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
         await interaction.followup.send(
-            S("mu.link.linked_ok", title=title, sid=sid, thread=target_thread.name, aliases=alias_preview),
+            S("mu.link.linked_ok", title=title, sid=sid, thread=created.thread.name if hasattr(created, "thread") else title, aliases=alias_preview),
             ephemeral=True,
         )
 
