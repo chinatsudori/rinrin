@@ -516,7 +516,7 @@ class MUWatcher(commands.Cog):
 
     @group.command(
         name="link",
-        description="Link a series to a forum post and start posting new releases. Creates a new post in the configured MU forum.",
+        description="Link a series and create a forum post in the configured MU forum for updates.",
     )
     @app_commands.describe(
         series="Series name or alias (MangaUpdates)",
@@ -627,7 +627,7 @@ class MUWatcher(commands.Cog):
         # Confirmation
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
         await interaction.followup.send(
-            S("mu.link.linked_ok", title=title, sid=sid, thread=created.thread.name if hasattr(created, "thread") else title, aliases=alias_preview),
+            S("mu.link.linked_ok", title=title, sid=sid, thread=created.name, aliases=alias_preview),
             ephemeral=True,
         )
 
