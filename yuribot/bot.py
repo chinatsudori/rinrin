@@ -64,6 +64,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.movebot",
             "yuribot.cogs.coin_dice",
             "yuribot.cogs.mangaupdates",
+            "yuribot.cogs.booked",
         ]
         await self._load_extensions(extensions)
 
