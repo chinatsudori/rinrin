@@ -583,20 +583,19 @@ class MUWatcher(commands.Cog):
         cover_file: Optional[discord.File] = await _fetch_cover_image(session, full_json)
 
         # Create the forum post (first message content)
-        # Description defaults to MU series page if available
         mu_url = full_json.get("url") or full_json.get("series_url") or f"https://www.mangaupdates.com/series.html?id={sid}"
         first_msg = f"Discussion thread for **{title}**\nLink: {mu_url}"
 
         try:
             if cover_file:
-                created = await forum.create_thread(
+                created_any = await forum.create_thread(
                     name=title,
                     content=first_msg,
                     file=cover_file,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
-                created = await forum.create_thread(
+                created_any = await forum.create_thread(
                     name=title,
                     content=first_msg,
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -606,18 +605,24 @@ class MUWatcher(commands.Cog):
         except discord.HTTPException as e:
             return await interaction.followup.send(f"HTTP error creating forum post: {e}", ephemeral=True)
 
+        # Normalize return: Thread or ThreadWithMessage
+        thread_obj: discord.Thread
+        if hasattr(created_any, "thread"):  # ThreadWithMessage
+            thread_obj = created_any.thread  # type: ignore[attr-defined]
+        else:
+            thread_obj = created_any  # type: ignore[assignment]
+
         # Persist watch mapping (guild → entries list)
         gid = str(interaction.guild_id)
         g = self.state.setdefault(gid, {"entries": []})
-        # replace any existing watch tied to this new thread id (shouldn't exist, but be safe)
-        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != created.id]
+        g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != thread_obj.id]
         g["entries"].append(
             {
                 "series_id": sid,
                 "series_title": title,
                 "aliases": aliases,
                 "forum_channel_id": forum.id,
-                "thread_id": created.id,
+                "thread_id": thread_obj.id,
                 "last_release_id": None,
                 "last_release_ts": None,
             }
@@ -627,7 +632,8 @@ class MUWatcher(commands.Cog):
         # Confirmation
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
         await interaction.followup.send(
-            S("mu.link.linked_ok", title=title, sid=sid, thread=created.name, aliases=alias_preview),
+            S("mu.link.linked_ok", title=title, sid=sid, thread=thread_obj.name, aliases=alias_preview)
+            + f"\n→ {thread_obj.mention}",
             ephemeral=True,
         )
 
