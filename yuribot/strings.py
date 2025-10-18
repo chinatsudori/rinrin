@@ -470,6 +470,8 @@ _STRINGS.update({
     "mu.error.search_http": "MangaUpdates search failed (HTTP {code}).",
     "mu.error.series_http": "MangaUpdates series {sid} failed (HTTP {code}).",
     "mu.error.releases_http": "MangaUpdates releases for {sid} failed (HTTP {code}).",
+    "admin.mu_forum.set_ok": "MangaUpdates forum set to {channel}.",
+    "mu.link.forum_missing": "No MangaUpdates forum is configured. Ask an admin to run `/set_mu_forum`.",
 
     # ---------------- Tools: Timestamp ----------------
     "tools.timestamp.invalid_dt": "Invalid date/time. Use `YYYY-MM-DD` and `HH:MM` (or `HH:MM:SS`).",
@@ -493,4 +495,5 @@ _STRINGS.update({
     ),
     "rolewelcome.footer": "{guild}",
 })
+
 
