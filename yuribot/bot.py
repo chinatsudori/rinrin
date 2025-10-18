@@ -12,7 +12,6 @@ import discord
 from discord.ext import commands
 
 from .db import ensure_db
-from .tasks import discussion_poster_loop  # assumed: async coroutine or discord.ext.tasks.Loop
 from .strings import _STRINGS  # imported so strings are loaded at startup
 
 
