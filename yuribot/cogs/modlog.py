@@ -13,7 +13,6 @@ from ..strings import S
 
 log = logging.getLogger(__name__)
 
-# ---- helpers ---------------------------------------------------------
 
 RULE_CHOICES = [
     "Respect Everyone",
@@ -49,7 +48,6 @@ def _temp_label(temp: int) -> str:
         4: S("modlog.temp.critical"),
     }.get(temp, S("modlog.temp.unknown", n=temp))
 
-# ---- Cog -------------------------------------------------------------
 
 class ModLogCog(commands.Cog):
     """
@@ -231,7 +229,6 @@ class ModLogCog(commands.Cog):
             },
         )
 
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         # Only handle DMs from users with an active relay
@@ -266,7 +263,6 @@ class ModLogCog(commands.Cog):
             await channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             log.exception("modlog.relay.post_failed", extra={"guild_id": guild_id, "channel_id": modlog_channel_id})
-
 
     @app_commands.command(name="modlog_close_dm", description="Stop relaying DM replies from a user to the modlog channel.")
     @app_commands.describe(user="User to stop relaying", post="If true, post publicly in this channel")
