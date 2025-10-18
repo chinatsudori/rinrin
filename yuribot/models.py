@@ -851,3 +851,21 @@ def role_welcome_mark_sent(guild_id: int, user_id: int, role_id: int) -> None:
             VALUES (?, ?, ?, ?)
         """, (guild_id, user_id, role_id, when_iso))
         con.commit()
+        
+def set_mu_forum_channel(guild_id: int, channel_id: int) -> None:
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO guild_settings (guild_id, mu_forum_channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET mu_forum_channel_id=excluded.mu_forum_channel_id
+        """, (guild_id, channel_id))
+        con.commit()
+
+def get_mu_forum_channel(guild_id: int) -> int | None:
+    with connect() as con:
+        cur = con.cursor()
+        row = cur.execute("""
+            SELECT mu_forum_channel_id FROM guild_settings WHERE guild_id=?
+        """, (guild_id,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
