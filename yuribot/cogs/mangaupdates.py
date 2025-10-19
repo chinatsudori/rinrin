@@ -84,6 +84,14 @@ def _stringify_aliases(raw) -> List[str]:
     return uniq
 
 
+def _forum_post_name(s: str) -> str:
+    name = re.sub(r"\s+", " ", (s or "").strip())
+    if not name:
+        name = "Untitled"
+    # Discord thread name must be 1–100 chars
+    return name[:100]
+
+
 # ---------------- chapter/volume parsing ----------------
 
 _CH_PATTERNS = [
@@ -358,6 +366,7 @@ class MUClient:
             desc = _text(it, "description")
             pub = _text(it, "pubdate") or _text(it, "pubDate")
 
+        # ... rest of the RSS parsing ...
             ts = None
             try:
                 dt = eut.parsedate_to_datetime(pub) if pub else None
@@ -582,21 +591,24 @@ class MUWatcher(commands.Cog):
 
         cover_file: Optional[discord.File] = await _fetch_cover_image(session, full_json)
 
-        # Create the forum post (first message content)
+        # Use the user-provided name (exact input) for the forum post title
+        post_name = _forum_post_name(series)
+
+        # Create the forum post (first message content) — embed will use canonical MU title
         mu_url = full_json.get("url") or full_json.get("series_url") or f"https://www.mangaupdates.com/series.html?id={sid}"
         first_msg = f"Discussion thread for **{title}**\nLink: {mu_url}"
 
         try:
             if cover_file:
                 created_any = await forum.create_thread(
-                    name=title,
+                    name=post_name,                              # <-- user's input
                     content=first_msg,
                     file=cover_file,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
                 created_any = await forum.create_thread(
-                    name=title,
+                    name=post_name,                              # <-- user's input
                     content=first_msg,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -629,10 +641,10 @@ class MUWatcher(commands.Cog):
         )
         _save_state(self.state)
 
-        # Confirmation
+        # Confirmation (surface the user's chosen post name)
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
         await interaction.followup.send(
-            S("mu.link.linked_ok", title=title, sid=sid, thread=thread_obj.name, aliases=alias_preview)
+            S("mu.link.linked_ok", title=title, sid=sid, thread=post_name, aliases=alias_preview)
             + f"\n→ {thread_obj.mention}",
             ephemeral=True,
         )
