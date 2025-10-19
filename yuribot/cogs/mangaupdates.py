@@ -581,7 +581,26 @@ class MUWatcher(commands.Cog):
         choice, score, aliases = scored[0]
         sid = choice["sid"]
         title = choice["title"]
-
+        # Prevent duplicates in this guild: if this series_id is already linked, abort
+        gid = str(interaction.guild_id)
+        existing = next(
+            (e for e in self.state.get(gid, {}).get("entries", [])
+             if str(e.get("series_id")) == str(sid)),
+            None,
+        )
+        if existing:
+            # Try to show a nice mention to the existing thread
+            existing_thread = self.bot.get_channel(int(existing.get("thread_id", 0)))
+            where = (
+                existing_thread.mention
+                if isinstance(existing_thread, discord.Thread)
+                else f"<#{existing.get('thread_id')}>"
+            )
+            return await interaction.followup.send(
+                f"That MangaUpdates series is already linked here → {where}\n"
+                f"(series id `{sid}`), so I won’t create a duplicate.",
+                ephemeral=True,
+            )
         # Fetch full series for cover (best effort)
         full_json: dict = {}
         try:
