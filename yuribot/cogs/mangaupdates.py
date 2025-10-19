@@ -232,23 +232,9 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     return chbits, "\n".join(extras) if extras else ""
 
 
-_MU_CANON_TAGS = [
-    # Demographic
-    "josei", "lolicon", "seinen", "shotacon", "shoujo", "shoujo ai", "shounen",
-    "shounen ai", "yaoi", "yuri",
-    # Genre
-    "action", "adult", "adventure", "comedy", "doujinshi", "drama", "ecchi",
-    "fantasy", "gender bender", "harem", "hentai", "historical", "horror",
-    "martial arts", "mature", "mecha", "mystery", "psychological", "romance",
-    "school life", "sci-fi", "slice of life", "smut", "sports", "supernatural",
-    "tragedy", "isekai"
-]
-
-# Forum tags we might apply
+# Forum tags we might apply (lowercased)
 _FORUM_TAG_PRIORITY = [
-
     "manga", "manhwa", "manhua", "webtoon",
-
     "fantasy", "slice of life", "drama", "sci-fi", "mystery", "horror",
     "tragedy", "comedy", "isekai", "harem", "smut", "ecchi",
     "toxic", "cute", "sports", "adult",
@@ -256,33 +242,47 @@ _FORUM_TAG_PRIORITY = [
 
 def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     """
-    Map MU tags to your forum tag names (lowercased).
+    Map MU tags (any case, hyphen/space variants) to forum tag names (lowercased).
     Rules:
-      - Adult ⇐ {adult, mature, hentai}
+      - Adult ⇐ {adult, mature}
+      - Smut  ⇐ {hentai}
+      - Toxic ⇐ {psychological}
       - Cute  ⇐ {shoujo ai}
       - Slice of Life ⇐ {slice of life, school life}
       - Keep: fantasy, drama, sci-fi, mystery, horror, tragedy, comedy, isekai, harem, smut, ecchi, sports
-      - Ignore: romance, yuri (assumed), action/adventure/etc not present in your forum tags
     """
-    mt = {t.lower() for t in mu_tags}
+    # normalize: lowercase, collapse hyphens to spaces, single-space
+    def _norm_tag(t: str) -> str:
+        t = t.lower().replace("-", " ")
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    mt = {_norm_tag(t) for t in mu_tags}
+
+    # accept a couple loose variants
+    if "sci fi" in mt or "scifi" in mt:
+        mt.add("sci fi")           # ensure present
+    # (not strictly needed, but harmless if MU ever changes display text)
 
     out: Set[str] = set()
 
+    # special mappings
     if {"adult", "mature"} & mt:
-        out.add("adult")    
-    if {"hentai"} & mt:
+        out.add("adult")
+    if "hentai" in mt:
         out.add("smut")
-    if {"psychological"} & mt:
+    if "psychological" in mt:
         out.add("toxic")
     if "shoujo ai" in mt:
         out.add("cute")
     if {"slice of life", "school life"} & mt:
         out.add("slice of life")
 
+    # direct keeps
     keep_map = {
         "fantasy": "fantasy",
         "drama": "drama",
-        "sci-fi": "sci-fi",
+        "sci fi": "sci-fi",   # map normalized "sci fi" to your forum tag "sci-fi"
         "mystery": "mystery",
         "horror": "horror",
         "tragedy": "tragedy",
@@ -293,11 +293,10 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
         "ecchi": "ecchi",
         "sports": "sports",
     }
-    for mu, forum_tag in keep_map.items():
-        if mu in mt:
+    for mu_key, forum_tag in keep_map.items():
+        if mu_key in mt:
             out.add(forum_tag)
 
-    # Optional: Toxic is manual/undefined by MU here, so we don't auto-apply it.
     return out
 
 
