@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import aiohttp
 import discord
@@ -21,10 +21,10 @@ API_BASE = "https://api.mangaupdates.com/v1"
 DATA_FILE = Path("./data/mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
-# Turn EN filter on/off (OFF per your request)
+# Turn EN filter on/off
 FILTER_ENGLISH_ONLY = False
 
-# Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit for many guilds)
+# Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit)
 MAX_COVER_BYTES = 7_500_000
 
 
@@ -92,8 +92,6 @@ def _forum_post_name(s: str) -> str:
     return name[:100]
 
 
-# ---------------- chapter/volume parsing ----------------
-
 _CH_PATTERNS = [
     r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",      # ch 25 / c25 / ch.25
     r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",     # 21-25 / 21–25
@@ -134,7 +132,6 @@ def _extract_max_volume(text: str) -> str:
     mx = max(nums)
     return f"{mx}".rstrip("0").rstrip(".")
 
-# -------------------------------------------------------
 
 
 def _parse_ts(value: Optional[str]) -> Optional[int]:
@@ -233,6 +230,153 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
         extras.append(url)
 
     return chbits, "\n".join(extras) if extras else ""
+
+
+_MU_CANON_TAGS = [
+    # Demographic
+    "josei", "lolicon", "seinen", "shotacon", "shoujo", "shoujo ai", "shounen",
+    "shounen ai", "yaoi", "yuri",
+    # Genre
+    "action", "adult", "adventure", "comedy", "doujinshi", "drama", "ecchi",
+    "fantasy", "gender bender", "harem", "hentai", "historical", "horror",
+    "martial arts", "mature", "mecha", "mystery", "psychological", "romance",
+    "school life", "sci-fi", "slice of life", "smut", "sports", "supernatural",
+    "tragedy", "isekai"
+]
+
+# Forum tags we might apply
+_FORUM_TAG_PRIORITY = [
+
+    "manga", "manhwa", "manhua", "webtoon",
+
+    "fantasy", "slice of life", "drama", "sci-fi", "mystery", "horror",
+    "tragedy", "comedy", "isekai", "harem", "smut", "ecchi",
+    "toxic", "cute", "sports", "adult",
+]
+
+def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
+    """
+    Map MU tags to your forum tag names (lowercased).
+    Rules:
+      - Adult ⇐ {adult, mature, hentai}
+      - Cute  ⇐ {shoujo ai}
+      - Slice of Life ⇐ {slice of life, school life}
+      - Keep: fantasy, drama, sci-fi, mystery, horror, tragedy, comedy, isekai, harem, smut, ecchi, sports
+      - Ignore: romance, yuri (assumed), action/adventure/etc not present in your forum tags
+    """
+    mt = {t.lower() for t in mu_tags}
+
+    out: Set[str] = set()
+
+    if {"adult", "mature"} & mt:
+        out.add("adult")    
+    if {"hentai"} & mt:
+        out.add("smut")
+    if "shoujo ai" in mt:
+        out.add("cute")
+    if {"slice of life", "school life"} & mt:
+        out.add("slice of life")
+
+    keep_map = {
+        "fantasy": "fantasy",
+        "drama": "drama",
+        "sci-fi": "sci-fi",
+        "mystery": "mystery",
+        "horror": "horror",
+        "tragedy": "tragedy",
+        "comedy": "comedy",
+        "isekai": "isekai",
+        "harem": "harem",
+        "smut": "smut",
+        "ecchi": "ecchi",
+        "sports": "sports",
+    }
+    for mu, forum_tag in keep_map.items():
+        if mu in mt:
+            out.add(forum_tag)
+
+    # Optional: Toxic is manual/undefined by MU here, so we don't auto-apply it.
+    return out
+
+
+async def _scrape_mu_tags_and_type(
+    session: aiohttp.ClientSession,
+    sid: str,
+    series_json: dict | None,
+) -> Tuple[Optional[str], Set[str]]:
+    """
+    Returns (type_tag, mu_tags_set)
+      - type_tag in {"manga","manhwa","manhua","webtoon"} if detected, else None
+      - mu_tags_set = lowercased MU tags detected
+    We try JSON first; if insufficient, we fetch and parse the HTML (best-effort).
+    """
+    mu_tags: Set[str] = set()
+    type_tag: Optional[str] = None
+
+    # Try JSON hints
+    sj = series_json or {}
+    # Some MU JSONs expose genres/categories/associated tags
+    for key in ("genres", "genre", "categories", "tags", "themes"):
+        raw = sj.get(key)
+        if isinstance(raw, list):
+            for v in raw:
+                if isinstance(v, str):
+                    mu_tags.add(v.strip().lower())
+                elif isinstance(v, dict):
+                    name = (v.get("name") or v.get("title") or v.get("value") or "").strip()
+                    if name:
+                        mu_tags.add(name.lower())
+
+    # Type hints in JSON
+    for key in ("type", "format", "media_type"):
+        val = str(sj.get(key) or "").strip().lower()
+        if val:
+            if "manhwa" in val:
+                type_tag = "manhwa"
+            elif "manhua" in val:
+                type_tag = "manhua"
+            elif "webtoon" in val:
+                type_tag = "webtoon"
+            elif "manga" in val:
+                type_tag = "manga"
+
+    # If we still need better coverage, fetch HTML and scan text
+    if not type_tag or not mu_tags:
+        # new-style page
+        urls = [
+            f"https://www.mangaupdates.com/series/{sid}",
+            f"https://www.mangaupdates.com/series.html?id={sid}",
+        ]
+        page_text = ""
+        for url in urls:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                    if resp.status == 200:
+                        page_text = await resp.text()
+                        if page_text:
+                            break
+            except Exception:
+                continue
+
+        text = re.sub(r"<[^>]+>", " ", page_text)  # strip tags roughly
+        text = re.sub(r"\s+", " ", text).lower()
+
+        if not type_tag:
+            if "manhwa" in text:
+                type_tag = "manhwa"
+            elif "manhua" in text:
+                type_tag = "manhua"
+            elif "webtoon" in text:
+                type_tag = "webtoon"
+            elif "manga" in text:
+                type_tag = "manga"
+
+        if not mu_tags:
+            for t in _MU_CANON_TAGS:
+                if t in text:
+                    mu_tags.add(t)
+
+    return type_tag, mu_tags
 
 
 class MUClient:
@@ -366,7 +510,6 @@ class MUClient:
             desc = _text(it, "description")
             pub = _text(it, "pubdate") or _text(it, "pubDate")
 
-        # ... rest of the RSS parsing ...
             ts = None
             try:
                 dt = eut.parsedate_to_datetime(pub) if pub else None
@@ -581,54 +724,70 @@ class MUWatcher(commands.Cog):
         choice, score, aliases = scored[0]
         sid = choice["sid"]
         title = choice["title"]
-        # Prevent duplicates in this guild: if this series_id is already linked, abort
+
+        # Duplicate protection (per guild)
         gid = str(interaction.guild_id)
-        existing = next(
-            (e for e in self.state.get(gid, {}).get("entries", [])
-             if str(e.get("series_id")) == str(sid)),
-            None,
-        )
-        if existing:
-            # Try to show a nice mention to the existing thread
-            existing_thread = self.bot.get_channel(int(existing.get("thread_id", 0)))
-            where = (
-                existing_thread.mention
-                if isinstance(existing_thread, discord.Thread)
-                else f"<#{existing.get('thread_id')}>"
-            )
+        already = None
+        for e in self.state.get(gid, {}).get("entries", []):
+            if str(e.get("series_id")) == str(sid):
+                already = e
+                break
+        if already:
+            t_id = int(already.get("thread_id"))
+            mention = f"<#{t_id}>"
             return await interaction.followup.send(
-                f"That MangaUpdates series is already linked here → {where}\n"
-                f"(series id `{sid}`), so I won’t create a duplicate.",
+                S("mu.link.already_linked", title=title, sid=sid, thread=mention),
                 ephemeral=True,
             )
-        # Fetch full series for cover (best effort)
+
+        # Fetch full series for cover (best effort) and tags
         full_json: dict = {}
         try:
             full_json = await client.get_series(sid)
         except Exception:
             full_json = {}
 
+        # Scrape tags & type
+        type_tag, mu_tags = await _scrape_mu_tags_and_type(session, sid, full_json)
+        forum_tag_names = _map_mu_to_forum(mu_tags)
+
+        # Build applied_tags list (max 5; prioritize type first)
+        tag_name_to_obj = {t.name.lower(): t for t in getattr(forum, "available_tags", [])}
+        desired_order = []
+
+        if type_tag and type_tag in tag_name_to_obj:
+            desired_order.append(type_tag)
+
+        for name in _FORUM_TAG_PRIORITY:
+            if name in {"manga", "manhwa", "manhua", "webtoon"}:
+                continue  # type handled above
+            if name in forum_tag_names and name in tag_name_to_obj:
+                desired_order.append(name)
+
+        applied = [tag_name_to_obj[n] for n in desired_order[:5]]
+
         cover_file: Optional[discord.File] = await _fetch_cover_image(session, full_json)
 
-        # Use the user-provided name (exact input) for the forum post title
-        post_name = _forum_post_name(series)
-
-        # Create the forum post (first message content) — embed will use canonical MU title
+        # Create the forum post (first message content)
         mu_url = full_json.get("url") or full_json.get("series_url") or f"https://www.mangaupdates.com/series.html?id={sid}"
         first_msg = f"Discussion thread for **{title}**\nLink: {mu_url}"
+
+        thread_name = _forum_post_name(series)  # use the user-entered name
 
         try:
             if cover_file:
                 created_any = await forum.create_thread(
-                    name=post_name,                              # <-- user's input
+                    name=thread_name,
                     content=first_msg,
                     file=cover_file,
+                    applied_tags=applied or None,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
                 created_any = await forum.create_thread(
-                    name=post_name,                              # <-- user's input
+                    name=thread_name,
                     content=first_msg,
+                    applied_tags=applied or None,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
         except discord.Forbidden:
@@ -644,7 +803,6 @@ class MUWatcher(commands.Cog):
             thread_obj = created_any  # type: ignore[assignment]
 
         # Persist watch mapping (guild → entries list)
-        gid = str(interaction.guild_id)
         g = self.state.setdefault(gid, {"entries": []})
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != thread_obj.id]
         g["entries"].append(
@@ -660,11 +818,12 @@ class MUWatcher(commands.Cog):
         )
         _save_state(self.state)
 
-        # Confirmation (surface the user's chosen post name)
+        # Confirmation
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
+        applied_names = ", ".join([t.name for t in applied]) if applied else "none"
         await interaction.followup.send(
-            S("mu.link.linked_ok", title=title, sid=sid, thread=post_name, aliases=alias_preview)
-            + f"\n→ {thread_obj.mention}",
+            S("mu.link.linked_ok", title=title, sid=sid, thread=thread_obj.name, aliases=alias_preview)
+            + f"\n→ {thread_obj.mention}\nTags applied: {applied_names}",
             ephemeral=True,
         )
 
