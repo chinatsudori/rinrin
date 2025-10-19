@@ -272,6 +272,8 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
         out.add("adult")    
     if {"hentai"} & mt:
         out.add("smut")
+    if {"psychological"} & mt:
+        out.add("toxic")
     if "shoujo ai" in mt:
         out.add("cute")
     if {"slice of life", "school life"} & mt:
