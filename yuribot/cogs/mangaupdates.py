@@ -231,6 +231,7 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
 
     return chbits, "\n".join(extras) if extras else ""
 
+# --- MU tags → Forum tags mapping helpers ------------------------------------
 
 _MU_CANON_TAGS = [
     # Demographic
@@ -248,38 +249,37 @@ _MU_CANON_TAGS = [
 _FORUM_TAG_PRIORITY = [
     "manga", "manhwa", "manhua", "webtoon",
     "fantasy", "slice of life", "drama", "sci-fi", "mystery", "horror",
-    "tragedy", "comedy", "isekai", "harem", "smut", "ecchi",
-    "toxic", "cute", "sports", "adult",
+    "tragedy", "comedy", "isekai", "harem", "ecchi",
+    "psychological", "violence/gore", "historical", "nsfw",
 ]
 
 def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     """
     Map MU tags to your forum tag names (lowercased).
+
     Rules:
-      - Adult ⇐ {adult, mature} (and hentai -> Smut)
-      - Cute  ⇐ {shoujo ai}
-      - Slice of Life ⇐ {slice of life, school life}
-      - Toxic ⇐ {psychological}
-      - Keep: fantasy, drama, sci-fi, mystery, horror, tragedy, comedy, isekai,
-              harem, smut, ecchi, sports
-      - Ignore: romance, yuri (assumed), other tags you don’t have
+      - nsfw          ⇐ {hentai}
+      - slice of life ⇐ {slice of life, school life}
+      - psychological ⇐ {psychological}
+      - violence/gore ⇐ {action, martial arts, mecha}
+      - historical    ⇐ {historical}
+      - Keep direct: fantasy, drama, sci-fi, mystery, horror, tragedy,
+                     comedy, isekai, harem, ecchi
+      - Ignore: romance, yuri, adult, mature, smut, sports, cute
     """
     mt = {t.lower() for t in mu_tags}
     out: Set[str] = set()
 
-    # combined rules
-    if {"adult", "mature"} & mt:
-        out.add("adult")
-    if {"mecha", "sci-fi"} & mt:
-        out.add("sci-fi")
     if "hentai" in mt:
-        out.add("smut")
-    if "psychological" in mt:
-        out.add("toxic")
-    if "shoujo ai" in mt:
-        out.add("cute")
+        out.add("nsfw")
     if {"slice of life", "school life"} & mt:
         out.add("slice of life")
+    if "psychological" in mt:
+        out.add("psychological")
+    if {"action", "martial arts", "mecha"} & mt:
+        out.add("violence/gore")
+    if "historical" in mt:
+        out.add("historical")
 
     keep_map = {
         "fantasy": "fantasy",
@@ -291,13 +291,12 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
         "comedy": "comedy",
         "isekai": "isekai",
         "harem": "harem",
-        "smut": "smut",
         "ecchi": "ecchi",
-        "sports": "sports",
     }
     for mu, forum_tag in keep_map.items():
         if mu in mt:
             out.add(forum_tag)
+
     return out
 
 
