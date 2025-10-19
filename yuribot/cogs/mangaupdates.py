@@ -232,7 +232,19 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     return chbits, "\n".join(extras) if extras else ""
 
 
-# Forum tags we might apply (lowercased)
+_MU_CANON_TAGS = [
+    # Demographic
+    "josei", "lolicon", "seinen", "shotacon", "shoujo", "shoujo ai", "shounen",
+    "shounen ai", "yaoi", "yuri",
+    # Genre
+    "action", "adult", "adventure", "comedy", "doujinshi", "drama", "ecchi",
+    "fantasy", "gender bender", "harem", "hentai", "historical", "horror",
+    "martial arts", "mature", "mecha", "mystery", "psychological", "romance",
+    "school life", "sci-fi", "slice of life", "smut", "sports", "supernatural",
+    "tragedy", "isekai",
+]
+
+# forum tags you actually have (lowercase); order = priority when trimming
 _FORUM_TAG_PRIORITY = [
     "manga", "manhwa", "manhua", "webtoon",
     "fantasy", "slice of life", "drama", "sci-fi", "mystery", "horror",
@@ -242,31 +254,20 @@ _FORUM_TAG_PRIORITY = [
 
 def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     """
-    Map MU tags (any case, hyphen/space variants) to forum tag names (lowercased).
+    Map MU tags to your forum tag names (lowercased).
     Rules:
-      - Adult ⇐ {adult, mature}
-      - Smut  ⇐ {hentai}
-      - Toxic ⇐ {psychological}
+      - Adult ⇐ {adult, mature} (and hentai -> Smut)
       - Cute  ⇐ {shoujo ai}
       - Slice of Life ⇐ {slice of life, school life}
-      - Keep: fantasy, drama, sci-fi, mystery, horror, tragedy, comedy, isekai, harem, smut, ecchi, sports
+      - Toxic ⇐ {psychological}
+      - Keep: fantasy, drama, sci-fi, mystery, horror, tragedy, comedy, isekai,
+              harem, smut, ecchi, sports
+      - Ignore: romance, yuri (assumed), other tags you don’t have
     """
-    # normalize: lowercase, collapse hyphens to spaces, single-space
-    def _norm_tag(t: str) -> str:
-        t = t.lower().replace("-", " ")
-        t = re.sub(r"\s+", " ", t).strip()
-        return t
-
-    mt = {_norm_tag(t) for t in mu_tags}
-
-    # accept a couple loose variants
-    if "sci fi" in mt or "scifi" in mt:
-        mt.add("sci fi")           # ensure present
-    # (not strictly needed, but harmless if MU ever changes display text)
-
+    mt = {t.lower() for t in mu_tags}
     out: Set[str] = set()
 
-    # special mappings
+    # combined rules
     if {"adult", "mature"} & mt:
         out.add("adult")
     if "hentai" in mt:
@@ -278,11 +279,10 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     if {"slice of life", "school life"} & mt:
         out.add("slice of life")
 
-    # direct keeps
     keep_map = {
         "fantasy": "fantasy",
         "drama": "drama",
-        "sci fi": "sci-fi",   # map normalized "sci fi" to your forum tag "sci-fi"
+        "sci-fi": "sci-fi",
         "mystery": "mystery",
         "horror": "horror",
         "tragedy": "tragedy",
@@ -293,10 +293,9 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
         "ecchi": "ecchi",
         "sports": "sports",
     }
-    for mu_key, forum_tag in keep_map.items():
-        if mu_key in mt:
+    for mu, forum_tag in keep_map.items():
+        if mu in mt:
             out.add(forum_tag)
-
     return out
 
 
