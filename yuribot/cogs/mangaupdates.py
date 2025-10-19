@@ -270,6 +270,8 @@ def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     # combined rules
     if {"adult", "mature"} & mt:
         out.add("adult")
+    if {"mecha", "sci-fi"} & mt:
+        out.add("sci-fi")
     if "hentai" in mt:
         out.add("smut")
     if "psychological" in mt:
