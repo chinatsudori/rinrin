@@ -1,6 +1,41 @@
 from __future__ import annotations
+from typing import Any, Mapping, Iterable
+import random
 
-from typing import Any, Mapping
+# =========================
+# Persona / flavor toggles
+# =========================
+RIN_PERSONA_ENABLED = True          # master switch (turn off to go fully neutral)
+RIN_FLAVOR_PROB = 1.0              # chance to sprinkle a quip on eligible lines (0.0–1.0)
+
+# Apply to keys that start with these prefixes; everything else stays neutral
+_RIN_ALLOW_PREFIXES: tuple[str, ...] = (
+    "common.", "activity.", "movie.", "music.", "poll.", "series.", "discuss.",
+    "stats.", "tools.", "welcome.", "fun.", "move_any.", "emoji.", "sticker.",
+    "mu.",  # MU watcher confirmations/errors are fair game for light sass
+)
+
+# Never flavor these (audit/mod actions, admin, timeouts, etc.)
+_RIN_DENY_PREFIXES: tuple[str, ...] = (
+    "botlog.", "modlog.", "timeout.", "admin.",  # sensitive/serious
+)
+
+# Tiny quip pools — short, sardonic, little-sis vibe; SFW; no spammy emojis
+_RIN_Q = {
+    "ok": [
+        "ok ok~", "kinda slayed ngl", "noted 💅", "heard ya", "mkay~",
+    ],
+    "oops": [
+        "eep—my bad", "uhh yikes", "scuffed…", "whoopsies", "brb crying",
+    ],
+    "hint": [
+        "you got this", "i believe in u", "pro gamer move time", "brain on pls", "tiny hint: read closely",
+    ],
+}
+
+def _rin_pick(kind: str) -> str:
+    pool = _RIN_Q.get(kind, [])
+    return random.choice(pool) if pool else ""
 
 
 class _NeutralMap(dict[str, str]):
@@ -10,7 +45,6 @@ class _NeutralMap(dict[str, str]):
     it falls back to the first string value found. Non-strings are
     stringified conservatively.
     """
-
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(key, self._flatten(value))
 
@@ -40,18 +74,53 @@ class _NeutralMap(dict[str, str]):
 _STRINGS: dict[str, str] = _NeutralMap()
 
 
+def _eligible_for_flavor(key: str) -> bool:
+    if not RIN_PERSONA_ENABLED:
+        return False
+    for p in _RIN_DENY_PREFIXES:
+        if key.startswith(p):
+            return False
+    if not _RIN_ALLOW_PREFIXES:
+        return False
+    return any(key.startswith(p) for p in _RIN_ALLOW_PREFIXES)
+
+
+def _pepper(text: str, key: str) -> str:
+    """
+    Lightly season certain messages. Keep short; preserve placeholders;
+    do not touch markdown or code blocks beyond appending a tiny quip.
+    """
+    if not _eligible_for_flavor(key):
+        return text
+    if random.random() > RIN_FLAVOR_PROB:
+        return text
+
+    lower = text.lower()
+    # pick a vibe
+    if any(w in lower for w in ("error", "failed", "couldn’t", "couldn't", "invalid", "missing", "forbidden")):
+        quip = _rin_pick("oops")
+    elif any(w in lower for w in ("try", "hint", "help", "use", "provide", "format")):
+        quip = _rin_pick("hint")
+    else:
+        quip = _rin_pick("ok") or "ok~"
+
+    # Append with a thin separator, keep it compact
+    if text.endswith((".", "!", "…")):
+        return f"{text} {quip}"
+    return f"{text} — {quip}"
+
+
 def S(key: str, /, **fmt: Any) -> str:
     """
-    Fetch and format a localized string by key. If formatting fails
-    (e.g., missing arg), return the raw template to avoid hard failures.
+    Fetch and format a localized string by key, then (optionally) add
+    a tiny Rinrin flavor. If formatting fails, return the raw template.
     """
-    text = _STRINGS.get(key, key)
-    if fmt:
-        try:
-            return text.format(**fmt)
-        except Exception:
-            return text
-    return text
+    template = _STRINGS.get(key, key)
+    try:
+        text = template.format(**fmt) if fmt else template
+    except Exception:
+        text = template
+    return _pepper(text, key)
 
 
 # Optional short alias
@@ -495,5 +564,6 @@ _STRINGS.update({
     ),
     "rolewelcome.footer": "{guild}",
 })
+
 
 
