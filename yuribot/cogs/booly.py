@@ -13,13 +13,17 @@ from discord.ext import commands
 from ..strings import S
 
 
+# =========================
+# Storage / constants
+# =========================
+
 DATA_FILE = Path("./data/user_autoresponder.json")
 
 # Personalized (per-user) auto-replies are once per day
 PERSONAL_COOLDOWN = 24 * 60 * 60  # 24h
 
 # Mentions are rate-limited so people can't spam
-MENTION_COOLDOWN = 1200  # seconds
+MENTION_COOLDOWN = 1200  # seconds (20 min)
 
 # IDs
 ID_MONKE   = 994264143634907157
@@ -45,6 +49,33 @@ EXCLUDED_CHANNEL_IDS = {
     1420832036469473422, 1419936079158579222, 1418226340880056380,
 }
 
+# =========================
+# Emoji expansion
+# =========================
+# Use these to write pools with :name: or a::name: and expand right before sending.
+EMOJI = {
+    "gura_heart": "<:gura_heart:1432286456558391376>",
+    "henyaHeart": "<:henyaHeart:1432286471837978645>",
+    "sadcrydepression": "<:sadcrydepression:1432289105131081738>",
+    "ping": "<a:ping:1432286407736557608>",
+    "gimme_hug": "<a:gimme_hug:1275464256330006589>",
+    "henyaNodder": "<a:henyaNodder:1432286485905801306>",
+    "wavehi": "<a:wavehi:1432286440028639272>",
+}
+
+def expand_emoji_tokens(text: str) -> str:
+    if not text:
+        return text
+    out = text
+    for name, tag in EMOJI.items():
+        out = out.replace(f":{name}:", tag).replace(f"a::{name}:", tag)
+    return out
+
+
+# =========================
+# Message pools
+# =========================
+
 # General quips for mentions (anyone)
 GENERAL_MENTION_POOL: List[str] = [
     "Hai hai ~",
@@ -57,6 +88,7 @@ GENERAL_MENTION_POOL: List[str] = [
     ":ping:",
 ]
 
+# Slightly deferential if a mod/staff pings
 MOD_MENTION_POOL: List[str] = [
     "am I in trouble ? :sadcrydepression:",
     "I've been good I swear !",
@@ -67,10 +99,9 @@ MOD_MENTION_POOL: List[str] = [
 SPECIAL_DEFAULT_POOL: List[str] = [
     ":henyaHeart:",
     ":gura_heart:",
-
 ]
 
-# Per-user pools 
+# Per-user pools
 MOM_1_POOL: List[str] = [
     "hi mom a::wavehi: im mostly behaving today ~",
     "hearts you ~ :gura_heart:",
@@ -178,6 +209,11 @@ MONKE_POOL: List[str] = [
     "nerd!",
 ]
 
+
+# =========================
+# State
+# =========================
+
 @dataclass
 class GuildUserState:
     last_auto_ts: Optional[int] = None      # last time a personalized auto fired
@@ -196,8 +232,8 @@ def _load_state() -> StateType:
                 inner: Dict[str, GuildUserState] = {}
                 for uid, blob in (users or {}).items():
                     inner[uid] = GuildUserState(
-                        last_auto_ts = blob.get("last_auto_ts"),
-                        last_key      = blob.get("last_key"),
+                        last_auto_ts    = blob.get("last_auto_ts"),
+                        last_key        = blob.get("last_key"),
                         last_mention_ts = blob.get("last_mention_ts"),
                     )
                 out[gid] = inner
@@ -258,6 +294,10 @@ def _personal_pool_for(user_id: int) -> List[str]:
     return SPECIAL_DEFAULT_POOL
 
 
+# =========================
+# Cog
+# =========================
+
 class UserAutoResponder(commands.Cog):
     """
     - Personalized replies (special users) fire once per 24h after any message
@@ -281,6 +321,8 @@ class UserAutoResponder(commands.Cog):
     async def _safe_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
         if not content:
             return None
+        # Expand our emoji tokens before sending
+        content = expand_emoji_tokens(content)
         try:
             return await src.reply(content, mention_author=False)
         except discord.HTTPException:
@@ -302,24 +344,29 @@ class UserAutoResponder(commands.Cog):
         st = self._st(gid, uid)
         now = _now()
         is_hard = _mentioned_me(self.bot, message)
+
+        # ===== Mentions (hard trigger) — any user, any channel; rate-limited =====
         if is_hard:
             if st.last_mention_ts and (now - st.last_mention_ts) < MENTION_COOLDOWN:
                 return
             pool = MOD_MENTION_POOL if (member and _has_mod_perms(member)) else GENERAL_MENTION_POOL
-            line = random.choice(pool) if pool else None
-            await self._safe_reply(message, str(S(line)).strip() if line else "")
+            line = random.choice(pool) if pool else ""
+            text = str(S(line)).strip()
+            await self._safe_reply(message, text)
             st.last_mention_ts = now
             _save_state(self.state)
             return
 
+        # ===== Personalized auto-replies for special users (24h) =====
         if uid in SPECIAL_IDS:
             if cid in EXCLUDED_CHANNEL_IDS:
                 return
             last = st.last_auto_ts or 0
             if (now - last) >= PERSONAL_COOLDOWN:
                 pool = _personal_pool_for(uid)
-                line = random.choice(pool) if pool else None
-                await self._safe_reply(message, str(S(line)).strip() if line else "")
+                line = random.choice(pool) if pool else ""
+                text = str(S(line)).strip()
+                await self._safe_reply(message, text)
                 st.last_auto_ts = now
                 st.last_key = line
                 _save_state(self.state)
