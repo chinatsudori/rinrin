@@ -19,7 +19,7 @@ from ..strings import S
 DATA_FILE = Path("./data/user_autoresponder.json")
 
 DEFAULT_COOLDOWN = 12 * 60 * 60  # 12 hours
-MOM_COOLDOWN = 6 * 60 * 60       # "mom" can ping more often
+MOM_COOLDOWN = 6 * 60 * 60
 NAT_COOLDOWN = 8 * 60 * 60
 MONKE_COOLDOWN = DEFAULT_COOLDOWN
 
@@ -33,6 +33,18 @@ ID_L       = 234732044175933441
 ID_OOKAMI  = 278958673835851777
 ID_BLEP    = 251914689913683970
 
+SPECIAL_IDS = {
+    ID_MONKE, ID_MOM_1, ID_MUM, ID_NAT, ID_NOVANE, ID_L, ID_OOKAMI, ID_BLEP
+}
+
+# Channels where auto-replies for special users are disabled
+EXCLUDED_CHANNEL_IDS = {
+    1417965404004946141, 1417982528001933383, 1422486999671111711, 1417424779354574932,
+    1417960610569916416, 1428158868843921429, 1417981392561770497, 1417983743624220732,
+    1427744820863963230, 1420832231886422036, 1418204893629382757, 1427744882025300091,
+    1420832036469473422, 1419936079158579222, 1418226340880056380,
+}
+
 # Hard-trigger follow-up window for Monke (seconds)
 MONKE_FOLLOWUP_WINDOW = 180  # 3 minutes
 
@@ -45,14 +57,10 @@ MONKE_FOLLOWUP_GIFS: List[str] = [
     "https://tenor.com/view/anime-hug-anime-anime-girl-anime-girls-anime-girls-hugging-gif-26094816",
 ]
 
-# Monke: when cooldown expired, respond to his **second** message with this GIF then start cooldown
-MONKE_SECOND_MESSAGE_GIF = "https://tenor.com/view/sparkle-star-rail-laugh-gif-5535487387681154728"
-
 # =========================
 # Message pools
 # =========================
 
-# General “special users” default pool (used by unspecified special users)
 SPECIAL_DEFAULT_POOL: List[str] = [
     ":henyaHeart:",
     ":gura_heart:",
@@ -61,7 +69,6 @@ SPECIAL_DEFAULT_POOL: List[str] = [
     "yes miss ? 😊",
 ]
 
-# Novane
 NOVANE_POOL: List[str] = [
     "Hai Nova-nee !",
     "can I play with your phone ?",
@@ -70,7 +77,6 @@ NOVANE_POOL: List[str] = [
     "your hair is so pretty Nova-nee !",
 ]
 
-# Pings from general members
 GENERAL_MENTION_POOL: List[str] = [
     "Hai hai ~",
     "hiya darling ~",
@@ -82,7 +88,6 @@ GENERAL_MENTION_POOL: List[str] = [
     ":ping:",
 ]
 
-# Mom (4443…)
 MOM_1_POOL: List[str] = [
     "hi mom a::wavehi: im mostly behaving today ~",
     "hearts you ~ :gura_heart: ",
@@ -96,7 +101,6 @@ MOM_1_POOL: List[str] = [
     "hi mom pls dont scroll up or check my logs :gura_heart: ",
 ]
 
-# Mum (4967…)
 MOM_2_POOL: List[str] = [
     "hi mom a::wavehi: I swear I've been good todayyy ~",
     "would you still love me if I was a worm ?",
@@ -111,7 +115,6 @@ MOM_2_POOL: List[str] = [
     "hi mom pls dont scroll up or check my logs :gura_heart: ",
 ]
 
-# L
 L_POOL: List[str] = [
     "will you take me to six flags again plsssss ? :sadcrydepression: ",
     "HAI L ! a::wavehi:",
@@ -121,7 +124,6 @@ L_POOL: List[str] = [
     "can I have some money ? a::henyaNodder:",
 ]
 
-# Ookami
 OOKAMI_POOL: List[str] = [
     "Hai ookami ! a::wavehi:",
     "do I get richer too ?",
@@ -129,7 +131,6 @@ OOKAMI_POOL: List[str] = [
     "shouldn't you be asleep ?",
 ]
 
-# Blep
 BLEP_POOL: List[str] = [
     "Hai blepblep ! a::wavehi:",
     "blepblep is so pretty ~ :gura_heart: ",
@@ -139,7 +140,6 @@ BLEP_POOL: List[str] = [
     "yaaay blepblep is here ! :henyaHeart: ",
 ]
 
-# Nat (onee-chan)
 NAT_POOL: List[str] = [
     "hai sister  :WaveHiHi:",
     "sister I did a thing, look!",
@@ -147,7 +147,6 @@ NAT_POOL: List[str] = [
     "can we play minecraft together",
 ]
 
-# Monke (standard quips for normal / hard triggers)
 MONKE_POOL: List[str] = [
     "wrong ~",
     "wrong again ~",
@@ -185,11 +184,10 @@ MONKE_POOL: List[str] = [
 
 @dataclass
 class GuildUserState:
-    last_auto_ts: Optional[int] = None          # last time a cooldown-based auto fired
-    last_key: Optional[str] = None              # last line used
-    monke_since_reset_msgs: int = 0             # messages since cooldown expired (monke only)
-    last_hard_quip_ts: Optional[int] = None     # last time we hard-responded to mention (monke)
-    last_bot_msg_id: Optional[int] = None       # id of bot msg sent on last hard quip (monke)
+    last_auto_ts: Optional[int] = None      # last time a cooldown-based auto fired
+    last_key: Optional[str] = None          # last line used
+    last_hard_quip_ts: Optional[int] = None # used for Monke mention follow-up GIF
+    last_bot_msg_id: Optional[int] = None   # id of Rinrin's last hard-quip message to this user
 
 # state[guild_id][user_id] = GuildUserState
 StateType = Dict[str, Dict[str, GuildUserState]]
@@ -205,7 +203,6 @@ def _load_state() -> StateType:
                     inner[uid] = GuildUserState(
                         last_auto_ts = blob.get("last_auto_ts"),
                         last_key      = blob.get("last_key"),
-                        monke_since_reset_msgs = int(blob.get("monke_since_reset_msgs") or 0),
                         last_hard_quip_ts = blob.get("last_hard_quip_ts"),
                         last_bot_msg_id   = blob.get("last_bot_msg_id"),
                     )
@@ -230,7 +227,7 @@ def _mentioned_me(bot: commands.Bot, msg: discord.Message) -> bool:
     u = getattr(bot, "user", None)
     return bool(u and u in msg.mentions)
 
-def _get_pool_for_user(user_id: int) -> List[str]:
+def _pool_for(user_id: int) -> List[str]:
     if user_id == ID_MONKE:
         return MONKE_POOL
     if user_id == ID_MOM_1:
@@ -249,7 +246,7 @@ def _get_pool_for_user(user_id: int) -> List[str]:
         return BLEP_POOL
     return SPECIAL_DEFAULT_POOL
 
-def _cooldown_for_user(user_id: int) -> int:
+def _cooldown_for(user_id: int) -> int:
     if user_id == ID_MONKE:
         return MONKE_COOLDOWN
     if user_id in (ID_MOM_1, ID_MUM):
@@ -264,34 +261,25 @@ def _cooldown_for_user(user_id: int) -> int:
 
 class UserAutoResponder(commands.Cog):
     """
-    Per-user autoresponder with per-user cooldowns.
-
-    - Any user: if they mention Rinrin, respond immediately (hard trigger), ignoring cooldown.
-      * If it's Monke, set a short follow-up window; if he replies, send a follow-up GIF.
-
-    - Monke special: when cooldown has expired, wait for his **second** message (no mention)
-      and respond with MONKE_SECOND_MESSAGE_GIF, then **start cooldown**.
-
-    - Everyone else (special list): when cooldown has expired, respond once with a random line
-      from their pool and start cooldown.
-
-    - Anyone else mentioning Rinrin (not in special routing) gets a reply from GENERAL_MENTION_POOL.
+    - Special users (by ID): auto-reply once per cooldown after ANY message they send,
+      except in excluded channels.
+    - Any user in any channel: mentioning Rinrin triggers an immediate hard-quip (no cooldown).
+    - Monke: also gets a small mention follow-up GIF window.
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.state: StateType = _load_state()
 
-    def _get_user_state(self, guild_id: int, user_id: int) -> GuildUserState:
-        gid = str(guild_id)
-        uid = str(user_id)
-        if gid not in self.state:
-            self.state[gid] = {}
-        if uid not in self.state[gid]:
-            self.state[gid][uid] = GuildUserState()
-        return self.state[gid][uid]
+    def _st(self, gid: int, uid: int) -> GuildUserState:
+        g = str(gid); u = str(uid)
+        if g not in self.state:
+            self.state[g] = {}
+        if u not in self.state[g]:
+            self.state[g][u] = GuildUserState()
+        return self.state[g][u]
 
-    async def _safe_send_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
+    async def _safe_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
         if not content:
             return None
         try:
@@ -304,84 +292,40 @@ class UserAutoResponder(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Basic guards
         if message.author.bot or message.guild is None:
             return
 
-        guild_id = message.guild.id
-        author_id = message.author.id
-        st = self._get_user_state(guild_id, author_id)
+        gid = message.guild.id
+        uid = message.author.id
+        cid = message.channel.id
+        st = self._st(gid, uid)
         now = _now()
         is_hard = _mentioned_me(self.bot, message)
 
-        SPECIAL_IDS = {
-            ID_MONKE, ID_MOM_1, ID_MUM, ID_NAT, ID_NOVANE, ID_L, ID_OOKAMI, ID_BLEP
-        }
-
-        # ===== HARD TRIGGERS (mentions) =====
+        # ===== HARD TRIGGERS (mentions) — allowed anywhere, ignore cooldown =====
         if is_hard:
-            pool = _get_pool_for_user(author_id) if author_id in SPECIAL_IDS else GENERAL_MENTION_POOL
-            if pool:
-                line = random.choice(pool)
-                sent = await self._safe_send_reply(message, str(S(line)).strip())
-                # For hard trigger, do NOT touch cooldowns.
-                if author_id == ID_MONKE and sent is not None:
-                    # Start follow-up window for Monke (if he replies soon, send a follow-up GIF)
-                    st.last_hard_quip_ts = now
-                    st.last_bot_msg_id = sent.id
-                    _save_state(self.state)
+            pool = _pool_for(uid) if uid in SPECIAL_IDS else GENERAL_MENTION_POOL
+            line = random.choice(pool) if pool else None
+            sent = await self._safe_reply(message, str(S(line)).strip() if line else "")
+            # Optional: monke mention follow-up GIF window
+            if uid == ID_MONKE and sent is not None:
+                st.last_hard_quip_ts = now
+                st.last_bot_msg_id = sent.id
+                _save_state(self.state)
             return
 
-        #
-        # --- MONKE special logic ---
-        if author_id == ID_MONKE:
-            cd = _cooldown_for_user(author_id)
+        # ===== AUTO REPLIES for SPECIAL USERS (cooldown-based) =====
+        if uid in SPECIAL_IDS:
+            # Skip auto checks in excluded channels
+            if cid in EXCLUDED_CHANNEL_IDS:
+                return
+
+            cd = _cooldown_for(uid)
             last = st.last_auto_ts or 0
-
-            if now - last >= cd:
-                # Cooldown expired → wait for his SECOND message, then reply with laugh GIF and start cooldown
-                st.monke_since_reset_msgs += 1
-                if st.monke_since_reset_msgs >= 2:
-                    await self._safe_send_reply(message, MONKE_SECOND_MESSAGE_GIF)
-                    st.last_auto_ts = now
-                    st.monke_since_reset_msgs = 0
-                    _save_state(self.state)
-                else:
-                    _save_state(self.state)  # record first post after cooldown
-            else:
-                # Cooldown active, but if within follow-up window after a hard quip, send a follow-up GIF
-                if st.last_hard_quip_ts and (now - st.last_hard_quip_ts) <= MONKE_FOLLOWUP_WINDOW:
-                    gif = random.choice(MONKE_FOLLOWUP_GIFS)
-                    await self._safe_send_reply(message, gif)
-                    st.last_hard_quip_ts = None
-                    st.last_bot_msg_id = None
-                    _save_state(self.state)
-            return
-
-        # --- Everyone else in SPECIAL_IDS (cooldown-based single reply) ---
-        if author_id in {ID_MOM_1, ID_MUM, ID_NAT, ID_NOVANE, ID_L, ID_OOKAMI, ID_BLEP}:
-            if author_id == ID_MOM_1:
-                pool = MOM_1_POOL
-            elif author_id == ID_MUM:
-                pool = MOM_2_POOL
-            elif author_id == ID_NAT:
-                pool = NAT_POOL
-            elif author_id == ID_NOVANE:
-                pool = NOVANE_POOL
-            elif author_id == ID_L:
-                pool = L_POOL
-            elif author_id == ID_OOKAMI:
-                pool = OOKAMI_POOL
-            elif author_id == ID_BLEP:
-                pool = BLEP_POOL
-            else:
-                pool = SPECIAL_DEFAULT_POOL
-
-            cd = _cooldown_for_user(author_id)
-            last = st.last_auto_ts or 0
-            if (now - last) >= cd and pool:
-                line = random.choice(pool)
-                await self._safe_send_reply(message, str(S(line)).strip())
+            if (now - last) >= cd:
+                pool = _pool_for(uid)
+                line = random.choice(pool) if pool else None
+                await self._safe_reply(message, str(S(line)).strip() if line else "")
                 st.last_auto_ts = now
                 st.last_key = line
                 _save_state(self.state)
