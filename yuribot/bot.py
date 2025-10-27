@@ -65,6 +65,8 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.mangaupdates",
             "yuribot.cogs.booked",
             "yuribot.cogs.cleanup",
+            "yuribot.cogs.timestamp",
+            "yuribot.cogs.booly",
         ]
         await self._load_extensions(extensions)
 
