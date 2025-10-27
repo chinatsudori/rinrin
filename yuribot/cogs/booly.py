@@ -21,8 +21,16 @@ RESPONSE_STRING_KEYS: List[str] = [
     # e.g., "pester.lines.1", "pester.lines.2", "pester.lines.3", ...
     # Add as many as you want:
     " Ur stinky",
-    "pester.lines.2",
-    "pester.lines.3",
+    "🇱",
+    # "woh… bro typed a whole essay to be wrong",
+    # "youre lucky im bored enough right now to read that",
+    # "be honest, you rehearsed in the mirror didnt you",
+    # "not the dissertation 😭",
+    # "lil bro out here fighting for his life in text form",
+    # "imagine trying to start something and still losing against me",
+    # "you done or should i grab popcorn",
+    # "😭",
+    "hey lil bro",
 ]
 
 @dataclass
