@@ -6,7 +6,7 @@ import random
 # Persona / flavor toggles
 # =========================
 RIN_PERSONA_ENABLED = True          # master switch (turn off to go fully neutral)
-RIN_FLAVOR_PROB = 1.0              # chance to sprinkle a quip on eligible lines (0.0–1.0)
+RIN_FLAVOR_PROB = 0.0              # chance to sprinkle a quip on eligible lines (0.0–1.0)
 
 # Apply to keys that start with these prefixes; everything else stays neutral
 _RIN_ALLOW_PREFIXES: tuple[str, ...] = (
@@ -564,6 +564,7 @@ _STRINGS.update({
     ),
     "rolewelcome.footer": "{guild}",
 })
+
 
 
 
