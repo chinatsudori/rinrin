@@ -298,6 +298,54 @@ def ensure_db():
         UNION
         SELECT DISTINCT month FROM member_activity_monthly
         """)
+
+                # --- MangaUpdates: series, releases, and per-thread posting state ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS mu_series (
+            series_id TEXT PRIMARY KEY,         -- MU id (string)
+            title     TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS mu_releases (
+            series_id   TEXT    NOT NULL,
+            release_id  INTEGER NOT NULL,       -- stable if available; else your generated id
+            title       TEXT,
+            raw_title   TEXT,
+            description TEXT,
+            volume      TEXT,
+            chapter     TEXT,
+            subchapter  TEXT,
+            group_name  TEXT,
+            url         TEXT,
+            release_ts  INTEGER NOT NULL DEFAULT -1,  -- epoch seconds; -1 if unknown
+            created_at  TEXT    NOT NULL,
+            PRIMARY KEY (series_id, release_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_releases_series_ts ON mu_releases (series_id, release_ts DESC)")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS mu_thread_series (
+            guild_id  INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL,
+            series_id TEXT    NOT NULL,
+            PRIMARY KEY (guild_id, thread_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_series_series ON mu_thread_series (series_id)")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS mu_thread_posts (
+            guild_id   INTEGER NOT NULL,
+            thread_id  INTEGER NOT NULL,
+            series_id  TEXT    NOT NULL,
+            release_id INTEGER NOT NULL,
+            posted_at  TEXT    NOT NULL,
+            PRIMARY KEY (guild_id, thread_id, release_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_series ON mu_thread_posts (series_id)")
+
+        
         con.commit()
 
 def connect():
