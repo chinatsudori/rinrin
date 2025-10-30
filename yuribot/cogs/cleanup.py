@@ -7,7 +7,7 @@ from discord.ext import commands
 import discord
 
 from ..db import connect
-from .. import models
+from .. import models  # noqa: F401  (kept if you reference later)
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +37,10 @@ class CleanupCog(commands.Cog):
     # ----------------------
     # IMPORT ACTIVITY CSV
     # ----------------------
-    @group.command(name="import_activity_csv",
-                   description="Import a month of message activity from a CSV file.")
+    @group.command(
+        name="import_activity_csv",
+        description="Import a month of message activity from a CSV file."
+    )
     @app_commands.describe(
         file="CSV attachment (columns: guild_id,month,user_id,messages)",
         target_guild_id="Target guild ID (default: current guild)",
@@ -59,6 +61,7 @@ class CleanupCog(commands.Cog):
         mode: app_commands.Choice[str] | None = None,
     ):
         await interaction.response.defer(ephemeral=True)
+
         gid = int(target_guild_id or interaction.guild_id or 0)
         if gid <= 0:
             return await interaction.followup.send("Invalid guild ID.", ephemeral=True)
@@ -67,6 +70,7 @@ class CleanupCog(commands.Cog):
 
         mode_val = (mode.value if mode else "add")
 
+        # Parse CSV
         content = await file.read()
         text = content.decode("utf-8", errors="replace")
         reader = csv.DictReader(io.StringIO(text))
@@ -93,6 +97,7 @@ class CleanupCog(commands.Cog):
         if not incoming:
             return await interaction.followup.send("No rows matched the target guild/month.", ephemeral=True)
 
+        con = None
         try:
             con = connect()
             cur = con.cursor()
@@ -104,41 +109,47 @@ class CleanupCog(commands.Cog):
                     (gid, month)
                 )
 
-            # Upsert month counts
-            for uid, cnt in incoming.items():
-                cur.execute("""
-                    INSERT INTO member_activity_monthly (guild_id, month, user_id, count)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, month, user_id)
-                    DO UPDATE SET count = 
-                        CASE WHEN ?='add' THEN member_activity_monthly.count + excluded.count
-                             ELSE excluded.count END
-                """, (gid, month, uid, cnt, mode_val))
+            # Upsert month counts — **match PK order** (guild_id, user_id, month)
+            rows = [(gid, uid, month, cnt, mode_val) for uid, cnt in incoming.items()]
+            cur.executemany(
+                """
+                INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id, month)
+                DO UPDATE SET count =
+                    CASE WHEN ?='add'
+                         THEN member_activity_monthly.count + excluded.count
+                         ELSE excluded.count
+                    END
+                """,
+                rows,
+            )
 
-            # Recompute total counts for all affected users
+            # Recompute totals for the affected users
             uids = tuple(incoming.keys())
-            q_marks = ",".join("?" * len(uids))
-            sums = {
-                row[0]: row[1]
-                for row in cur.execute(
-                    f"SELECT user_id, COALESCE(SUM(count),0) "
-                    f"FROM member_activity_monthly "
-                    f"WHERE guild_id=? AND user_id IN ({q_marks}) "
-                    f"GROUP BY user_id",
-                    (gid, *uids)
+            if uids:  # guard
+                q_marks = ",".join("?" for _ in uids)
+                totals = cur.execute(
+                    f"""
+                    SELECT user_id, COALESCE(SUM(count),0)
+                    FROM member_activity_monthly
+                    WHERE guild_id=? AND user_id IN ({q_marks})
+                    GROUP BY user_id
+                    """,
+                    (gid, *uids),
                 ).fetchall()
-            }
 
-            for uid, total in sums.items():
-                cur.execute("""
+                cur.executemany(
+                    """
                     INSERT INTO member_activity_total (guild_id, user_id, count)
                     VALUES (?, ?, ?)
                     ON CONFLICT(guild_id, user_id)
                     DO UPDATE SET count = excluded.count
-                """, (gid, uid, total))
+                    """,
+                    [(gid, uid, total) for (uid, total) in totals],
+                )
 
             con.commit()
-            con.close()
 
             total_msgs = sum(incoming.values())
             await interaction.followup.send(
@@ -150,17 +161,29 @@ class CleanupCog(commands.Cog):
             )
 
         except sqlite3.Error as e:
+            if con:
+                con.rollback()
             log.exception("import_activity_csv.db_error", extra={"guild_id": gid})
             await interaction.followup.send(f"Database error: {e}", ephemeral=True)
         except Exception as e:
+            if con:
+                con.rollback()
             log.exception("import_activity_csv.failed", extra={"guild_id": gid})
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
+        finally:
+            try:
+                if con:
+                    con.close()
+            except Exception:
+                pass
 
     # ----------------------
     # PURGE OLD TABLE
     # ----------------------
-    @group.command(name="purge_old_activity_table",
-                   description="Drop the legacy activity table if it still exists.")
+    @group.command(
+        name="purge_old_activity_table",
+        description="Drop the legacy activity table if it still exists."
+    )
     @owner_only()
     async def purge_old_activity_table(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -169,11 +192,15 @@ class CleanupCog(commands.Cog):
             cur = con.cursor()
             cur.execute("DROP TABLE IF EXISTS member_activity;")
             con.commit()
-            con.close()
             await interaction.followup.send("Old `member_activity` table dropped.", ephemeral=True)
         except Exception as e:
             log.exception("purge_old_activity_table.failed")
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     # ----------------------
     # FORCE SYNC COMMANDS
