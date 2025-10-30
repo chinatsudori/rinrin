@@ -5,6 +5,8 @@ import io
 import json
 import logging
 import os
+import re
+from io import StringIO, BytesIO
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
@@ -17,12 +19,30 @@ from ..strings import S  # only used for "guild only" if present
 
 log = logging.getLogger(__name__)
 
-# Files / constants
 MU_STATE_FILE = Path("./data/mu_watch.json")
-# Only this user (and the bot owner) may run cross-guild admin ops
-OWNER_USER_ID = 49670556760408064
 
-# ---------- shared guards ----------
+# Simple validators used by a few commands
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+# Your Discord user id (allowed regardless of guild perms)
+_ALLOWED_USER_ID = 49670556760408064  # Summer
+
+
+# -----------------------
+# Auth helpers
+# -----------------------
+async def _is_authorized(inter: discord.Interaction) -> bool:
+    """Allow bot owner or the single whitelisted user."""
+    try:
+        if inter.user and int(inter.user.id) == _ALLOWED_USER_ID:
+            return True
+    except Exception:
+        pass
+    try:
+        return await inter.client.is_owner(inter.user)  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
 
 async def _owner_only(inter: discord.Interaction) -> bool:
     try:
@@ -30,20 +50,26 @@ async def _owner_only(inter: discord.Interaction) -> bool:
     except Exception:
         return False
 
-async def _is_authorized(inter: discord.Interaction) -> bool:
-    return inter.user.id == OWNER_USER_ID or await _owner_only(inter)
 
-# ---------- internal helpers ----------
-
+# -----------------------
+# Internal DB helpers
+# -----------------------
 def _delete_counts(cur, table: str, where_sql: str, params: Tuple) -> int:
+    """Return number of rows to delete and perform the deletion."""
     cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {where_sql}", params)
     (n,) = cur.fetchone() or (0,)
     if n:
         cur.execute(f"DELETE FROM {table} WHERE {where_sql}", params)
     return int(n or 0)
 
+
 def _tables_for_guild_scoped_delete() -> Iterable[Tuple[str, str]]:
+    """
+    Order matters for FKs (children first, then parents).
+    Adjust to your schema as needed.
+    """
     return [
+        # Children first
         ("schedule_sections", "series_id IN (SELECT id FROM series WHERE guild_id=?)"),
         ("submissions", "guild_id=?"),
         ("collections", "guild_id=?"),
@@ -61,6 +87,7 @@ def _tables_for_guild_scoped_delete() -> Iterable[Tuple[str, str]]:
         ("guild_config", "guild_id=?"),
         ("clubs", "guild_id=?"),
     ]
+
 
 def _tables_for_prune_unknown() -> Iterable[Tuple[str, str]]:
     return [
@@ -82,10 +109,12 @@ def _tables_for_prune_unknown() -> Iterable[Tuple[str, str]]:
         ("clubs", "guild_id NOT IN ({ids})"),
     ]
 
-# ---------- Cog ----------
 
+# -----------------------
+# Cog
+# -----------------------
 class CleanupCog(commands.Cog):
-    """Admin maintenance utilities (DB pruning, MU state, command sync, and activity migration)."""
+    """Admin maintenance utilities (DB pruning, MU state, command sync, and activity migration/import)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -219,7 +248,7 @@ class CleanupCog(commands.Cog):
         dry_run="If true, only report counts; no delete.",
         vacuum="Run VACUUM after deletion.",
     )
-    @app_commands.check(_is_authorized)
+    @app_commands.check(_owner_only)
     async def prune_unknown_guilds(
         self,
         interaction: discord.Interaction,
@@ -312,7 +341,7 @@ class CleanupCog(commands.Cog):
         name="vacuum",
         description="Owner-only: VACUUM the SQLite DB.",
     )
-    @app_commands.check(_is_authorized)
+    @app_commands.check(_owner_only)
     async def vacuum_db(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         import sqlite3
@@ -326,10 +355,10 @@ class CleanupCog(commands.Cog):
         await interaction.followup.send("VACUUM complete.", ephemeral=True)
 
     # ------------------------
-    # /cleanup sync_commands  and  /cleanup sync_here
+    # /cleanup sync_commands  (global/dev)  and  /cleanup sync_here (current guild)
     # ------------------------
-    @group.command(name="sync_commands", description="Owner-only: force sync of slash commands (global/dev).")
-    @app_commands.check(_is_authorized)
+    @group.command(name="sync_commands", description="Owner-only: force sync of slash commands.")
+    @app_commands.check(_owner_only)
     async def sync_commands(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
@@ -347,7 +376,7 @@ class CleanupCog(commands.Cog):
             await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
 
     @group.command(name="sync_here", description="Owner-only: sync commands to THIS guild now.")
-    @app_commands.check(_is_authorized)
+    @app_commands.check(_owner_only)
     async def sync_here(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message("Server only.", ephemeral=True)
@@ -368,18 +397,21 @@ class CleanupCog(commands.Cog):
     @group.command(name="probe_legacy_activity", description="Find likely legacy activity tables.")
     @app_commands.check(_is_authorized)
     async def probe_legacy_activity(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
+
         con = connect()
         mon, tot = self._guess_legacy(con)
         con.close()
 
         lines = []
         if mon[0]:
-            lines.append(f"Month candidate: **{mon[0]}** (expects columns: guild_id, user_id, month/messages)")
+            lines.append(f"Month candidate: **{mon[0]}** (cols: guild_id, user_id, {mon[1]['month']}, {mon[1]['count']})")
         else:
             lines.append("Month candidate: (none found)")
         if tot[0]:
-            lines.append(f"Total candidate: **{tot[0]}** (expects columns: guild_id, user_id, count/messages)")
+            lines.append(f"Total candidate: **{tot[0]}** (cols: guild_id, user_id, {tot[1]['count']})")
         else:
             lines.append("Total candidate: (none found)")
 
@@ -389,29 +421,48 @@ class CleanupCog(commands.Cog):
     # /cleanup export_legacy_activity
     # ------------------------
     @group.command(name="export_legacy_activity", description="Export legacy activity CSV for a guild.")
-    @app_commands.describe(target_guild_id="Guild ID to export (string Snowflake)")
+    @app_commands.describe(
+        target_guild_id="Guild ID (Snowflake as string)",
+        month_table="Legacy month table (optional)",
+        month_col_month="Legacy month column (optional)",
+        month_col_count="Legacy month count column (optional)",
+        total_table="Legacy total table (optional)",
+        total_col_count="Legacy total count column (optional)",
+    )
     @app_commands.check(_is_authorized)
     async def export_legacy_activity(
         self,
         interaction: discord.Interaction,
         target_guild_id: str,
+        month_table: Optional[str] = None,
+        month_col_month: Optional[str] = None,
+        month_col_count: Optional[str] = None,
+        total_table: Optional[str] = None,
+        total_col_count: Optional[str] = None,
     ):
         await interaction.response.defer(ephemeral=True)
-        gid = int(target_guild_id)
-        import sqlite3
+        try:
+            gid = int(target_guild_id)
+        except Exception:
+            return await interaction.followup.send("Invalid guild_id (must be snowflake).", ephemeral=True)
 
+        import sqlite3
         try:
             con = connect()
-            (mon_table, mon_map), (tot_table, tot_map) = self._guess_legacy(con)
+            mon_guess, tot_guess = self._guess_legacy(con)
+
+            mon_table = month_table or (mon_guess[0] or "")
+            tot_table = total_table or (tot_guess[0] or "")
 
             files: list[discord.File] = []
 
             # Month CSV
             if mon_table:
-                m_month = mon_map.get("month", "month")
-                m_count = mon_map.get("count", "count")
+                m_month = month_col_month or mon_guess[1].get("month")
+                m_count = month_col_count or mon_guess[1].get("count")
                 cols = self._table_cols(con, mon_table)
-                if {"guild_id", "user_id", m_month, m_count} <= cols:
+                need = {"guild_id", "user_id", m_month, m_count}
+                if need <= cols:
                     cur = con.execute(
                         f"SELECT guild_id, {m_month} as month, user_id, {m_count} as messages "
                         f"FROM {mon_table} WHERE guild_id=? ORDER BY month, messages DESC",
@@ -421,14 +472,16 @@ class CleanupCog(commands.Cog):
                     buf = io.StringIO()
                     w = csv.writer(buf)
                     w.writerow(["guild_id", "month", "user_id", "messages"])
-                    w.writerows(rows)
+                    for r in rows:
+                        w.writerow(r)
                     files.append(discord.File(fp=io.BytesIO(buf.getvalue().encode("utf-8")), filename=f"legacy-month-{gid}.csv"))
 
             # Total CSV
             if tot_table:
-                t_count = tot_map.get("count", "count")
+                t_count = total_col_count or tot_guess[1].get("count")
                 cols = self._table_cols(con, tot_table)
-                if {"guild_id", "user_id", t_count} <= cols:
+                need = {"guild_id", "user_id", t_count}
+                if need <= cols:
                     cur = con.execute(
                         f"SELECT guild_id, user_id, {t_count} as messages FROM {tot_table} "
                         f"WHERE guild_id=? ORDER BY messages DESC",
@@ -438,7 +491,8 @@ class CleanupCog(commands.Cog):
                     buf = io.StringIO()
                     w = csv.writer(buf)
                     w.writerow(["guild_id", "user_id", "messages"])
-                    w.writerows(rows)
+                    for r in rows:
+                        w.writerow(r)
                     files.append(discord.File(fp=io.BytesIO(buf.getvalue().encode("utf-8")), filename=f"legacy-total-{gid}.csv"))
 
             con.close()
@@ -446,21 +500,21 @@ class CleanupCog(commands.Cog):
             if files:
                 await interaction.followup.send(files=files, ephemeral=True)
             else:
-                await interaction.followup.send("No legacy tables/rows found for that guild.", ephemeral=True)
+                await interaction.followup.send("No legacy tables/rows found for this guild.", ephemeral=True)
 
         except sqlite3.Error as e:
             log.exception("export_legacy_activity failed")
             await interaction.followup.send(f"DB error: {e}", ephemeral=True)
 
     # ------------------------
-    # /cleanup migrate_activity_db  (SQL UPSERTS; no models import)
+    # /cleanup migrate_activity_db  (legacy -> current, additive)
     # ------------------------
     @group.command(
         name="migrate_activity_db",
-        description="ADD legacy month/total MESSAGE counts into new tables for a guild.",
+        description="ADD legacy month/total MESSAGE counts into new tables (this is additive).",
     )
     @app_commands.describe(
-        target_guild_id="Guild ID to migrate (string Snowflake)",
+        target_guild_id="Guild ID to migrate (Snowflake as string)",
         src_month_table="Legacy month table (optional)",
         src_month_col_month="Legacy month column (optional)",
         src_month_col_count="Legacy month count column (optional)",
@@ -481,89 +535,101 @@ class CleanupCog(commands.Cog):
         dry_run: bool = True,
     ):
         await interaction.response.defer(ephemeral=True)
-        gid = int(target_guild_id)
+        try:
+            gid = int(target_guild_id)
+        except Exception:
+            return await interaction.followup.send("Invalid guild_id (must be snowflake).", ephemeral=True)
+
         import sqlite3
 
         try:
             con = connect()
             cur = con.cursor()
 
-            # verify destinations exist / have columns
-            for t, need in [
+            # verify destinations
+            required_dests = [
                 ("member_activity_monthly", {"guild_id", "month", "user_id", "count"}),
                 ("member_activity_total", {"guild_id", "user_id", "count"}),
-            ]:
+            ]
+            for t, need in required_dests:
                 if not self._has_table(con, t):
                     raise RuntimeError(f"Destination table missing: {t}")
                 have = self._table_cols(con, t)
-                miss = need - have
-                if miss:
-                    raise RuntimeError(f"Destination table {t} missing columns: {miss}")
+                missing = need - have
+                if missing:
+                    raise RuntimeError(f"Destination table {t} missing columns: {missing}")
 
             # detect sources
-            (mon_guess_t, mon_map), (tot_guess_t, tot_map) = self._guess_legacy(con)
-            mon_table = src_month_table or mon_guess_t or ""
-            tot_table = src_total_table or tot_guess_t or ""
+            mon_guess, tot_guess = self._guess_legacy(con)
+            mon_table = src_month_table or (mon_guess[0] or "")
+            tot_table = src_total_table  or (tot_guess[0] or "")
 
-            mon_cols = {}
+            mon_cmap = {}
             if mon_table:
-                mon_cols = {
+                mon_cmap = {
                     "guild": "guild_id",
                     "user": "user_id",
-                    "month": src_month_col_month or mon_map.get("month") or "month",
-                    "count": src_month_col_count or mon_map.get("count") or "count",
+                    "month": src_month_col_month or mon_guess[1].get("month"),
+                    "count": src_month_col_count or mon_guess[1].get("count"),
                 }
-                if not {"guild", "user", "month", "count"} <= mon_cols.keys():
-                    raise RuntimeError(f"{mon_table}: could not infer month/count columns.")
-                # confirm columns exist
-                cols = self._table_cols(con, mon_table)
-                if {mon_cols["guild"], mon_cols["user"], mon_cols["month"], mon_cols["count"]} - cols:
-                    raise RuntimeError(f"{mon_table} missing required columns.")
+                if None in mon_cmap.values():
+                    raise RuntimeError(f"{mon_table}: could not infer columns; specify month/count columns.")
 
-            tot_cols = {}
+            tot_cmap = {}
             if tot_table:
-                tot_cols = {
+                tot_cmap = {
                     "guild": "guild_id",
                     "user": "user_id",
-                    "count": src_total_col_count or tot_map.get("count") or "count",
+                    "count": src_total_col_count or tot_guess[1].get("count"),
                 }
-                cols = self._table_cols(con, tot_table)
-                if {tot_cols["guild"], tot_cols["user"], tot_cols["count"]} - cols:
-                    raise RuntimeError(f"{tot_table} missing required columns.")
+                if None in tot_cmap.values():
+                    raise RuntimeError(f"{tot_table}: could not infer columns; specify count column.")
 
             ops = []
 
-            # MONTH add-merge with UPSERT
+            # MONTH add-merge
             if mon_table:
-                cur.execute(f"SELECT COUNT(*) FROM {mon_table} WHERE {mon_cols['guild']}=?", (gid,))
+                cols = self._table_cols(con, mon_table)
+                need = {mon_cmap["guild"], mon_cmap["user"], mon_cmap["month"], mon_cmap["count"]}
+                missing = need - cols
+                if missing:
+                    raise RuntimeError(f"{mon_table} missing columns: {missing}")
+
+                cur.execute(f"SELECT COUNT(*) FROM {mon_table} WHERE {mon_cmap['guild']}=?", (gid,))
                 (n_rows,) = cur.fetchone() or (0,)
-                ops.append(f"{mon_table}: {n_rows} month rows for that guild")
+                ops.append(f"{mon_table}: {n_rows} month rows for this guild")
 
                 if not dry_run and n_rows:
                     cur.execute("BEGIN")
                     cur.execute(f"""
                         INSERT INTO member_activity_monthly (guild_id, month, user_id, count)
-                        SELECT {mon_cols['guild']}, {mon_cols['month']}, {mon_cols['user']}, {mon_cols['count']}
+                        SELECT {mon_cmap['guild']}, {mon_cmap['month']}, {mon_cmap['user']}, {mon_cmap['count']}
                         FROM {mon_table}
-                        WHERE {mon_cols['guild']}=?
+                        WHERE {mon_cmap['guild']}=?
                         ON CONFLICT(guild_id, month, user_id)
                         DO UPDATE SET count = member_activity_monthly.count + excluded.count
                     """, (gid,))
                     con.commit()
 
-            # TOTAL add-merge with UPSERT
+            # TOTAL add-merge
             if tot_table:
-                cur.execute(f"SELECT COUNT(*) FROM {tot_table} WHERE {tot_cols['guild']}=?", (gid,))
+                cols = self._table_cols(con, tot_table)
+                need = {tot_cmap["guild"], tot_cmap["user"], tot_cmap["count"]}
+                missing = need - cols
+                if missing:
+                    raise RuntimeError(f"{tot_table} missing columns: {missing}")
+
+                cur.execute(f"SELECT COUNT(*) FROM {tot_table} WHERE {tot_cmap['guild']}=?", (gid,))
                 (n_rows,) = cur.fetchone() or (0,)
-                ops.append(f"{tot_table}: {n_rows} total rows for that guild")
+                ops.append(f"{tot_table}: {n_rows} total rows for this guild")
 
                 if not dry_run and n_rows:
                     cur.execute("BEGIN")
                     cur.execute(f"""
                         INSERT INTO member_activity_total (guild_id, user_id, count)
-                        SELECT {tot_cols['guild']}, {tot_cols['user']}, {tot_cols['count']}
+                        SELECT {tot_cmap['guild']}, {tot_cmap['user']}, {tot_cmap['count']}
                         FROM {tot_table}
-                        WHERE {tot_cols['guild']}=?
+                        WHERE {tot_cmap['guild']}=?
                         ON CONFLICT(guild_id, user_id)
                         DO UPDATE SET count = member_activity_total.count + excluded.count
                     """, (gid,))
@@ -573,16 +639,16 @@ class CleanupCog(commands.Cog):
 
             if not mon_table and not tot_table:
                 return await interaction.followup.send(
-                    "No legacy tables detected. Run `/cleanup probe_legacy_activity` or pass source table names.",
+                    "No legacy tables detected. Run `/cleanup probe_legacy_activity` or pass table names.",
                     ephemeral=True,
                 )
 
             head = "**Dry-run** results:" if dry_run else "**Migration complete**:"
-            body = "\n".join(ops) if ops else "(nothing found for that guild)"
+            body = "\n".join(ops) if ops else "(nothing found for this guild)"
             await interaction.followup.send(f"{head}\n{body}", ephemeral=True)
 
         except Exception as e:
-            log.exception("cleanup.migrate_activity_db.failed")
+            log.exception("cleanup.migrate_activity_db.failed", extra={"target_guild_id": target_guild_id})
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
     # ------------------------
@@ -596,6 +662,7 @@ class CleanupCog(commands.Cog):
         table="Legacy table name to purge",
         scope="Choose 'guild' to delete only this guild's rows or 'drop' to DROP the table.",
         dry_run="If true, only report; no changes.",
+        target_guild_id="Guild to prune when scope=guild (Snowflake as string).",
     )
     @app_commands.choices(scope=[
         app_commands.Choice(name="guild", value="guild"),
@@ -608,13 +675,17 @@ class CleanupCog(commands.Cog):
         table: str,
         scope: app_commands.Choice[str],
         dry_run: bool = True,
+        target_guild_id: Optional[str] = None,
     ):
-        # Note: this version acts on the **current** guild context.
-        if not interaction.guild:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
 
-        gid = int(interaction.guild_id)
+        gid: Optional[int] = None
+        if scope.value == "guild":
+            try:
+                gid = int(target_guild_id or int(interaction.guild_id or 0))
+            except Exception:
+                return await interaction.followup.send("Provide a valid target_guild_id.", ephemeral=True)
+
         import sqlite3
 
         try:
@@ -626,9 +697,9 @@ class CleanupCog(commands.Cog):
                 return await interaction.followup.send(f"Table `{table}` does not exist.", ephemeral=True)
 
             if scope.value == "drop":
-                if not (await _is_authorized(interaction)):
+                if not (await _owner_only(interaction)):
                     con.close()
-                    return await interaction.followup.send("Only the authorized owner can DROP tables.", ephemeral=True)
+                    return await interaction.followup.send("Only the bot owner can DROP tables.", ephemeral=True)
                 if dry_run:
                     con.close()
                     return await interaction.followup.send(f"**Dry-run**: would DROP `{table}`.", ephemeral=True)
@@ -647,16 +718,167 @@ class CleanupCog(commands.Cog):
             (n_rows,) = cur.fetchone() or (0,)
             if dry_run:
                 con.close()
-                return await interaction.followup.send(f"**Dry-run**: would delete {n_rows} rows from `{table}`.", ephemeral=True)
+                return await interaction.followup.send(f"**Dry-run**: would delete {n_rows} rows from `{table}` for guild {gid}.", ephemeral=True)
 
             cur.execute("BEGIN")
             cur.execute(f"DELETE FROM {table} WHERE guild_id=?", (gid,))
             con.commit()
             con.close()
-            await interaction.followup.send(f"Deleted {n_rows} rows from `{table}`.", ephemeral=True)
+            await interaction.followup.send(f"Deleted {n_rows} rows from `{table}` for guild {gid}.", ephemeral=True)
 
         except sqlite3.Error as e:
             log.exception("purge_legacy_table failed")
+            await interaction.followup.send(f"DB error: {e}", ephemeral=True)
+
+    # ------------------------
+    # /cleanup import_activity_csv
+    # ------------------------
+    @group.command(
+        name="import_activity_csv",
+        description="Import activity CSV for a guild/month (messages).",
+    )
+    @app_commands.describe(
+        target_guild_id="Guild ID to import (Snowflake as string)",
+        month="YYYY-MM to import (e.g., 2025-10)",
+        file="CSV file with columns: guild_id,month,user_id,messages",
+        mode="replace = overwrite month + rebuild totals; add = additive upsert",
+        dry_run="If true, only validate and show counts; no writes."
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="replace", value="replace"),
+        app_commands.Choice(name="add", value="add"),
+    ])
+    @app_commands.check(_is_authorized)
+    async def import_activity_csv(
+        self,
+        interaction: discord.Interaction,
+        target_guild_id: str,
+        month: str,
+        file: discord.Attachment,
+        mode: app_commands.Choice[str],
+        dry_run: bool = True,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        # validate
+        try:
+            gid = int(target_guild_id)
+        except Exception:
+            return await interaction.followup.send("Invalid guild_id (must be snowflake).", ephemeral=True)
+        if not MONTH_RE.match(month):
+            return await interaction.followup.send("Bad month format. Use YYYY-MM.", ephemeral=True)
+
+        # read CSV
+        try:
+            raw = await file.read()
+            text = raw.decode("utf-8", errors="replace")
+            rdr = csv.DictReader(StringIO(text))
+        except Exception as e:
+            log.exception("import_activity_csv.read_failed")
+            return await interaction.followup.send(f"Failed to read CSV: {e}", ephemeral=True)
+
+        rows: list[tuple[int, int]] = []  # (user_id, messages)
+        bad = 0
+        total_rows = 0
+        for rec in rdr:
+            total_rows += 1
+            try:
+                if int(rec.get("guild_id", "0")) != gid:
+                    continue
+                if (rec.get("month") or "").strip() != month:
+                    continue
+                uid = int(rec.get("user_id", "0"))
+                cnt = int(rec.get("messages", "0"))
+                if uid <= 0 or cnt < 0:
+                    bad += 1
+                    continue
+                rows.append((uid, cnt))
+            except Exception:
+                bad += 1
+
+        if not rows:
+            return await interaction.followup.send(
+                f"No usable rows for guild={gid}, month={month}. (parsed={total_rows}, bad={bad})",
+                ephemeral=True,
+            )
+
+        import sqlite3
+        try:
+            con = connect()
+            cur = con.cursor()
+            mode_val = mode.value
+
+            uniq_users = len({u for (u, _) in rows})
+            sum_msgs = sum(c for _, c in rows)
+
+            if dry_run:
+                await interaction.followup.send(
+                    f"**Dry-run**: would import month `{month}` for guild `{gid}`\n"
+                    f"• rows: {len(rows)} (unique users: {uniq_users})\n"
+                    f"• total messages: {sum_msgs}\n"
+                    f"• mode: {mode_val}\n"
+                    f"• skipped/bad lines: {bad}",
+                    ephemeral=True,
+                )
+                return
+
+            cur.execute("BEGIN")
+
+            if mode_val == "replace":
+                # Clear the month then insert, then rebuild totals exactly from monthly
+                cur.execute(
+                    "DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                    (gid, month),
+                )
+                cur.executemany(
+                    "INSERT INTO member_activity_monthly (guild_id, month, user_id, count) VALUES (?, ?, ?, ?)",
+                    [(gid, month, uid, cnt) for (uid, cnt) in rows],
+                )
+                # Rebuild totals for this guild from monthly (no doubles)
+                cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (gid,))
+                cur.execute(
+                    """
+                    INSERT INTO member_activity_total (guild_id, user_id, count)
+                    SELECT guild_id, user_id, SUM(count) AS count
+                    FROM member_activity_monthly
+                    WHERE guild_id=?
+                    GROUP BY guild_id, user_id
+                    """,
+                    (gid,),
+                )
+            else:
+                # Additive upsert for month and totals
+                cur.executemany(
+                    """
+                    INSERT INTO member_activity_monthly (guild_id, month, user_id, count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, month, user_id)
+                    DO UPDATE SET count = member_activity_monthly.count + excluded.count
+                    """,
+                    [(gid, month, uid, cnt) for (uid, cnt) in rows],
+                )
+                cur.executemany(
+                    """
+                    INSERT INTO member_activity_total (guild_id, user_id, count)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET count = member_activity_total.count + excluded.count
+                    """,
+                    [(gid, uid, cnt) for (uid, cnt) in rows],
+                )
+
+            con.commit()
+            con.close()
+
+            await interaction.followup.send(
+                f"Import complete for guild `{gid}`, month `{month}`.\n"
+                f"• rows imported: {len(rows)} (unique users: {uniq_users})\n"
+                f"• total messages: {sum_msgs}\n"
+                f"• mode: {mode_val}",
+                ephemeral=True,
+            )
+        except sqlite3.Error as e:
+            log.exception("import_activity_csv.sql_failed", extra={"guild_id": gid, "month": month})
             await interaction.followup.send(f"DB error: {e}", ephemeral=True)
 
 
