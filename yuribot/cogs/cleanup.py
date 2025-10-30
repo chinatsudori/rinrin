@@ -31,7 +31,6 @@ class CleanupCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # simple in-memory per-guild toggle: {guild_id: bool}
         self._debug_flags: Dict[int, bool] = {}
 
     group = app_commands.Group(
@@ -60,9 +59,7 @@ class CleanupCog(commands.Cog):
         )
 
     def _is_debug(self, guild_id: int | None) -> bool:
-        if not guild_id:
-            return False
-        return self._debug_flags.get(guild_id, False)
+        return bool(guild_id and self._debug_flags.get(guild_id, False))
 
     # ----------------------
     # IMPORT ACTIVITY CSV
@@ -76,11 +73,16 @@ class CleanupCog(commands.Cog):
         target_guild_id="Target guild ID (default: current guild)",
         month="Month in YYYY-MM format (must match CSV)",
         mode="replace=overwrite or add=merge existing data",
+        target="Write into: 'activity' (member_activity_*) or 'metrics_daily' (member_metrics_*)",
         dry_run="If true, validate and show what would change without writing"
     )
     @app_commands.choices(mode=[
         app_commands.Choice(name="add", value="add"),
         app_commands.Choice(name="replace", value="replace"),
+    ])
+    @app_commands.choices(target=[
+        app_commands.Choice(name="activity", value="activity"),
+        app_commands.Choice(name="metrics_daily", value="metrics_daily"),
     ])
     @owner_only()
     async def import_activity_csv(
@@ -90,6 +92,7 @@ class CleanupCog(commands.Cog):
         target_guild_id: str | None = None,
         month: str | None = None,
         mode: app_commands.Choice[str] | None = None,
+        target: app_commands.Choice[str] | None = None,
         dry_run: bool = False,
     ):
         await interaction.response.defer(ephemeral=True)
@@ -101,6 +104,7 @@ class CleanupCog(commands.Cog):
             return await interaction.followup.send("Invalid month format. Use YYYY-MM.", ephemeral=True)
 
         mode_val = (mode.value if mode else "add")
+        target_val = (target.value if target else "activity")
         debug = self._is_debug(interaction.guild_id)
 
         # Parse CSV
@@ -127,7 +131,6 @@ class CleanupCog(commands.Cog):
                     continue
                 incoming[uid] = incoming.get(uid, 0) + cnt
             except Exception:
-                # swallow row parse issues
                 continue
 
         if not incoming:
@@ -137,75 +140,163 @@ class CleanupCog(commands.Cog):
         try:
             con = connect()
             cur = con.cursor()
-
-            # --- DEBUG: schema sanity
             dbg_lines: List[str] = []
-            if debug:
-                # member_activity_monthly schema & PK order
-                cols = cur.execute("PRAGMA table_info(member_activity_monthly)").fetchall()
-                pk_cols = [(c[1], c[5]) for c in cols]  # (name, pk_order)
-                pk_cols_sorted = [name for (name, pk) in sorted(pk_cols, key=lambda t: t[1]) if pk]
-                dbg_lines.append(f"PK(member_activity_monthly) = {pk_cols_sorted or 'UNKNOWN'}")
-                # existing row counts
-                before_month_sum = cur.execute(
-                    "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
-                    (gid, month)
-                ).fetchone()[0]
-                dbg_lines.append(f"Before month sum={before_month_sum}")
-                # show 3 sample incoming
-                sample = list(incoming.items())[:3]
-                dbg_lines.append(f"Incoming unique users={len(incoming)}, parsed_rows={parsed_rows}, sample={sample}")
 
+            # Start a transaction
             cur.execute("BEGIN IMMEDIATE")
 
-            if mode_val == "replace" and not dry_run:
-                cur.execute(
-                    "DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?",
-                    (gid, month)
-                )
+            if target_val == "activity":
+                # --- member_activity_monthly + member_activity_total ---
+                if debug:
+                    cols = cur.execute("PRAGMA table_info(member_activity_monthly)").fetchall()
+                    pk_cols = [(c[1], c[5]) for c in cols]
+                    pk_cols_sorted = [name for (name, pk) in sorted(pk_cols, key=lambda t: t[1]) if pk]
+                    before_month_sum = cur.execute(
+                        "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                        (gid, month)
+                    ).fetchone()[0]
+                    dbg_lines += [
+                        f"Target=activity; PK(member_activity_monthly)={pk_cols_sorted or 'UNKNOWN'}",
+                        f"Before month sum={before_month_sum}",
+                        f"Incoming unique users={len(incoming)}, parsed_rows={parsed_rows}, sample={list(incoming.items())[:3]}",
+                    ]
 
-            # Upsert month counts — match PK order (guild_id, user_id, month)
-            rows = [(gid, uid, month, cnt, mode_val) for uid, cnt in incoming.items()]
-            if not dry_run:
-                cur.executemany(
-                    """
-                    INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, user_id, month)
-                    DO UPDATE SET count =
-                        CASE WHEN ?='add'
-                             THEN member_activity_monthly.count + excluded.count
-                             ELSE excluded.count
-                        END
-                    """,
-                    rows,
-                )
+                if mode_val == "replace" and not dry_run:
+                    cur.execute(
+                        "DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                        (gid, month)
+                    )
 
-            # Recompute totals for the affected users
-            uids = tuple(incoming.keys())
-            totals: List[Tuple[int, int]] = []
-            if uids:
-                q_marks = ",".join("?" for _ in uids)
-                totals = cur.execute(
-                    f"""
-                    SELECT user_id, COALESCE(SUM(count),0)
-                    FROM member_activity_monthly
-                    WHERE guild_id=? AND user_id IN ({q_marks})
-                    GROUP BY user_id
-                    """,
-                    (gid, *uids),
-                ).fetchall()
+                rows = [(gid, uid, month, cnt, mode_val) for uid, cnt in incoming.items()]
+                if not dry_run:
+                    cur.executemany(
+                        """
+                        INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(guild_id, user_id, month)
+                        DO UPDATE SET count =
+                            CASE WHEN ?='add'
+                                 THEN member_activity_monthly.count + excluded.count
+                                 ELSE excluded.count
+                            END
+                        """,
+                        rows,
+                    )
 
-            if not dry_run:
-                cur.executemany(
-                    """
-                    INSERT INTO member_activity_total (guild_id, user_id, count)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET count = excluded.count
-                    """,
-                    [(gid, uid, total) for (uid, total) in totals],
-                )
+                uids = tuple(incoming.keys())
+                totals: List[Tuple[int, int]] = []
+                if uids:
+                    q_marks = ",".join("?" for _ in uids)
+                    totals = cur.execute(
+                        f"""
+                        SELECT user_id, COALESCE(SUM(count),0)
+                        FROM member_activity_monthly
+                        WHERE guild_id=? AND user_id IN ({q_marks})
+                        GROUP BY user_id
+                        """,
+                        (gid, *uids),
+                    ).fetchall()
+                    if not dry_run:
+                        cur.executemany(
+                            """
+                            INSERT INTO member_activity_total (guild_id, user_id, count)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(guild_id, user_id)
+                            DO UPDATE SET count = excluded.count
+                            """,
+                            [(gid, uid, total) for (uid, total) in totals],
+                        )
+
+                if debug:
+                    after_month_sum = cur.execute(
+                        "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                        (gid, month)
+                    ).fetchone()[0]
+                    dbg_lines += [
+                        f"After month sum={after_month_sum} (Δ={after_month_sum - (locals().get('before_month_sum') or 0)})",
+                        f"Mode={mode_val}, Dry-run={dry_run}",
+                    ]
+
+            else:
+                # --- member_metrics_daily + member_metrics_total ---
+                # We map each monthly CSV row to a synthetic daily row at YYYY-MM-01.
+                day_key = f"{month}-01"
+
+                if debug:
+                    cols = cur.execute("PRAGMA table_info(member_metrics_daily)").fetchall()
+                    pk_cols = [(c[1], c[5]) for c in cols]
+                    pk_cols_sorted = [name for (name, pk) in sorted(pk_cols, key=lambda t: t[1]) if pk]
+                    before_day_sum = cur.execute(
+                        "SELECT COALESCE(SUM(messages),0) FROM member_metrics_daily WHERE guild_id=? AND day=?",
+                        (gid, day_key)
+                    ).fetchone()[0]
+                    dbg_lines += [
+                        f"Target=metrics_daily; PK(member_metrics_daily)={pk_cols_sorted or 'UNKNOWN'}",
+                        f"Before day sum={before_day_sum} @ {day_key}",
+                        f"Incoming unique users={len(incoming)}, parsed_rows={parsed_rows}, sample={list(incoming.items())[:3]}",
+                    ]
+
+                if mode_val == "replace" and not dry_run:
+                    # Drop ONLY this month’s synthetic bucket
+                    cur.execute(
+                        "DELETE FROM member_metrics_daily WHERE guild_id=? AND day=?",
+                        (gid, day_key)
+                    )
+
+                # Upsert daily rows
+                rows = [(gid, uid, day_key, cnt) for uid, cnt in incoming.items()]
+                if not dry_run:
+                    cur.executemany(
+                        """
+                        INSERT INTO member_metrics_daily (guild_id, user_id, day, messages)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(guild_id, user_id, day)
+                        DO UPDATE SET messages =
+                            CASE WHEN excluded.messages IS NOT NULL
+                                 THEN (CASE WHEN ?='add'
+                                            THEN member_metrics_daily.messages + excluded.messages
+                                            ELSE excluded.messages
+                                       END)
+                                 ELSE member_metrics_daily.messages
+                            END
+                        """,
+                        [(g,u,d,c,mode_val) for (g,u,d,c) in rows],
+                    )
+
+                # Recompute totals for affected users from metrics_daily
+                uids = tuple(incoming.keys())
+                totals: List[Tuple[int, int]] = []
+                if uids:
+                    q_marks = ","".join("?" for _ in uids)
+                    totals = cur.execute(
+                        f"""
+                        SELECT user_id, COALESCE(SUM(messages),0)
+                        FROM member_metrics_daily
+                        WHERE guild_id=? AND user_id IN ({q_marks})
+                        GROUP BY user_id
+                        """,
+                        (gid, *uids),
+                    ).fetchall()
+                    if not dry_run:
+                        cur.executemany(
+                            """
+                            INSERT INTO member_metrics_total (guild_id, user_id, messages)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(guild_id, user_id)
+                            DO UPDATE SET messages = excluded.messages
+                            """,
+                            [(gid, uid, total) for (uid, total) in totals],
+                        )
+
+                if debug:
+                    after_day_sum = cur.execute(
+                        "SELECT COALESCE(SUM(messages),0) FROM member_metrics_daily WHERE guild_id=? AND day=?",
+                        (gid, day_key)
+                    ).fetchone()[0]
+                    dbg_lines += [
+                        f"After day sum={after_day_sum} (Δ={after_day_sum - (locals().get('before_day_sum') or 0)})",
+                        f"Mode={mode_val}, Dry-run={dry_run}",
+                    ]
 
             if dry_run:
                 con.rollback()
@@ -214,30 +305,16 @@ class CleanupCog(commands.Cog):
 
             total_msgs = sum(incoming.values())
 
-            # --- DEBUG: after state
-            if debug:
-                after_month_sum = cur.execute(
-                    "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
-                    (gid, month)
-                ).fetchone()[0]
-                # pick one sample user to show before/after for this month
-                sample_uid = next(iter(incoming.keys()))
-                before_u = cur.execute(
-                    "SELECT COALESCE(count,0) FROM member_activity_monthly WHERE guild_id=? AND user_id=? AND month=?",
-                    (gid, sample_uid, month)
-                ).fetchone()
-                before_u_val = before_u[0] if before_u else 0
-                dbg_lines.append(f"After month sum={after_month_sum} (Δ={after_month_sum - (0 if 'Before month sum=' not in ''.join(dbg_lines) else int(dbg_lines[1].split('=')[1]))})")
-                dbg_lines.append(f"Sample user {sample_uid} month count now={before_u_val} (+{incoming[sample_uid]}{' dry-run' if dry_run else ''})")
-                dbg_lines.append(f"Mode={mode_val}, Dry-run={dry_run}")
-                dbg_text = "```\n" + "\n".join(dbg_lines[:30]) + "\n```"
+            if debug and dbg_lines:
+                dbg_text = "```\n" + "\n".join(dbg_lines[:40]) + "\n```"
                 await interaction.followup.send(f"Debug import diagnostics:\n{dbg_text}", ephemeral=True)
 
             await interaction.followup.send(
                 f"{'DRY RUN — ' if dry_run else ''}Import complete for guild `{gid}`, month `{month}`.\n"
                 f"• rows imported: {len(incoming)} (unique users)\n"
                 f"• total messages in file: {total_msgs}\n"
-                f"• mode: {mode_val}",
+                f"• mode: {mode_val}\n"
+                f"• target: {target_val}",
                 ephemeral=True
             )
 
