@@ -67,6 +67,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.cleanup",
             "yuribot.cogs.timestamp",
             "yuribot.cogs.booly",
+            "yuribot.cogs.polls",
         ]
         await self._load_extensions(extensions)
 
