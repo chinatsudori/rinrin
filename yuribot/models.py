@@ -1361,4 +1361,98 @@ def mu_get_release(series_id: str, release_id: int) -> dict | None:
             "group": row[6], "url": row[7], "release_ts": row[8],
             "release_id": int(release_id), "series_id": str(series_id),
         }
+# models.py (add or merge)
+from __future__ import annotations
+import sqlite3
+from pathlib import Path
+from typing import Iterable, List, Tuple
+
+_DB_PATH = Path("./data/bot.db")
+_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_DB_PATH), isolation_level=None)  # autocommit
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.row_factory = sqlite3.Row
+    _ensure_tables(conn)
+    return conn
+
+def _ensure_tables(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS member_messages_day (
+        guild_id    INTEGER NOT NULL,
+        user_id     INTEGER NOT NULL,
+        day         TEXT    NOT NULL,        -- YYYY-MM-DD (UTC)
+        count       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, user_id, day)
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS member_messages_month (
+        guild_id    INTEGER NOT NULL,
+        user_id     INTEGER NOT NULL,
+        month       TEXT    NOT NULL,        -- YYYY-MM
+        count       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, user_id, month)
+    );
+    """)
+
+def upsert_member_messages_day(guild_id: int, user_id: int, day: str, inc: int) -> None:
+    """INSERT ... ON CONFLICT DO UPDATE (+= inc)."""
+    with _get_conn() as c:
+        c.execute("""
+            INSERT INTO member_messages_day (guild_id, user_id, day, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, day)
+            DO UPDATE SET count = count + excluded.count;
+        """, (guild_id, user_id, day, inc))
+
+def bulk_upsert_member_messages_day(rows: Iterable[Tuple[int, int, str, int]]) -> None:
+    """rows = [(guild_id, user_id, day, inc), ...]"""
+    with _get_conn() as c:
+        c.executemany("""
+            INSERT INTO member_messages_day (guild_id, user_id, day, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, day)
+            DO UPDATE SET count = count + excluded.count;
+        """, list(rows))
+
+def upsert_member_messages_month(guild_id: int, user_id: int, month: str, inc: int) -> None:
+    """Direct month upsert (useful for month-scope CSV)."""
+    with _get_conn() as c:
+        c.execute("""
+            INSERT INTO member_messages_month (guild_id, user_id, month, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, month)
+            DO UPDATE SET count = count + excluded.count;
+        """, (guild_id, user_id, month, inc))
+
+def rebuild_month_from_days(guild_id: int, month: str) -> None:
+    """Recompute month aggregate from the day table for a guild/month."""
+    with _get_conn() as c:
+        c.execute("DELETE FROM member_messages_month WHERE guild_id=? AND month=?", (guild_id, month))
+        c.execute("""
+            INSERT INTO member_messages_month (guild_id, user_id, month, count)
+            SELECT ?, user_id, ?, SUM(count)
+            FROM member_messages_day
+            WHERE guild_id=? AND substr(day,1,7)=?
+            GROUP BY user_id;
+        """, (guild_id, month, guild_id, month))
+
+def available_months(guild_id: int) -> List[str]:
+    """Distinct months known from day + month tables, newest first."""
+    with _get_conn() as c:
+        cur = c.execute("""
+            SELECT month FROM (
+                SELECT DISTINCT substr(day,1,7) AS month
+                FROM member_messages_day
+                WHERE guild_id=?
+                UNION
+                SELECT DISTINCT month FROM member_messages_month
+                WHERE guild_id=?
+            )
+            ORDER BY month DESC;
+        """, (guild_id, guild_id))
+        return [r["month"] for r in cur.fetchall()]
 
