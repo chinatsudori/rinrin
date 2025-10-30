@@ -493,8 +493,9 @@ class MUClient:
                 if m_id_in_link:
                     rid = int(m_id_in_link.group(1))
             if rid is None:
-                # fallback id: stable-ish hash on (title, link)
-                rid = ts or int(abs(hash((title, link))) % 10_000_000_000)
+                # NOTE: Python's hash() is process-randomized; only use as last resort.
+                # Prefer ts to keep stable across runs.
+                rid = ts if ts is not None else int(abs(hash((title, link))) % 10_000_000_000)
 
             releases.append({
                 "id": rid,
@@ -604,7 +605,6 @@ class MUWatcher(commands.Cog):
             if self._task:
                 self._task.cancel()
         finally:
-            # Close session in the background to avoid blocking unload
             if self._session and not self._session.closed:
                 asyncio.create_task(self._session.close())
 
@@ -898,25 +898,39 @@ class MUWatcher(commands.Cog):
             interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
         )
 
-        if unposted:
-            for tup in unposted:
+        # In-memory de-dupe by release_id just in case DB returns dup rows
+        seen: Set[int] = set()
+        dedup_unposted = []
+        for tup in unposted:
+            rid = int(tup[0])
+            if rid in seen:
+                continue
+            seen.add(rid)
+            dedup_unposted.append(tup)
+
+        if dedup_unposted:
+            # Build release dicts
+            rels_to_post: List[dict] = []
+            for tup in dedup_unposted:
                 rid = int(tup[0])
-                rel = models.mu_get_release(sid, rid) or {
+                rels_to_post.append(models.mu_get_release(sid, rid) or {
                     "release_id": rid,
                     "title": tup[1], "raw_title": tup[2], "description": tup[3],
                     "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
                     "group": tup[7], "url": tup[8], "release_ts": tup[9],
-                }
-                await self._post_release(tgt, we, rel)
+                })
+
+            # Post a single batch embed
+            posted = await self._post_batch(tgt, we, rels_to_post)
+
+            # Mark as posted AFTER a successful send
+            for r in rels_to_post[:posted]:
+                rid = int(r.get("release_id") or r.get("id"))
                 models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
 
-            return await interaction.followup.send(S("mu.check.posted", count=len(unposted)), ephemeral=True)
+            return await interaction.followup.send(S("mu.check.posted", count=posted), ephemeral=True)
 
         # No unposted: show latest known from DB
-        latest_ts = models.mu_latest_release_ts(sid)
-        if latest_ts == -1:
-            return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
-
         latest = max(results, key=lambda x: _release_ts(x))
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
@@ -933,11 +947,10 @@ class MUWatcher(commands.Cog):
 
         await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
 
-    async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict) -> None:
-        """Compose and post a release embed to the given thread."""
-        # Optional English filter
+    async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict) -> bool:
+        """Compose and post a single release embed. Returns True if sent."""
         if FILTER_ENGLISH_ONLY and not _is_english_release(rel):
-            return
+            return False
 
         chbits, extras = _format_rel_bits(rel)
         ts_val = rel.get("release_ts")
@@ -958,12 +971,50 @@ class MUWatcher(commands.Cog):
 
         try:
             await thread.send(embed=em, allowed_mentions=discord.AllowedMentions.none())
-        except discord.Forbidden:
-            # Can't post in thread; give up silently to avoid spammy errors
-            pass
+            return True
         except Exception:
-            # Swallow; the poll loop will try again next cycle if not marked posted
-            pass
+            return False
+
+    async def _post_batch(self, thread: discord.Thread, we: WatchEntry, rels: List[dict]) -> int:
+        """Post a single embed summarizing multiple releases. Returns count posted."""
+        items: List[dict] = []
+        for r in rels:
+            if FILTER_ENGLISH_ONLY and not _is_english_release(r):
+                continue
+            items.append(r)
+        if not items:
+            return 0
+
+        # If just one, reuse the single-release path for nicer detail
+        if len(items) == 1:
+            ok = await self._post_release(thread, we, items[0])
+            return 1 if ok else 0
+
+        lines: List[str] = []
+        MAX_LINES = 15
+        for r in items[:MAX_LINES]:
+            chbits, _extras = _format_rel_bits(r)
+            url = _strip(r.get("url") or "")
+            maybe_url = f" ({url})" if url else ""
+            lines.append(S("mu.batch.line", chbits=chbits, maybe_url=maybe_url))
+
+        overflow = len(items) - len(lines)
+        if overflow > 0:
+            lines.append(f"… +{overflow} more")
+
+        em = discord.Embed(
+            title=S("mu.batch.title", series=we.series_title, n=len(items)),
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+            timestamp=_now_utc(),
+        )
+        em.set_footer(text=S("mu.batch.footer"))
+
+        try:
+            await thread.send(embed=em, allowed_mentions=discord.AllowedMentions.none())
+            return len(items)
+        except Exception:
+            return 0
 
     @tasks.loop(seconds=POLL_SECONDS)
     async def poll_updates(self):
@@ -1038,17 +1089,28 @@ class MUWatcher(commands.Cog):
             unposted = models.mu_list_unposted_for_thread(
                 gid, we.thread_id, sid, english_only=FILTER_ENGLISH_ONLY
             )
+
+            # de-dupe defensively
+            seen: Set[int] = set()
+            rels_to_post: List[dict] = []
             for tup in unposted:
                 rid = int(tup[0])
-                rel = models.mu_get_release(sid, rid) or {
+                if rid in seen:
+                    continue
+                seen.add(rid)
+                rels_to_post.append(models.mu_get_release(sid, rid) or {
                     "release_id": rid,
                     "title": tup[1], "raw_title": tup[2], "description": tup[3],
                     "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
                     "group": tup[7], "url": tup[8], "release_ts": tup[9],
-                }
+                })
+
+            if rels_to_post:
                 try:
-                    await self._post_release(thread, we, rel)
-                    models.mu_mark_posted(gid, we.thread_id, sid, rid)
+                    posted = await self._post_batch(thread, we, rels_to_post)
+                    for r in rels_to_post[:posted]:
+                        rid = int(r.get("release_id") or r.get("id"))
+                        models.mu_mark_posted(gid, we.thread_id, sid, rid)
                 except Exception:
                     pass
 
