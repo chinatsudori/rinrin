@@ -523,7 +523,13 @@ _STRINGS.update({
     "mu.check.not_linked": "This thread is not linked to any MangaUpdates series. Use `/mu link` here.",
     "mu.check.posted": "Posted **{count}** new release(s).",
     "mu.check.no_new": "No new releases — posted the latest known chapter instead.",
-
+    "mu.update.title": "{series} — {chbits}",
+    "mu.update.footer": "MangaUpdates",
+    "mu.batch.title": "{series}: {n} new chapter(s)",
+    "mu.batch.footer": "MangaUpdates • batch",
+    "mu.batch.line": "• {chbits}{maybe_url}",
+    "mu.latest.title": "{series} — Latest: {chbits}",
+    "mu.latest.footer": "Latest known (no new posts)",
     "mu.release.generic": "New release",
     "mu.release.group": "Group: **{group}**",
     "mu.release.date_rel": "Date: <t:{ts}:D>",
@@ -581,6 +587,7 @@ _STRINGS.update({
     "poll.native.err.create_failed": "Couldn’t create the poll: {err}",
 
 })
+
 
 
 
