@@ -160,19 +160,19 @@ NOVANE_POOL: List[str] = [
 ]
 L_POOL: List[str] = [
     "will you take me to six flags again plsssss ? :sadcrydepression:",
-    "You can celebrate a 95% Valentine's Day.",
     "can I have an ice cream ? :gura_heart:",
-    "This was her precious treasure, regained.",
-    "Je t'aime.",
-    "hi nice auntie ! :henyaHeart:",
-]
-BAGE_POOL: List[str] = [
-    "*To me, you are a dream I yearn to hold and yet fear to lose. To you, I am someone who can come and go, and you won't pursue.*",
     "HAI L ! a::wavehi:",
     "can I have an ice cream ? :gura_heart:",
     "will you read something to me next time ?",
     "I want up plss",
     "can I have some money ? :henyaNodder:",
+]
+BAGE_POOL: List[str] = [
+    "*To me, you are a dream I yearn to hold and yet fear to lose. To you, I am someone who can come and go, and you won't pursue.*",
+    "This was her precious treasure, regained.",
+    "You can celebrate a 95% Valentine's Day.",
+    "Je t'aime.",
+    "hi nice auntie ! :henyaHeart:",
 ]
 OOKAMI_POOL: List[str] = [
     "Hai ookami ! a::wavehi:",
