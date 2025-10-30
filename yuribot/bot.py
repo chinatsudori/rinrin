@@ -114,30 +114,30 @@ class YuriBot(commands.Bot):
 
     async def _sync_commands(self) -> None:
         """
-        Single-source-of-truth sync.
+        Sync application commands without clearing the tree.
 
-        Set env:
-          COMMAND_SYNC_MODE = "guild" or "global" (default: "global")
-          DEV_GUILD_ID      = <id>   (required if mode=guild)
+        Env:
+          COMMAND_SYNC_MODE = "guild" | "global"  (default: "global")
+          DEV_GUILD_ID      = <id>  (required if mode=guild)
         """
         mode = (os.getenv("COMMAND_SYNC_MODE") or "global").strip().lower()
         try:
             if mode == "guild":
                 gid = int(os.environ["DEV_GUILD_ID"])
                 guild = discord.Object(id=gid)
-                # Clear + sync ONLY the guild set. No copy_global_to to avoid dupes.
-                self.tree.clear_commands(guild=guild)
+                # Copy all currently-registered global commands into the dev guild and sync there only.
+                self.tree.copy_global_to(guild=guild)
                 synced = await self.tree.sync(guild=guild)
                 log.info("Synced %d commands to dev guild %s.", len(synced), gid)
             else:
-                # Global-only
-                self.tree.clear_commands(guild=None)
+                # Global sync only. Do NOT clear; just publish what cogs registered.
                 synced = await self.tree.sync()
                 log.info("Globally synced %d commands.", len(synced))
         except KeyError:
-            log.error("COMMAND_SYNC_MODE=guild requires DEV_GUILD_ID to be set.")
+            log.error("COMMAND_SYNC_MODE=guild requires DEV_GUILD_ID.")
         except Exception:
             log.exception("Command sync failed.")
+
 
     async def on_ready(self):
         if self.user:
