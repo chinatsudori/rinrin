@@ -3,8 +3,7 @@ import os, sqlite3
 from .config import DB_PATH
 
 def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str):
-    cur = con.cursor
-    cur = con.cursor()
+    cur = con.cursor()  # FIX: call cursor()
     cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})")]
     if column not in cols:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -150,15 +149,19 @@ def ensure_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_series ON schedule_sections (series_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_due ON schedule_sections (posted, discussion_start)")
 
-        # --- Guild-wide settings ---
+        # --- Guild-wide settings (single definition; includes MU forum channel) ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
             mod_logs_channel_id INTEGER,
-            bot_logs_channel_id INTEGER
+            bot_logs_channel_id INTEGER,
+            welcome_channel_id INTEGER,
+            welcome_image_filename TEXT,
+            mu_forum_channel_id INTEGER
         )""")
         _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
         _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
+        _ensure_column(con, "guild_settings", "mu_forum_channel_id", "INTEGER")
 
         # --- Moderation actions log ---
         cur.execute("""
@@ -242,16 +245,6 @@ def ensure_db():
             PRIMARY KEY (guild_id, user_id, role_id)
         )""")
 
-        # --- Guild-wide settings ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id INTEGER PRIMARY KEY,
-            mod_logs_channel_id INTEGER,
-            bot_logs_channel_id INTEGER
-        )""")
-        _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
-        _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
-        _ensure_column(con, "guild_settings", "mu_forum_channel_id", "INTEGER")
         # --- Unified member metrics (daily + totals by metric) ---
         # metric ∈ {'messages','words','mentions','emoji_chat','emoji_react'}
         cur.execute("""
@@ -299,18 +292,18 @@ def ensure_db():
         SELECT DISTINCT month FROM member_activity_monthly
         """)
 
-                # --- MangaUpdates: series, releases, and per-thread posting state ---
+        # --- MangaUpdates: series, releases, per-thread posting state ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS mu_series (
             series_id TEXT PRIMARY KEY,         -- MU id (string)
             title     TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )""")
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS mu_releases (
             series_id   TEXT    NOT NULL,
-            release_id  INTEGER NOT NULL,       -- stable if available; else your generated id
+            release_id  INTEGER NOT NULL,       -- stable if available; else generated
             title       TEXT,
             raw_title   TEXT,
             description TEXT,
@@ -320,10 +313,41 @@ def ensure_db():
             group_name  TEXT,
             url         TEXT,
             release_ts  INTEGER NOT NULL DEFAULT -1,  -- epoch seconds; -1 if unknown
-            created_at  TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (series_id, release_id)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_releases_series_ts ON mu_releases (series_id, release_ts DESC)")
+
+        # MIGRATION: ensure composite PK exists even if an older table was created without it
+        sql = _table_sql(con, "mu_releases")
+        if sql and "PRIMARY KEY" not in sql.upper():
+            # Rebuild with proper PK
+            cur.execute("ALTER TABLE mu_releases RENAME TO mu_releases_old")
+            cur.execute("""
+            CREATE TABLE mu_releases (
+                series_id   TEXT    NOT NULL,
+                release_id  INTEGER NOT NULL,
+                title       TEXT,
+                raw_title   TEXT,
+                description TEXT,
+                volume      TEXT,
+                chapter     TEXT,
+                subchapter  TEXT,
+                group_name  TEXT,
+                url         TEXT,
+                release_ts  INTEGER NOT NULL DEFAULT -1,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (series_id, release_id)
+            )""")
+            cur.execute("""
+            INSERT OR IGNORE INTO mu_releases
+            (series_id, release_id, title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts, created_at)
+            SELECT series_id, release_id, title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts,
+                   COALESCE(created_at, datetime('now'))
+            FROM mu_releases_old
+            """)
+            cur.execute("DROP TABLE mu_releases_old")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_releases_series_ts ON mu_releases (series_id, release_ts DESC)")
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS mu_thread_series (
@@ -340,12 +364,11 @@ def ensure_db():
             thread_id  INTEGER NOT NULL,
             series_id  TEXT    NOT NULL,
             release_id INTEGER NOT NULL,
-            posted_at  TEXT    NOT NULL,
+            posted_at  TEXT    NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (guild_id, thread_id, release_id)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_series ON mu_thread_posts (series_id)")
 
-        
         con.commit()
 
 def connect():
