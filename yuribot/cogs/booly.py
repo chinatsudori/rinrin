@@ -36,9 +36,10 @@ ID_OOKAMI  = 278958673835851777
 ID_BLEP    = 251914689913683970
 ID_VIVI    = 315694140480421889
 ID_ADDI    = 1143394906606424165
+ID_BAGE    = 1149355492456538185
 
 SPECIAL_IDS = {
-    ID_MONKE, ID_MOM_1, ID_MUM, ID_NAT, ID_NOVANE, ID_L, ID_OOKAMI, ID_BLEP, ID_VIVI, ID_ADDI
+    ID_MONKE, ID_MOM_1, ID_MUM, ID_NAT, ID_NOVANE, ID_L, ID_OOKAMI, ID_BLEP, ID_VIVI, ID_ADDI, ID_BAGE
 }
 
 # Channels where **personalized** auto-replies are disabled
@@ -85,14 +86,31 @@ GENERAL_MENTION_POOL: List[str] = [
     "Hey !",
     "huh, what ?",
     "Yes? :3",
-    ":ping:",
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+    ":ping:",    
+
+
 ]
 
 # Slightly deferential if a mod/staff pings
 MOD_MENTION_POOL: List[str] = [
     "am I in trouble ? :sadcrydepression:",
     "I've been good I swear !",
-    "yes miss ? 😊",
+    "yes ? 😊",
+    ":henyaHeart:",
+    ":gura_heart:",
+    ":henyaHeart:",
+    ":gura_heart:",
+    ":henyaHeart:",
+    ":gura_heart:",
 ]
 
 # Default cute lines for “other” special users
@@ -106,7 +124,7 @@ MOM_1_POOL: List[str] = [
     "hi mom a::wavehi: im mostly behaving today ~",
     "hearts you ~ :gura_heart:",
     "fine ill eat something but sister has to eat too",
-    "dont worry... I’ve only caused, like… two minor emotional damages today a::henyaNodder:",
+    "dont worry... I’ve only caused, like… two minor emotional damages today :henyaNodder:",
     "youd still love me if i accidentally ban someone right ? :sadcrydepression:",
     "a::gimme_hug:",
     "おはよう、お母さん ～！:henyaHeart:",
@@ -142,11 +160,19 @@ NOVANE_POOL: List[str] = [
 ]
 L_POOL: List[str] = [
     "will you take me to six flags again plsssss ? :sadcrydepression:",
+    "You can celebrate a 95% Valentine's Day.",
+    "can I have an ice cream ? :gura_heart:",
+    "This was her precious treasure, regained.",
+    "Je t'aime.",
+    "hi nice auntie ! :henyaHeart:",
+]
+BAGE_POOL: List[str] = [
+    "*To me, you are a dream I yearn to hold and yet fear to lose. To you, I am someone who can come and go, and you won't pursue.*",
     "HAI L ! a::wavehi:",
     "can I have an ice cream ? :gura_heart:",
     "will you read something to me next time ?",
     "I want up plss",
-    "can I have some money ? a::henyaNodder:",
+    "can I have some money ? :henyaNodder:",
 ]
 OOKAMI_POOL: List[str] = [
     "Hai ookami ! a::wavehi:",
@@ -167,16 +193,16 @@ VIVI_POOL: List[str] = [
     "can I hide behind you again :sadcrydepression:",
     "aunt vivi blink twice if you’re tired of everyone’s nonsense",
     "luv u :gura_heart:",
-    "can we play some games vivivi a::henyaNodder: ?",
+    "can we play some games vivivi :henyaNodder: ?",
 ]
 ADDI_POOL: List[str] = [
     "good puppyyy ! :gura_heart:",
     "best puppy !!",
     "awww such a cutie. pat pat pat :gura_heart:",
-    "you get extra pets for that one a::henyaNodder:",
+    "you get extra pets for that one :henyaNodder:",
     "ok fine you earned a treat 😤",
     "woof woof !~",
-    "arf arf I want pats too ! a::gimme_hug:",
+    "arf arf I want pats too ! :gimme_hug:",
 ]
 MONKE_POOL: List[str] = [
     "wrong ~",
@@ -290,7 +316,9 @@ def _personal_pool_for(user_id: int) -> List[str]:
     if user_id == ID_VIVI:
         return VIVI_POOL
     if user_id == ID_ADDI:
-        return ADDI_POOL
+        return ADDI_POOL    
+    if user_id == ID_BAGE:
+        return BAGE_POOL
     return SPECIAL_DEFAULT_POOL
 
 
