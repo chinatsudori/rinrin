@@ -622,10 +622,10 @@ def bump_member_message(
     inc: int = 1,
 ) -> None:
     when_iso = when_iso or _now_iso_utc()
-    month = when_iso[:7]  # 'YYYY-MM'
+    day, week_key, month, hour_utc = _iso_parts(when_iso)
     with connect() as con:
         cur = con.cursor()
-        # monthly
+        # legacy monthly
         cur.execute(
             """
             INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
@@ -635,7 +635,7 @@ def bump_member_message(
             """,
             (guild_id, user_id, month, inc),
         )
-        # total
+        # legacy total
         cur.execute(
             """
             INSERT INTO member_activity_total (guild_id, user_id, count)
@@ -645,7 +645,11 @@ def bump_member_message(
             """,
             (guild_id, user_id, inc),
         )
+        # unified metrics
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "messages", day, week_key, month, inc)
+        _bump_hour_hist(con, guild_id, user_id, "messages", hour_utc, inc)
         con.commit()
+
 
 
 def top_members_month(guild_id: int, month: str, limit: int = 20) -> List[Tuple[int, int]]:
@@ -869,3 +873,327 @@ def get_mu_forum_channel(guild_id: int) -> int | None:
             SELECT mu_forum_channel_id FROM guild_settings WHERE guild_id=?
         """, (guild_id,)).fetchone()
         return int(row[0]) if row and row[0] is not None else None
+
+# ==============================
+# Helpers for time bucketing
+# ==============================
+from zoneinfo import ZoneInfo
+
+def _iso_parts(when_iso: str) -> tuple[str, str, str, int]:
+    """
+    Return (day, week_key, month, hour_utc) from ISO timestamp.
+    week_key = 'YYYY-Www' using ISO calendar.
+    """
+    dt = datetime.fromisoformat(when_iso.replace("Z", "+00:00"))
+    dt = dt.astimezone(timezone.utc)
+    y, w, _ = dt.isocalendar()  # ISO year/week
+    day = dt.strftime("%Y-%m-%d")
+    month = dt.strftime("%Y-%m")
+    week_key = f"{y}-W{int(w):02d}"
+    return day, week_key, month, dt.hour
+
+def _upsert_metric_daily_and_total(con: sqlite3.Connection, guild_id: int, user_id: int, metric: str,
+                                   day: str, week_key: str, month: str, inc: int) -> None:
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO member_metrics_daily (guild_id, user_id, metric, day, week, month, count)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id, metric, day) DO UPDATE SET
+          count = count + excluded.count
+    """, (guild_id, user_id, metric, day, week_key, month, inc))
+    cur.execute("""
+        INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id, metric) DO UPDATE SET
+          count = count + excluded.count
+    """, (guild_id, user_id, metric, inc))
+
+def _bump_hour_hist(con: sqlite3.Connection, guild_id: int, user_id: int, metric: str, hour_utc: int, inc: int = 1) -> None:
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO member_hour_hist (guild_id, user_id, metric, hour_utc, count)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id, metric, hour_utc) DO UPDATE SET
+          count = count + excluded.count
+    """, (guild_id, user_id, metric, hour_utc, inc))
+
+
+# -------------------------
+# Unified bumpers
+# -------------------------
+def bump_member_words(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "words", day, week_key, month, inc)
+        con.commit()
+
+def bump_member_mentioned(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "mentions", day, week_key, month, inc)
+        con.commit()
+
+def bump_member_emoji_chat(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_chat", day, week_key, month, inc)
+        con.commit()
+
+def bump_member_emoji_react(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_react", day, week_key, month, inc)
+        con.commit()
+# -------------------------
+# Top members by period
+# -------------------------
+def _top_members_by_period(guild_id: int, metric: str, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    where = {"day": "day=?", "week": "week=?", "month": "month=?"}[scope]
+    with connect() as con:
+        cur = con.cursor()
+        return cur.execute(
+            f"""
+            SELECT user_id, SUM(count) AS c
+            FROM member_metrics_daily
+            WHERE guild_id=? AND metric=? AND {where}
+            GROUP BY user_id
+            ORDER BY c DESC
+            LIMIT ?
+            """,
+            (guild_id, metric, key, limit),
+        ).fetchall()
+
+def top_members_messages_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_by_period(guild_id, "messages", scope, key, limit)
+
+def top_members_words_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_by_period(guild_id, "words", scope, key, limit)
+
+def top_members_mentions_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_by_period(guild_id, "mentions", scope, key, limit)
+
+def top_members_emoji_chat_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_by_period(guild_id, "emoji_chat", scope, key, limit)
+
+def top_members_emoji_react_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_by_period(guild_id, "emoji_react", scope, key, limit)
+
+# -------------------------
+# Top members all-time
+# -------------------------
+def _top_members_total(guild_id: int, metric: str, limit: int) -> List[Tuple[int, int]]:
+    with connect() as con:
+        cur = con.cursor()
+        return cur.execute(
+            """
+            SELECT user_id, count
+            FROM member_metrics_total
+            WHERE guild_id=? AND metric=?
+            ORDER BY count DESC
+            LIMIT ?
+            """,
+            (guild_id, metric, limit),
+        ).fetchall()
+
+def top_members_messages_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
+    # prefer unified; fall back to legacy if empty
+    rows = _top_members_total(guild_id, "messages", limit)
+    if rows:
+        return rows
+    # legacy fallback
+    with connect() as con:
+        cur = con.cursor()
+        return cur.execute(
+            """
+            SELECT user_id, count
+            FROM member_activity_total
+            WHERE guild_id=?
+            ORDER BY count DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+
+def top_members_words_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_total(guild_id, "words", limit)
+
+def top_members_mentions_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_total(guild_id, "mentions", limit)
+
+def top_members_emoji_chat_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_total(guild_id, "emoji_chat", limit)
+
+def top_members_emoji_react_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
+    return _top_members_total(guild_id, "emoji_react", limit)
+def member_word_stats(guild_id: int, user_id: int) -> Tuple[int, List[Tuple[str, int]]]:
+    """Return (total_words, [(month, count)...] sorted desc)."""
+    with connect() as con:
+        cur = con.cursor()
+        total_row = cur.execute("""
+            SELECT count FROM member_metrics_total
+            WHERE guild_id=? AND user_id=? AND metric='words'
+        """, (guild_id, user_id)).fetchone()
+        total = int(total_row[0]) if total_row else 0
+
+        rows = cur.execute("""
+            SELECT month, SUM(count) as c
+            FROM member_metrics_daily
+            WHERE guild_id=? AND user_id=? AND metric='words'
+            GROUP BY month
+            ORDER BY month DESC
+        """, (guild_id, user_id)).fetchall()
+        return total, rows
+
+def member_daily_counts_month(guild_id: int, user_id: int | None, month: str) -> List[Tuple[str, int]]:
+    """[(YYYY-MM-DD, count)] for messages in a month; user_id=None -> guild aggregate."""
+    with connect() as con:
+        cur = con.cursor()
+        if user_id is None:
+            rows = cur.execute("""
+                SELECT day, SUM(count) AS c
+                FROM member_metrics_daily
+                WHERE guild_id=? AND metric='messages' AND month=?
+                GROUP BY day
+                ORDER BY day ASC
+            """, (guild_id, month)).fetchall()
+        else:
+            rows = cur.execute("""
+                SELECT day, count
+                FROM member_metrics_daily
+                WHERE guild_id=? AND user_id=? AND metric='messages' AND month=?
+                ORDER BY day ASC
+            """, (guild_id, user_id, month)).fetchall()
+        return rows
+
+def member_hour_histogram_total(guild_id: int, user_id: int, tz: str = "UTC") -> List[int]:
+    """Return 24-bucket histogram for messages, rotated to tz."""
+    with connect() as con:
+        cur = con.cursor()
+        rows = cur.execute("""
+            SELECT hour_utc, count FROM member_hour_hist
+            WHERE guild_id=? AND user_id=? AND metric='messages'
+        """, (guild_id, user_id)).fetchall()
+    counts_utc = [0]*24
+    for h, c in rows:
+        counts_utc[int(h)] += int(c)
+
+    if tz == "UTC":
+        return counts_utc
+
+    try:
+        # Approximate rotation by current offset (DST-safe for "now")
+        target = ZoneInfo(tz)
+        now = datetime.now(timezone.utc)
+        offset = int((now.astimezone(target).utcoffset() or 0).total_seconds() // 3600)
+        # PT is typically -8 or -7; to convert UTC->PT hour: (h + offset) % 24
+        rotated = [0]*24
+        for h in range(24):
+            pt_h = (h + offset) % 24
+            rotated[pt_h] = counts_utc[h]
+        return rotated
+    except Exception:
+        return counts_utc
+
+def available_months(guild_id: int) -> List[str]:
+    """Months with any message activity (prefer unified table, fallback to legacy)."""
+    with connect() as con:
+        cur = con.cursor()
+        rows = cur.execute("""
+            SELECT DISTINCT month FROM member_metrics_daily
+            WHERE guild_id=? AND metric='messages'
+            ORDER BY month DESC
+            LIMIT 36
+        """, (guild_id,)).fetchall()
+        if rows:
+            return [r[0] for r in rows]
+        rows2 = cur.execute("""
+            SELECT DISTINCT month FROM member_activity_monthly
+            WHERE guild_id=?
+            ORDER BY month DESC
+            LIMIT 36
+        """, (guild_id,)).fetchall()
+        return [r[0] for r in rows2]
+
+
+def reset_member_words(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "words", scope, key)
+
+def reset_member_mentions(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "mentions", scope, key)
+
+def reset_member_emoji_chat(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "emoji_chat", scope, key)
+
+def reset_member_emoji_react(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "emoji_react", scope, key)
+
+def _reset_metric(guild_id: int, metric: str, scope: str, key: str | None) -> None:
+    with connect() as con:
+        cur = con.cursor()
+        if scope == "all":
+            cur.execute("DELETE FROM member_metrics_daily WHERE guild_id=? AND metric=?", (guild_id, metric))
+            cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric=?", (guild_id, metric))
+            if metric == "messages":
+                # keep hist in sync
+                cur.execute("DELETE FROM member_hour_hist WHERE guild_id=? AND metric='messages'", (guild_id,))
+        elif scope in ("day","week","month") and key:
+            cur.execute(f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric=? AND {scope}=?", (guild_id, metric, key))
+            # Recompute totals cheaply
+            cur.execute("""
+                DELETE FROM member_metrics_total
+                WHERE guild_id=? AND metric=? AND user_id IN (
+                  SELECT DISTINCT user_id FROM member_metrics_daily
+                  WHERE guild_id=? AND metric=?
+                )
+            """, (guild_id, metric, guild_id, metric))
+            # Refill totals
+            cur.execute("""
+                INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+                SELECT guild_id, user_id, metric, SUM(count)
+                FROM member_metrics_daily
+                WHERE guild_id=? AND metric=?
+                GROUP BY guild_id, user_id, metric
+            """, (guild_id, metric))
+        else:
+            raise ValueError("bad_scope_or_key")
+        con.commit()
+
+def reset_member_activity(guild_id: int, scope: str = "month", key: str | None = None) -> None:
+    """Extended: resets unified 'messages' too."""
+    with connect() as con:
+        cur = con.cursor()
+        if scope == "all":
+            cur.execute("DELETE FROM member_activity_monthly WHERE guild_id=?", (guild_id,))
+            cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (guild_id,))
+            cur.execute("DELETE FROM member_metrics_daily WHERE guild_id=? AND metric='messages'", (guild_id,))
+            cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (guild_id,))
+            cur.execute("DELETE FROM member_hour_hist WHERE guild_id=? AND metric='messages'", (guild_id,))
+        elif scope in ("day","week","month") and key:
+            # unified period delete
+            cur.execute(f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric='messages' AND {scope}=?", (guild_id, key))
+            # legacy monthly delete if month scope
+            if scope == "month":
+                cur.execute("DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?", (guild_id, key))
+            # recompute unified totals
+            cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (guild_id,))
+            cur.execute("""
+                INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+                SELECT guild_id, user_id, 'messages', SUM(count)
+                FROM member_metrics_daily
+                WHERE guild_id=? AND metric='messages'
+                GROUP BY guild_id, user_id
+            """, (guild_id,))
+            # recompute legacy totals from legacy monthly
+            cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (guild_id,))
+            cur.execute("""
+                INSERT INTO member_activity_total (guild_id, user_id, count)
+                SELECT guild_id, user_id, SUM(count)
+                FROM member_activity_monthly
+                WHERE guild_id=?
+                GROUP BY guild_id, user_id
+            """, (guild_id,))
+        else:
+            raise ValueError("bad_scope_or_key")
+        con.commit()
+
+
