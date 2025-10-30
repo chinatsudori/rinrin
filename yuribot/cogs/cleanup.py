@@ -528,7 +528,7 @@ class CleanupCog(commands.Cog):
     # ------------------------
     @group.command(
         name="purge_legacy_table",
-        description="Remove legacy activity table to prevent future double-adds. Owner can DROP; managers can DELETE for this guild.",
+        description="Remove legacy activity table.",
     )
     @app_commands.describe(
         table="Legacy table name to purge (e.g., member_activity_month, messages_total, etc.)",
