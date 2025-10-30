@@ -97,7 +97,6 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.booly",
             "yuribot.cogs.polls",
             "yuribot.cogs.lifecycle",
-            "yuribot.cogs.maintact",
         ]
         await self._load_extensions(extensions)
 
