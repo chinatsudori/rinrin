@@ -252,7 +252,52 @@ def ensure_db():
         _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
         _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
         _ensure_column(con, "guild_settings", "mu_forum_channel_id", "INTEGER")
+        # --- Unified member metrics (daily + totals by metric) ---
+        # metric ∈ {'messages','words','mentions','emoji_chat','emoji_react'}
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_metrics_daily (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            metric   TEXT    NOT NULL,
+            day      TEXT    NOT NULL,          -- 'YYYY-MM-DD'
+            week     TEXT    NOT NULL,          -- 'YYYY-Www' (ISO week)
+            month    TEXT    NOT NULL,          -- 'YYYY-MM'
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, metric, day)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gwk ON member_metrics_daily (guild_id, metric, week)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gm ON member_metrics_daily (guild_id, metric, month)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gd ON member_metrics_daily (guild_id, metric, day)")
 
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_metrics_total (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            metric   TEXT    NOT NULL,
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, metric)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_total_gm ON member_metrics_total (guild_id, metric, count DESC)")
+
+        # Hour histogram (UTC buckets; we rotate to PT on read)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_hour_hist (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            metric   TEXT    NOT NULL,
+            hour_utc INTEGER NOT NULL CHECK(hour_utc BETWEEN 0 AND 23),
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, metric, hour_utc)
+        )""")
+
+        # Helper view of months for autocomplete (messages metric preferred)
+        cur.execute("""
+        CREATE VIEW IF NOT EXISTS v_available_months AS
+        SELECT DISTINCT month FROM member_metrics_daily
+         WHERE metric='messages'
+        UNION
+        SELECT DISTINCT month FROM member_activity_monthly
+        """)
         con.commit()
 
 def connect():
