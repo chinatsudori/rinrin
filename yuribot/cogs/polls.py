@@ -1,122 +1,109 @@
 from __future__ import annotations
+
+import logging
+from datetime import timedelta
+from typing import Optional
+
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
-from .. import models
-from ..utils.time import now_local, to_iso
-from ..views import VoteView
-from ..strings import S
+from ..strings import S  
 
+log = logging.getLogger(__name__)
 
-def parse_numbers(s: str) -> list[int]:
-    parts = [p.strip() for p in s.replace(",", " ").split() if p.strip()]
-    out = []
-    for p in parts:
-        if p.isdigit():
-            out.append(int(p))
-    seen = set(); res = []
-    for n in out:
-        if n not in seen:
-            seen.add(n); res.append(n)
-    return res
-
+MAX_OPTIONS = 6
+MAX_HOURS = 168  # 7 days per current API guidance
 
 class PollsCog(commands.Cog):
+    """Create native Discord polls with custom durations and up to 6 options."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(
-        name="create_poll",
-        description="Create a poll from current collection by submission numbers (e.g., 1,3,4)",
+    poll = app_commands.Group(
+        name="poll",
+        description=S("poll.native.group_desc"),
     )
+
+    @poll.command(name="create", description=S("poll.native.create_desc"))
     @app_commands.describe(
-        numbers="Space/comma-separated numbers from /club list_current_submissions",
-        title="Optional custom poll title",
-        club="Club type (default: manga)",
+        question=S("poll.native.arg.question"),
+        opt1=S("poll.native.arg.opt1"),
+        opt2=S("poll.native.arg.opt2"),
+        opt3=S("poll.native.arg.opt3"),
+        opt4=S("poll.native.arg.opt4"),
+        opt5=S("poll.native.arg.opt5"),
+        opt6=S("poll.native.arg.opt6"),
+        hours=S("poll.native.arg.hours"),
+        multi=S("poll.native.arg.multi"),
+        ephemeral=S("poll.native.arg.ephemeral"),
     )
-    async def create_poll(
+    async def create(
         self,
         interaction: discord.Interaction,
-        numbers: str,
-        title: str | None = None,
-        club: str = "manga",
+        question: str,
+        opt1: str,
+        opt2: str,
+        opt3: Optional[str] = None,
+        opt4: Optional[str] = None,
+        opt5: Optional[str] = None,
+        opt6: Optional[str] = None,
+        hours: app_commands.Range[int, 1, MAX_HOURS] = 48,
+        multi: bool = False,
+        ephemeral: bool = False,
     ):
+        # Guild-only
         if not interaction.guild:
-            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-
-        club = (club or "").strip() or "manga"
-        cfg = models.get_club_cfg(interaction.guild_id, club)
-        if not cfg:
             return await interaction.response.send_message(
-                S("poll.create.error.no_cfg", club=club), ephemeral=True
+                S("common.guild_only"), ephemeral=True
             )
 
-        cw = models.latest_collection(interaction.guild_id, cfg["club_id"])
-        if not cw:
-            return await interaction.response.send_message(S("poll.create.error.no_collection"), ephemeral=True)
+        # Gather options and validate
+        options = [o for o in (opt1, opt2, opt3, opt4, opt5, opt6) if o]
+        if len(options) < 2:
+            return await interaction.response.send_message(
+                S("poll.native.err.need_two"), ephemeral=True
+            )
+        if len(options) > MAX_OPTIONS:
+            return await interaction.response.send_message(
+                S("poll.native.err.too_many", n=MAX_OPTIONS), ephemeral=True
+            )
 
-        ordinals = parse_numbers(numbers or "")
-        chosen = models.get_submissions_by_ordinals(cw[0], ordinals)
-        if not chosen:
-            return await interaction.response.send_message(S("poll.create.error.no_valid_numbers"), ephemeral=True)
+        # Create & send native poll (must be in initial response)
+        try:
+            p = discord.Poll(
+                question=question[:300],
+                duration=timedelta(hours=int(hours)),
+                allow_multiselect=multi,
+            )
+            for text in options:
+                p.add_answer(text=text[:300])
 
-        poll_channel = interaction.guild.get_channel(cfg["polls_channel_id"])
-        if not isinstance(poll_channel, discord.TextChannel):
-            return await interaction.response.send_message(S("poll.create.error.bad_channel"), ephemeral=True)
+            await interaction.response.send_message(
+                poll=p,
+                ephemeral=ephemeral
+            )
 
-        poll_id = models.create_poll(
-            interaction.guild_id, cfg["club_id"], poll_channel.id, to_iso(now_local()), None
-        )
-        for sid, title_s, link, author_id, thread_id, created_at in chosen:
-            models.add_poll_option(poll_id, title_s, sid)
+            log.info(
+                "poll.create",
+                extra={
+                    "guild_id": interaction.guild_id,
+                    "channel_id": getattr(interaction.channel, "id", None),
+                    "user_id": interaction.user.id,
+                    "hours": hours,
+                    "multi": multi,
+                    "opts": len(options),
+                },
+            )
 
-        with models.connect() as con:
-            cur = con.cursor()
-            opts = cur.execute("SELECT id, label FROM poll_options WHERE poll_id=?", (poll_id,)).fetchall()
-
-        view = VoteView(poll_id=poll_id, options=opts)
-        embed = discord.Embed(
-            title=title or S("poll.create.title", club=club),
-            description=S("poll.create.desc", cid=cw[0]),
-            color=discord.Color.pink(),
-        )
-        embed.add_field(
-            name=S("poll.options_title"),
-            value="\n".join([S("poll.option.bullet", label=label) for _, label in opts]),
-            inline=False,
-        )
-
-        msg = await poll_channel.send(embed=embed, view=view)
-        models.set_poll_message(poll_id, poll_channel.id, msg.id)
-
-        await interaction.response.send_message(
-            S("poll.create.posted", id=poll_id, channel=poll_channel.mention),
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="close_poll", description="Close a poll now and post results")
-    @app_commands.describe(poll_id="Poll ID")
-    async def close_poll(self, interaction: discord.Interaction, poll_id: int):
-        if not interaction.guild:
-            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
-
-        votes = models.tally_poll(poll_id)
-        models.close_poll(poll_id)
-        row = models.get_poll_channel_and_message(poll_id)
-        if not row:
-            return await interaction.response.send_message(S("poll.close.not_found"), ephemeral=True)
-
-        channel_id, message_id, guild_id = row
-        ch = interaction.guild.get_channel(channel_id)
-        if isinstance(ch, discord.TextChannel):
-            lines = [S("poll.close.results_header")] + [
-                S("poll.close.result_line", label=label, count=c) for _, label, c in votes
-            ]
-            await ch.send("\n".join(lines))
-
-        await interaction.response.send_message(S("poll.close.closed", id=poll_id), ephemeral=True)
-
+        except Exception as e:
+            log.exception("poll.create.failed", exc_info=e)
+            msg = S("poll.native.err.create_failed", err=type(e).__name__)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PollsCog(bot))
