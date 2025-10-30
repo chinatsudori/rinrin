@@ -1,3 +1,4 @@
+# cogs/cleanup.py
 from __future__ import annotations
 
 import csv
@@ -13,14 +14,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..db import connect
-from ..strings import S  # only used for "guild only" if present
+from ..strings import S  # optional (for "guild only")
 
 log = logging.getLogger(__name__)
 
 MU_STATE_FILE = Path("./data/mu_watch.json")
-
-# The only user allowed to operate on arbitrary guild IDs.
-OWNER_USER_ID = 49670556760408064
+OWNER_USER_ID = 49670556760408064  # Summer
 
 
 # -----------------------
@@ -36,7 +35,7 @@ def _delete_counts(cur, table: str, where_sql: str, params: Tuple) -> int:
 
 
 def _tables_for_guild_scoped_delete() -> Iterable[Tuple[str, str]]:
-    """Children first, then parents (adjust to your schema)."""
+    # Order matters (children first)
     return [
         ("schedule_sections", "series_id IN (SELECT id FROM series WHERE guild_id=?)"),
         ("submissions", "guild_id=?"),
@@ -80,22 +79,21 @@ def _tables_for_prune_unknown() -> Iterable[Tuple[str, str]]:
 
 async def _owner_only(inter: discord.Interaction) -> bool:
     try:
-        if inter.user and inter.user.id == OWNER_USER_ID:
-            return True
         return await inter.client.is_owner(inter.user)  # type: ignore[attr-defined]
     except Exception:
         return False
 
 
-def _safe_guild_only_msg() -> str:
-    return S("common.guild_only") if callable(S) else "This command can only be used in a server."
+async def _is_authorized(inter: discord.Interaction) -> bool:
+    """Allow Summer or bot owner."""
+    return inter.user.id == OWNER_USER_ID or await _owner_only(inter)
 
 
 # -----------------------
 # Cog
 # -----------------------
 class CleanupCog(commands.Cog):
-    """Admin maintenance utilities (DB pruning, MU state, command sync, legacy activity)."""
+    """Admin maintenance: DB pruning, MU state, sync, and activity migration."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -156,24 +154,6 @@ class CleanupCog(commands.Cog):
         )
         return mon, tot
 
-    # Resolve the target guild id (string → int), with permissions.
-    def _resolve_gid(self, interaction: discord.Interaction, target_guild_id: Optional[str]) -> int:
-        """
-        If target_guild_id is provided, only OWNER_USER_ID may use it.
-        Otherwise, use the current interaction guild id.
-        """
-        if target_guild_id:
-            if interaction.user.id != OWNER_USER_ID:
-                raise PermissionError("Only the bot owner can target another guild.")
-            try:
-                return int(target_guild_id)
-            except Exception:
-                raise ValueError("target_guild_id must be a numeric string.")
-        # default: current guild
-        if not interaction.guild_id:
-            raise RuntimeError("No current guild context.")
-        return int(interaction.guild_id)
-
     # ------------------------
     # /cleanup purge_here
     # ------------------------
@@ -193,7 +173,10 @@ class CleanupCog(commands.Cog):
         vacuum: bool = False,
     ):
         if not interaction.guild:
-            return await interaction.response.send_message(_safe_guild_only_msg(), ephemeral=True)
+            return await interaction.response.send_message(
+                S("common.guild_only") if callable(S) else "This command can only be used in a server.",
+                ephemeral=True,
+            )
 
         await interaction.response.defer(ephemeral=True)
         gid = int(interaction.guild_id)
@@ -238,7 +221,7 @@ class CleanupCog(commands.Cog):
     # ------------------------
     @group.command(
         name="prune_unknown_guilds",
-        description="Owner-only: delete rows for guilds the bot is not in.",
+        description="Owner: delete rows for guilds the bot is not in.",
     )
     @app_commands.describe(
         dry_run="If true, only report counts; no delete.",
@@ -305,7 +288,10 @@ class CleanupCog(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     async def mu_purge_here(self, interaction: discord.Interaction):
         if not interaction.guild:
-            return await interaction.response.send_message(_safe_guild_only_msg(), ephemeral=True)
+            return await interaction.response.send_message(
+                S("common.guild_only") if callable(S) else "This command can only be used in a server.",
+                ephemeral=True,
+            )
         await interaction.response.defer(ephemeral=True)
 
         gid = str(interaction.guild_id)
@@ -330,10 +316,7 @@ class CleanupCog(commands.Cog):
     # ------------------------
     # /cleanup vacuum
     # ------------------------
-    @group.command(
-        name="vacuum",
-        description="Owner-only: VACUUM the SQLite DB.",
-    )
+    @group.command(name="vacuum", description="Owner: VACUUM the SQLite DB.")
     @app_commands.check(_owner_only)
     async def vacuum_db(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -348,9 +331,9 @@ class CleanupCog(commands.Cog):
         await interaction.followup.send("VACUUM complete.", ephemeral=True)
 
     # ------------------------
-    # /cleanup sync_commands (global/dev) and /cleanup sync_here (this guild)
+    # Sync commands (global/dev + current guild)
     # ------------------------
-    @group.command(name="sync_commands", description="Owner-only: force sync of slash commands.")
+    @group.command(name="sync_commands", description="Owner: force global/dev sync.")
     @app_commands.check(_owner_only)
     async def sync_commands(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -368,7 +351,7 @@ class CleanupCog(commands.Cog):
             log.exception("sync_commands failed")
             await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
 
-    @group.command(name="sync_here", description="Owner-only: sync commands to THIS guild now.")
+    @group.command(name="sync_here", description="Owner: sync slash commands to THIS guild.")
     @app_commands.check(_owner_only)
     async def sync_here(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -385,15 +368,12 @@ class CleanupCog(commands.Cog):
             await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
 
     # ------------------------
-    # /cleanup probe_legacy_activity
+    # Probe legacy tables
     # ------------------------
-    @group.command(name="probe_legacy_activity", description="Find likely legacy activity tables.")
-    @app_commands.default_permissions(manage_guild=True)
+    @group.command(name="probe_legacy_activity", description="Find legacy activity tables.")
+    @app_commands.check(_is_authorized)
     async def probe_legacy_activity(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-
         con = connect()
         mon, tot = self._guess_legacy(con)
         con.close()
@@ -411,22 +391,22 @@ class CleanupCog(commands.Cog):
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # ------------------------
-    # /cleanup export_legacy_activity
+    # Export legacy CSVs (from another guild ID if needed)
     # ------------------------
     @group.command(name="export_legacy_activity", description="Export legacy activity CSV for a guild.")
     @app_commands.describe(
-        target_guild_id="Guild ID to export (string). Omit to use current guild.",
+        target_guild_id="Guild ID to export",
         month_table="Legacy month table (optional)",
         month_col_month="Legacy month column (optional)",
         month_col_count="Legacy month count column (optional)",
         total_table="Legacy total table (optional)",
         total_col_count="Legacy total count column (optional)",
     )
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.check(_is_authorized)
     async def export_legacy_activity(
         self,
         interaction: discord.Interaction,
-        target_guild_id: Optional[str] = None,
+        target_guild_id: int,
         month_table: Optional[str] = None,
         month_col_month: Optional[str] = None,
         month_col_count: Optional[str] = None,
@@ -434,13 +414,9 @@ class CleanupCog(commands.Cog):
         total_col_count: Optional[str] = None,
     ):
         await interaction.response.defer(ephemeral=True)
-
-        try:
-            gid = self._resolve_gid(interaction, target_guild_id)
-        except Exception as e:
-            return await interaction.followup.send(str(e), ephemeral=True)
-
+        gid = int(target_guild_id)
         import sqlite3
+
         try:
             con = connect()
             mon_guess, tot_guess = self._guess_legacy(con)
@@ -450,7 +426,6 @@ class CleanupCog(commands.Cog):
 
             files: list[discord.File] = []
 
-            # Month CSV
             if mon_table:
                 m_month = month_col_month or mon_guess[1].get("month")
                 m_count = month_col_count or mon_guess[1].get("count")
@@ -470,15 +445,14 @@ class CleanupCog(commands.Cog):
                         w.writerow(r)
                     files.append(discord.File(fp=io.BytesIO(buf.getvalue().encode("utf-8")), filename=f"legacy-month-{gid}.csv"))
 
-            # Total CSV
             if tot_table:
                 t_count = total_col_count or tot_guess[1].get("count")
                 cols = self._table_cols(con, tot_table)
                 need = {"guild_id", "user_id", t_count}
                 if need <= cols:
                     cur = con.execute(
-                        f"SELECT guild_id, user_id, {t_count} as messages FROM {tot_table} "
-                        f"WHERE guild_id=? ORDER BY messages DESC",
+                        f"SELECT guild_id, user_id, {t_count} as messages "
+                        f"FROM {tot_table} WHERE guild_id=? ORDER BY messages DESC",
                         (gid,),
                     )
                     rows = cur.fetchall()
@@ -501,14 +475,14 @@ class CleanupCog(commands.Cog):
             await interaction.followup.send(f"DB error: {e}", ephemeral=True)
 
     # ------------------------
-    # /cleanup migrate_activity_db
+    # Migrate legacy → current (additive). Works for any target guild ID.
     # ------------------------
     @group.command(
         name="migrate_activity_db",
-        description="ADD legacy month/total MESSAGE counts into new tables for a guild.",
+        description="Merge legacy month/total messages into the active tables.",
     )
     @app_commands.describe(
-        target_guild_id="Guild ID to migrate (string). Omit to use current guild.",
+        target_guild_id="Guild ID to migrate",
         src_month_table="Legacy month table (optional)",
         src_month_col_month="Legacy month column (optional)",
         src_month_col_count="Legacy month count column (optional)",
@@ -516,11 +490,11 @@ class CleanupCog(commands.Cog):
         src_total_col_count="Legacy total count column (optional)",
         dry_run="Only report; no writes.",
     )
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.check(_is_authorized)
     async def migrate_activity_db(
         self,
         interaction: discord.Interaction,
-        target_guild_id: Optional[str] = None,
+        target_guild_id: int,
         src_month_table: Optional[str] = None,
         src_month_col_month: Optional[str] = None,
         src_month_col_count: Optional[str] = None,
@@ -530,28 +504,13 @@ class CleanupCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            gid = self._resolve_gid(interaction, target_guild_id)
-        except Exception as e:
-            return await interaction.followup.send(str(e), ephemeral=True)
-
+        gid = int(target_guild_id)
         import sqlite3
+        from .. import models  # local import to avoid circulars at load-time
+
         try:
             con = connect()
             cur = con.cursor()
-
-            # verify destinations
-            required_dests = [
-                ("member_activity_monthly", {"guild_id", "month", "user_id", "count"}),
-                ("member_activity_total", {"guild_id", "user_id", "count"}),
-            ]
-            for t, need in required_dests:
-                if not self._has_table(con, t):
-                    raise RuntimeError(f"Destination table missing: {t}")
-                have = self._table_cols(con, t)
-                missing = need - have
-                if missing:
-                    raise RuntimeError(f"Destination table {t} missing columns: {missing}")
 
             # detect sources
             mon_guess, tot_guess = self._guess_legacy(con)
@@ -579,9 +538,37 @@ class CleanupCog(commands.Cog):
                 if None in tot_cmap.values():
                     raise RuntimeError(f"{tot_table}: could not infer count column.")
 
+            # Prefer writing via models API if available
+            have_model_upserts = all(
+                hasattr(models, name) for name in (
+                    "upsert_member_messages_month",  # (guild_id, user_id, month, inc)
+                    "upsert_member_messages_total",  # (guild_id, user_id, inc)
+                )
+            )
+
+            # If writing SQL, discover destination columns ('messages' vs 'count')
+            dest_month_col = "messages"
+            dest_total_col = "messages"
+            if not have_model_upserts:
+                must_month = {"guild_id", "month", "user_id"}
+                have = self._table_cols(con, "member_activity_monthly")
+                if not must_month <= have:
+                    raise RuntimeError("Destination member_activity_monthly missing required columns.")
+                dest_month_col = "messages" if "messages" in have else ("count" if "count" in have else None)  # type: ignore
+                if not dest_month_col:
+                    raise RuntimeError("member_activity_monthly has neither 'messages' nor 'count'.")
+
+                must_total = {"guild_id", "user_id"}
+                have = self._table_cols(con, "member_activity_total")
+                if not must_total <= have:
+                    raise RuntimeError("Destination member_activity_total missing required columns.")
+                dest_total_col = "messages" if "messages" in have else ("count" if "count" in have else None)  # type: ignore
+                if not dest_total_col:
+                    raise RuntimeError("member_activity_total has neither 'messages' nor 'count'.")
+
             ops = []
 
-            # MONTH add-merge
+            # MONTH
             if mon_table:
                 cols = self._table_cols(con, mon_table)
                 need = {mon_cmap["guild"], mon_cmap["user"], mon_cmap["month"], mon_cmap["count"]}
@@ -589,23 +576,35 @@ class CleanupCog(commands.Cog):
                 if missing:
                     raise RuntimeError(f"{mon_table} missing columns: {missing}")
 
-                cur.execute(f"SELECT COUNT(*) FROM {mon_table} WHERE {mon_cmap['guild']}=?", (gid,))
-                (n_rows,) = cur.fetchone() or (0,)
-                ops.append(f"{mon_table}: {n_rows} month rows for this guild")
+                cur.execute(
+                    f"SELECT {mon_cmap['user']}, {mon_cmap['month']}, {mon_cmap['count']} "
+                    f"FROM {mon_table} WHERE {mon_cmap['guild']}=?",
+                    (gid,),
+                )
+                month_rows = cur.fetchall()
+                ops.append(f"{mon_table}: {len(month_rows)} month rows for this guild")
 
-                if not dry_run and n_rows:
-                    cur.execute("BEGIN")
-                    cur.execute(f"""
-                        INSERT INTO member_activity_monthly (guild_id, month, user_id, count)
-                        SELECT {mon_cmap['guild']}, {mon_cmap['month']}, {mon_cmap['user']}, {mon_cmap['count']}
-                        FROM {mon_table}
-                        WHERE {mon_cmap['guild']}=?
-                        ON CONFLICT(guild_id, month, user_id)
-                        DO UPDATE SET count = member_activity_monthly.count + excluded.count
-                    """, (gid,))
-                    con.commit()
+                if not dry_run and month_rows:
+                    if have_model_upserts:
+                        for uid, mon, cnt in month_rows:
+                            try:
+                                models.upsert_member_messages_month(gid, int(uid), str(mon), int(cnt))
+                            except Exception:
+                                log.exception("migrate.month.model_upsert_failed", extra={"uid": uid, "mon": mon})
+                    else:
+                        cur.execute("BEGIN")
+                        cur.executemany(
+                            f"""
+                            INSERT INTO member_activity_monthly (guild_id, month, user_id, {dest_month_col})
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(guild_id, month, user_id)
+                            DO UPDATE SET {dest_month_col}=member_activity_monthly.{dest_month_col}+excluded.{dest_month_col}
+                            """,
+                            [(gid, str(mon), int(uid), int(cnt)) for (uid, mon, cnt) in month_rows],
+                        )
+                        con.commit()
 
-            # TOTAL add-merge
+            # TOTAL
             if tot_table:
                 cols = self._table_cols(con, tot_table)
                 need = {tot_cmap["guild"], tot_cmap["user"], tot_cmap["count"]}
@@ -613,72 +612,77 @@ class CleanupCog(commands.Cog):
                 if missing:
                     raise RuntimeError(f"{tot_table} missing columns: {missing}")
 
-                cur.execute(f"SELECT COUNT(*) FROM {tot_table} WHERE {tot_cmap['guild']}=?", (gid,))
-                (n_rows,) = cur.fetchone() or (0,)
-                ops.append(f"{tot_table}: {n_rows} total rows for this guild")
+                cur.execute(
+                    f"SELECT {tot_cmap['user']}, {tot_cmap['count']} FROM {tot_table} "
+                    f"WHERE {tot_cmap['guild']}=?",
+                    (gid,),
+                )
+                total_rows = cur.fetchall()
+                ops.append(f"{tot_table}: {len(total_rows)} total rows for this guild")
 
-                if not dry_run and n_rows:
-                    cur.execute("BEGIN")
-                    cur.execute(f"""
-                        INSERT INTO member_activity_total (guild_id, user_id, count)
-                        SELECT {tot_cmap['guild']}, {tot_cmap['user']}, {tot_cmap['count']}
-                        FROM {tot_table}
-                        WHERE {tot_cmap['guild']}=?
-                        ON CONFLICT(guild_id, user_id)
-                        DO UPDATE SET count = member_activity_total.count + excluded.count
-                    """, (gid,))
-                    con.commit()
+                if not dry_run and total_rows:
+                    if have_model_upserts:
+                        for uid, cnt in total_rows:
+                            try:
+                                models.upsert_member_messages_total(gid, int(uid), int(cnt))
+                            except Exception:
+                                log.exception("migrate.total.model_upsert_failed", extra={"uid": uid})
+                    else:
+                        cur.execute("BEGIN")
+                        cur.executemany(
+                            f"""
+                            INSERT INTO member_activity_total (guild_id, user_id, {dest_total_col})
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(guild_id, user_id)
+                            DO UPDATE SET {dest_total_col}=member_activity_total.{dest_total_col}+excluded.{dest_total_col}
+                            """,
+                            [(gid, int(uid), int(cnt)) for (uid, cnt) in total_rows],
+                        )
+                        con.commit()
 
             con.close()
 
             if not mon_table and not tot_table:
                 return await interaction.followup.send(
-                    "No legacy tables detected. Run `/cleanup probe_legacy_activity` or pass table names.",
+                    "No legacy tables detected. Use `/cleanup probe_legacy_activity` or pass table names.",
                     ephemeral=True,
                 )
 
             head = "**Dry-run** results:" if dry_run else "**Migration complete**:"
-            body = "\n".join(ops) if ops else "(nothing found for that guild)"
+            body = "\n".join(ops) if ops else "(nothing found for this guild)"
             await interaction.followup.send(f"{head}\n{body}", ephemeral=True)
 
         except Exception as e:
-            log.exception("cleanup.migrate_activity_db.failed", extra={"user_id": interaction.user.id})
+            log.exception("cleanup.migrate_activity_db.failed", extra={"guild_id": target_guild_id})
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
     # ------------------------
-    # /cleanup purge_legacy_table
+    # Purge legacy table (or a guild's rows within it)
     # ------------------------
     @group.command(
         name="purge_legacy_table",
-        description="Remove a legacy activity table or a guild’s rows.",
+        description="Drop a legacy table or delete a guild’s rows.",
     )
     @app_commands.describe(
-        target_guild_id="Guild ID to operate on (string). Omit to use current guild. Needed for scope=guild.",
-        table="Legacy table name to purge",
-        scope="Choose 'guild' to delete only that guild's rows or 'drop' to DROP the table.",
+        table="Legacy table name",
+        scope="Choose 'guild' to delete rows or 'drop' to DROP the table.",
+        target_guild_id="Guild ID for scope=guild",
         dry_run="If true, only report; no changes.",
     )
     @app_commands.choices(scope=[
         app_commands.Choice(name="guild", value="guild"),
         app_commands.Choice(name="drop", value="drop"),
     ])
+    @app_commands.check(_is_authorized)
     async def purge_legacy_table(
         self,
         interaction: discord.Interaction,
-        target_guild_id: Optional[str],
         table: str,
         scope: app_commands.Choice[str],
+        target_guild_id: Optional[int] = None,
         dry_run: bool = True,
     ):
         await interaction.response.defer(ephemeral=True)
-
-        # For DROP we don't need a guild id; for guild scope we do.
-        try:
-            gid = None
-            if scope.value == "guild":
-                gid = self._resolve_gid(interaction, target_guild_id)
-        except Exception as e:
-            return await interaction.followup.send(str(e), ephemeral=True)
 
         import sqlite3
         try:
@@ -702,11 +706,16 @@ class CleanupCog(commands.Cog):
                 return await interaction.followup.send(f"Dropped `{table}`.", ephemeral=True)
 
             # scope=guild
+            if target_guild_id is None:
+                con.close()
+                return await interaction.followup.send("Provide target_guild_id for scope=guild.", ephemeral=True)
+
             cols = self._table_cols(con, table)
             if "guild_id" not in cols:
                 con.close()
                 return await interaction.followup.send(f"`{table}` has no `guild_id`; can't guild-prune.", ephemeral=True)
 
+            gid = int(target_guild_id)
             cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id=?", (gid,))
             (n_rows,) = cur.fetchone() or (0,)
             if dry_run:
@@ -717,7 +726,7 @@ class CleanupCog(commands.Cog):
             cur.execute(f"DELETE FROM {table} WHERE guild_id=?", (gid,))
             con.commit()
             con.close()
-            await interaction.followup.send(f"Deleted {n_rows} rows from `{table}`.", ephemeral=True)
+            await interaction.followup.send(f"Deleted {n_rows} rows from `{table}` for guild {gid}.", ephemeral=True)
 
         except sqlite3.Error as e:
             log.exception("purge_legacy_table failed")
