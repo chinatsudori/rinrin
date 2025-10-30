@@ -160,11 +160,9 @@ def _release_ts(rel: dict) -> int:
     return -1
 
 
-def _has_ch(x) -> int:
-    if _strip(str(x.get("chapter") or "")):
-        return 1
-    title = f"{x.get('title','')} {x.get('raw_title','')} {x.get('description','')}".lower()
-    return 1 if re.search(r"(?:\b(?:c|ch(?:apter)?)\.?\s*\d+(?:\.\d+)?)|(\b\d+(?:\.\d+)?\s*[-–—]\s*\d+(?:\.\d+)?\b)", title) else 0
+def _is_english_release(rel: dict) -> bool:
+    txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
+    return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
@@ -544,11 +542,6 @@ def _save_state(state: Dict[str, dict]) -> None:
         json.dump(state, f, indent=2)
 
 
-def _is_english_release(rel: dict) -> bool:
-    txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
-    return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
-
-
 def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
     ch_id = models.get_mu_forum_channel(guild.id)
     if ch_id:
@@ -607,10 +600,13 @@ class MUWatcher(commands.Cog):
         self._task = self.poll_updates.start()
 
     def cog_unload(self):
-        if self._task:
-            self._task.cancel()
-        if self._session and not self._session.closed:
-            asyncio.create_task(self._session.close())
+        try:
+            if self._task:
+                self._task.cancel()
+        finally:
+            # Close session in the background to avoid blocking unload
+            if self._session and not self._session.closed:
+                asyncio.create_task(self._session.close())
 
     async def _session_ensure(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -884,7 +880,6 @@ class MUWatcher(commands.Cog):
         # Baseline: if first time (state last_release_ts is None), silently mark newest as posted
         if we.last_release_ts is None:
             newest_ts = max((_release_ts(r) for r in results), default=-1)
-            # find the id for newest_ts
             newest = None
             for r in results:
                 if _release_ts(r) == newest_ts:
@@ -892,7 +887,6 @@ class MUWatcher(commands.Cog):
                     break
             if newest is not None:
                 models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(newest.get("release_id") or newest.get("id")))
-                # persist to JSON state for future baseline checks
                 for e in self.state[gid]["entries"]:
                     if int(e.get("thread_id")) == we.thread_id:
                         e["last_release_ts"] = newest_ts
@@ -923,7 +917,6 @@ class MUWatcher(commands.Cog):
         if latest_ts == -1:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # try to pick a release with max ts (we didn't store an index to map ts->id, so pick the last from API result)
         latest = max(results, key=lambda x: _release_ts(x))
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
@@ -934,11 +927,43 @@ class MUWatcher(commands.Cog):
         )
         embed.set_footer(text=S("mu.latest.footer"))
         try:
-            await tgt.send(embed=embed)
+            await tgt.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
 
         await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
+
+    async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict) -> None:
+        """Compose and post a release embed to the given thread."""
+        # Optional English filter
+        if FILTER_ENGLISH_ONLY and not _is_english_release(rel):
+            return
+
+        chbits, extras = _format_rel_bits(rel)
+        ts_val = rel.get("release_ts")
+        dt = None
+        try:
+            if isinstance(ts_val, (int, float)) and ts_val > 0:
+                dt = datetime.fromtimestamp(int(ts_val), tz=timezone.utc)
+        except Exception:
+            dt = None
+
+        em = discord.Embed(
+            title=S("mu.update.title", series=we.series_title, chbits=chbits),
+            description=extras or None,
+            color=discord.Color.blurple(),
+            timestamp=dt or _now_utc(),
+        )
+        em.set_footer(text=S("mu.update.footer"))
+
+        try:
+            await thread.send(embed=em, allowed_mentions=discord.AllowedMentions.none())
+        except discord.Forbidden:
+            # Can't post in thread; give up silently to avoid spammy errors
+            pass
+        except Exception:
+            # Swallow; the poll loop will try again next cycle if not marked posted
+            pass
 
     @tasks.loop(seconds=POLL_SECONDS)
     async def poll_updates(self):
@@ -1037,7 +1062,8 @@ class MUWatcher(commands.Cog):
         if not g:
             return
         g["entries"] = [e for e in g.get("entries", []) if int(e.get("thread_id")) != thread_id]
-        _
-        
+        _save_state(self.state)
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(MUWatcher(bot))
