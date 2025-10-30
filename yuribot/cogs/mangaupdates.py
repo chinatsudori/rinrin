@@ -1,3 +1,4 @@
+# mangaupdates.py
 from __future__ import annotations
 
 import asyncio
@@ -28,18 +29,17 @@ FILTER_ENGLISH_ONLY = False
 # Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit)
 MAX_COVER_BYTES = 7_500_000
 
+# ---- SQLite integer bounds (signed 64-bit)
+MAX_SQLITE_INT = (1 << 63) - 1
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
-
 def _strip(s: Optional[str]) -> str:
     return (s or "").strip()
 
-
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
-
 
 def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
     q = _norm(query)
@@ -54,14 +54,12 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
             best = max(best, 0.8)
     return best
 
-
 def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
     sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
     sid = str(sid) if sid is not None else None
     title = r.get("title") or rec.get("title") or "Unknown"
     return sid, title
-
 
 def _stringify_aliases(raw) -> List[str]:
     out: List[str] = []
@@ -83,20 +81,18 @@ def _stringify_aliases(raw) -> List[str]:
             uniq.append(s)
     return uniq
 
-
 def _forum_post_name(s: str) -> str:
     name = re.sub(r"\s+", " ", (s or "").strip())
     if not name:
         name = "Untitled"
     return name[:100]
 
-
 _CH_PATTERNS = [
-    r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",      # ch 25 / c25 / ch.25
-    r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",     # 21-25 / 21–25
+    r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",
+    r"\b(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)",
 ]
 _VOL_PATTERNS = [
-    r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",      # v5 / vol 5
+    r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",
 ]
 
 def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
@@ -130,7 +126,6 @@ def _extract_max_volume(text: str) -> str:
     mx = max(nums)
     return f"{mx}".rstrip("0").rstrip(".")
 
-
 def _parse_ts(value: Optional[str]) -> Optional[int]:
     """Parse an ISO/RFC date string to epoch seconds; return None if unknown."""
     if not value:
@@ -147,7 +142,6 @@ def _parse_ts(value: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
-
 def _release_ts(rel: dict) -> int:
     v = rel.get("release_ts")
     if isinstance(v, (int, float)):
@@ -159,11 +153,9 @@ def _release_ts(rel: dict) -> int:
                 return ts
     return -1
 
-
 def _is_english_release(rel: dict) -> bool:
     txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
     return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
-
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     vol = _strip(str(rel.get("volume") or ""))
@@ -218,40 +210,68 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     return chbits, "\n".join(extras) if extras else ""
 
 
-# ---------- Stable release IDs -------------------------------------------------
+# ---- Helpers to make releases SQLite-safe ------------------------------------
 
-def _canon_rel_id(series_id: str | int, rel: dict) -> int:
-    """
-    Deterministic per-release ID even when MU JSON/RSS doesn't give one.
-    Combines stable fields and hashes to a 64-bit int.
-    """
-    sid = str(series_id)
-    vol = _strip(str(rel.get("volume") or ""))
-    ch  = _strip(str(rel.get("chapter") or ""))
-    sub = _strip(str(rel.get("subchapter") or ""))
-    grp = _strip(
-        rel.get("group")
-        if isinstance(rel.get("group"), str)
-        else (rel.get("group", {}) or {}).get("name", "")
-        if isinstance(rel.get("group"), dict)
-        else rel.get("group_name") or ""
-    )
-    url = _strip(rel.get("url") or rel.get("release_url") or rel.get("link") or "")
-    ttl = _strip(rel.get("title") or rel.get("raw_title") or rel.get("description") or "")
-    ts  = str(int(rel.get("release_ts") or _release_ts(rel) or 0))
+def _seconds_from_any(ts: int | float | None) -> int:
+    """Normalize timestamps: if it looks like milliseconds, convert to seconds."""
+    if ts is None:
+        return -1
+    try:
+        v = int(ts)
+    except Exception:
+        return -1
+    # Heuristic: anything >= 10^11 is probably ms (>= Sun Mar 3 5138 if seconds)
+    if v >= 100_000_000_000:
+        v //= 1000
+    return max(v, -1)
 
-    key = "|".join([sid, vol, ch, sub, grp, url, ttl, ts])
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(digest, "big")
+def _stable_63bit_id(key: str) -> int:
+    """Deterministic signed-64 safe integer from a string key."""
+    h = hashlib.sha1(key.encode("utf-8")).digest()
+    # take 8 bytes -> 64 bits; force into signed-64 range
+    v = int.from_bytes(h[:8], "big") & MAX_SQLITE_INT
+    if v == 0:
+        v = 1
+    return v
+
+def _normalize_release_record(series_id: str, r: dict) -> dict:
+    """Return a copy of r with safe release_id and release_ts."""
+    out = dict(r)
+    # normalize ts
+    ts = _release_ts(out)
+    ts = _seconds_from_any(ts)
+    out["release_ts"] = ts
+
+    # normalize id
+    rid_raw = out.get("release_id", out.get("id"))
+    rid: Optional[int] = None
+    try:
+        if isinstance(rid_raw, (int, float)) or (isinstance(rid_raw, str) and rid_raw.isdigit()):
+            rid = int(rid_raw)
+    except Exception:
+        rid = None
+
+    if rid is None or rid <= 0 or rid > MAX_SQLITE_INT:
+        # build a deterministic key from the contents
+        key = "|".join([
+            str(series_id),
+            str(out.get("id") or ""),
+            str(out.get("release_id") or ""),
+            str(out.get("title") or ""),
+            str(out.get("url") or ""),
+            str(ts),
+        ])
+        rid = _stable_63bit_id(key)
+
+    out["release_id"] = rid
+    return out
 
 
 # --- MU tags → Forum tags mapping helpers ------------------------------------
 
 _MU_CANON_TAGS = [
-    # Demographic
     "josei", "lolicon", "seinen", "shotacon", "shoujo", "shoujo ai", "shounen",
     "shounen ai", "yaoi", "yuri",
-    # Genre
     "action", "adult", "adventure", "comedy", "doujinshi", "drama", "ecchi",
     "fantasy", "gender bender", "harem", "hentai", "historical", "horror",
     "martial arts", "mature", "mecha", "mystery", "psychological", "romance",
@@ -427,15 +447,11 @@ class MUClient:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        results = data.get("results", []) if isinstance(data, dict) else []
-                        # normalize timestamps + inject stable release_id
-                        for r in results:
-                            ts = _parse_ts(r.get("release_date") or r.get("date"))
-                            if ts is not None:
-                                r["release_ts"] = ts
-                            rid = _canon_rel_id(series_id, r)
-                            r["release_id"] = rid
-                            r["id"] = rid
+                        # Normalize all JSON results here
+                        results = []
+                        for r in data.get("results", []) if isinstance(data, dict) else []:
+                            nr = _normalize_release_record(series_id, r)
+                            results.append(nr)
                         return {"results": results}
                     if resp.status in (429, 500, 502, 503, 504):
                         await asyncio.sleep(0.8 * i)
@@ -519,7 +535,18 @@ class MUClient:
             m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
             group = (m_group.group(1).strip() if m_group else "")
 
-            rec = {
+            rid = None
+            if link:
+                m_id_in_link = re.search(r"(\d{6,})", link)
+                if m_id_in_link:
+                    try:
+                        rid = int(m_id_in_link.group(1))
+                    except Exception:
+                        rid = None
+
+            r = {
+                "id": rid,
+                "release_id": rid,
                 "chapter": chapter or "",
                 "volume": volume or "",
                 "subchapter": subchapter or "",
@@ -532,11 +559,8 @@ class MUClient:
                 "description": desc or "",
                 "lang_hint": raw.lower(),
             }
-            rid = _canon_rel_id(series_id, rec)
-            rec["id"] = rid
-            rec["release_id"] = rid
 
-            releases.append(rec)
+            releases.append(_normalize_release_record(str(series_id), r))
 
         return {"results": releases}
 
@@ -548,8 +572,8 @@ class WatchEntry:
     aliases: List[str]
     forum_channel_id: int
     thread_id: int
-    last_release_id: Optional[int] = None      # kept for backward compat (unused for logic now)
-    last_release_ts: Optional[int] = None      # used only to decide baseline init
+    last_release_id: Optional[int] = None
+    last_release_ts: Optional[int] = None
 
 
 def _load_state() -> Dict[str, dict]:
@@ -561,12 +585,10 @@ def _load_state() -> Dict[str, dict]:
             return {}
     return {}
 
-
 def _save_state(state: Dict[str, dict]) -> None:
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with DATA_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-
 
 def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
     ch_id = models.get_mu_forum_channel(guild.id)
@@ -579,7 +601,6 @@ def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
         if isinstance(ch, discord.ForumChannel) and ch.name.lower().strip() == lname:
             return ch
     return None
-
 
 async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) -> Optional[discord.File]:
     urls: List[str] = []
@@ -664,7 +685,6 @@ class MUWatcher(commands.Cog):
         session = await self._session_ensure()
         client = MUClient(session)
 
-        # Search & pick best match
         try:
             results = await client.search_series(series)
         except Exception as e:
@@ -694,11 +714,10 @@ class MUWatcher(commands.Cog):
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
         scored.sort(key=lambda t: t[1], reverse=True)
-        choice, score, aliases = scored[0]
+        choice, _score, aliases = scored[0]
         sid = choice["sid"]
         title = choice["title"]
 
-        # Duplicate protection via JSON state (per guild)
         gid = str(interaction.guild_id)
         already = None
         for e in self.state.get(gid, {}).get("entries", []):
@@ -713,7 +732,6 @@ class MUWatcher(commands.Cog):
                 ephemeral=True,
             )
 
-        # Fetch full series for cover and tags
         full_json: dict = {}
         try:
             full_json = await client.get_series(sid)
@@ -766,13 +784,11 @@ class MUWatcher(commands.Cog):
         else:
             thread_obj = created_any  # type: ignore[assignment]
 
-        # DB: map thread <-> series (title upsert)
         try:
             models.mu_register_thread_series(interaction.guild_id, thread_obj.id, sid, title)
         except Exception:
             pass  # best-effort; state file still preserves mapping for watcher
 
-        # Persist JSON watch mapping (aliases/title/last_ts baseline)
         g = self.state.setdefault(gid, {"entries": []})
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != thread_obj.id]
         g["entries"].append(
@@ -818,10 +834,7 @@ class MUWatcher(commands.Cog):
         diff = before - len(g["entries"])
         await interaction.response.send_message(S("mu.unlink.done", count=diff), ephemeral=True)
 
-    @group.command(
-        name="status",
-        description="Show current watches for this server."
-    )
+    @group.command(name="status", description="Show current watches for this server.")
     async def status(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
@@ -857,14 +870,12 @@ class MUWatcher(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Resolve series id (prefer DB mapping, fallback to JSON state)
         sid = models.mu_get_thread_series(tgt.id, interaction.guild_id)
         we: Optional[WatchEntry] = None
 
         gid = str(interaction.guild_id)
         entries = self.state.get(gid, {}).get("entries", [])
 
-        # Try match JSON entry for title/aliases + last_ts baseline
         for e in entries:
             if int(e.get("thread_id")) == tgt.id:
                 we = WatchEntry(
@@ -881,15 +892,13 @@ class MUWatcher(commands.Cog):
         if sid is None and we is None:
             return await interaction.followup.send(S("mu.check.not_linked"), ephemeral=True)
         if sid is None and we is not None:
-            sid = we.series_id  # fallback to state
+            sid = we.series_id
         if we is None:
-            # build minimal entry for embeds
             we = WatchEntry(series_id=str(sid), series_title="Unknown", aliases=[], forum_channel_id=tgt.parent.id, thread_id=tgt.id)
 
         session = await self._session_ensure()
         client = MUClient(session)
 
-        # Fetch releases → upsert to DB
         try:
             rels = await client.get_series_releases(sid, page=1, per_page=25)
         except Exception as e:
@@ -899,16 +908,10 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # Normalize timestamps & bulk upsert
-        for r in results:
-            if "release_ts" not in r or r["release_ts"] is None:
-                r["release_ts"] = _release_ts(r)
-            rid = _canon_rel_id(sid, r)
-            r["release_id"] = rid
-            r["id"] = rid
+        # Already normalized in client, but ensure here too if models call reuses elsewhere
+        results = [_normalize_release_record(sid, r) for r in results]
         models.mu_bulk_upsert_releases(sid, results)
 
-        # Baseline: if first time (state last_release_ts is None), silently mark newest as posted
         if we.last_release_ts is None:
             newest_ts = max((_release_ts(r) for r in results), default=-1)
             newest = None
@@ -917,19 +920,17 @@ class MUWatcher(commands.Cog):
                     newest = r
                     break
             if newest is not None:
-                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(newest.get("release_id") or newest.get("id")))
+                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(newest.get("release_id")))
                 for e in self.state[gid]["entries"]:
                     if int(e.get("thread_id")) == we.thread_id:
                         e["last_release_ts"] = newest_ts
                         break
                 _save_state(self.state)
 
-        # Determine unposted releases for this thread
         unposted = models.mu_list_unposted_for_thread(
             interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
         )
 
-        # De-dupe + filter strictly to items newer than last_release_ts for THIS thread
         last_ts = we.last_release_ts if isinstance(we.last_release_ts, int) else -1
         seen: Set[int] = set()
         rels_to_post: List[dict] = []
@@ -942,26 +943,22 @@ class MUWatcher(commands.Cog):
                 "release_id": rid,
                 "title": tup[1], "raw_title": tup[2], "description": tup[3],
                 "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
-                "group": tup[7], "url": tup[8], "release_ts": tup[9],
+                "group": tup[7], "url": tup[8], "release_ts": _seconds_from_any(tup[9]),
             }
             rts = int(rel.get("release_ts") or -1)
             if last_ts >= 0 and rts >= 0 and rts <= last_ts:
-                continue  # not newer than this thread's last posted ts
+                continue
             rels_to_post.append(rel)
 
         if rels_to_post:
-            # Post a single batch embed
             posted = await self._post_batch(tgt, we, rels_to_post)
-
-            # Mark as posted AFTER a successful send and advance per-thread last ts
             if posted > 0:
                 max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
                 for r in rels_to_post[:posted]:
-                    rid = int(r.get("release_id") or r.get("id"))
+                    rid = int(r.get("release_id"))
                     models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
-                # update JSON state for this thread
                 for e in self.state[gid]["entries"]:
-                    if int(e.get("thread_id")) == we.thread_id:
+                    if int(e["thread_id"]) == we.thread_id:
                         prev = e.get("last_release_ts") or -1
                         e["last_release_ts"] = int(max(prev, max_posted_ts))
                         break
@@ -969,7 +966,6 @@ class MUWatcher(commands.Cog):
 
             return await interaction.followup.send(S("mu.check.posted", count=posted), ephemeral=True)
 
-        # No unposted: show latest known from DB
         latest = max(results, key=lambda x: _release_ts(x))
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
@@ -987,7 +983,6 @@ class MUWatcher(commands.Cog):
         await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
 
     async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict) -> bool:
-        """Compose and post a single release embed. Returns True if sent."""
         if FILTER_ENGLISH_ONLY and not _is_english_release(rel):
             return False
 
@@ -1015,7 +1010,6 @@ class MUWatcher(commands.Cog):
             return False
 
     async def _post_batch(self, thread: discord.Thread, we: WatchEntry, rels: List[dict]) -> int:
-        """Post a single embed summarizing multiple releases. Returns count posted."""
         items: List[dict] = []
         for r in rels:
             if FILTER_ENGLISH_ONLY and not _is_english_release(r):
@@ -1024,7 +1018,6 @@ class MUWatcher(commands.Cog):
         if not items:
             return 0
 
-        # If just one, reuse the single-release path for nicer detail
         if len(items) == 1:
             ok = await self._post_release(thread, we, items[0])
             return 1 if ok else 0
@@ -1032,14 +1025,14 @@ class MUWatcher(commands.Cog):
         lines: List[str] = []
         MAX_LINES = 15
         for r in items[:MAX_LINES]:
-            chbits, _extras = _format_rel_bits(r)
+            chbits, _ = _format_rel_bits(r)
             url = _strip(r.get("url") or "")
             maybe_url = f" ({url})" if url else ""
             lines.append(S("mu.batch.line", chbits=chbits, maybe_url=maybe_url))
 
         overflow = len(items) - len(lines)
         if overflow > 0:
-            lines.append(f"… +{overflow} more")
+            lines.append(f"... +{overflow} more")
 
         em = discord.Embed(
             title=S("mu.batch.title", series=we.series_title, n=len(items)),
@@ -1083,7 +1076,7 @@ class MUWatcher(commands.Cog):
         session = await self._session_ensure()
         client = MUClient(session)
 
-        for gid, key, we in all_entries:
+        for gid, _key, we in all_entries:
             thread = self.bot.get_channel(we.thread_id)
             if not isinstance(thread, discord.Thread) or not isinstance(getattr(thread, "parent", None), discord.ForumChannel):
                 self._prune_entry(gid, we.thread_id)
@@ -1091,7 +1084,6 @@ class MUWatcher(commands.Cog):
 
             sid = models.mu_get_thread_series(we.thread_id, gid) or we.series_id
 
-            # Fetch releases → upsert
             try:
                 rels = await client.get_series_releases(sid, page=1, per_page=25)
             except Exception:
@@ -1101,16 +1093,9 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            for r in results:
-                if "release_ts" not in r or r["release_ts"] is None:
-                    r["release_ts"] = _release_ts(r)
-                rid = _canon_rel_id(sid, r)
-                r["release_id"] = rid
-                r["id"] = rid
-
+            # Already normalized in client
             models.mu_bulk_upsert_releases(sid, results)
 
-            # Baseline init if needed
             if we.last_release_ts is None:
                 newest_ts = max((_release_ts(r) for r in results), default=-1)
                 newest = None
@@ -1119,15 +1104,14 @@ class MUWatcher(commands.Cog):
                         newest = r
                         break
                 if newest is not None:
-                    models.mu_mark_posted(gid, we.thread_id, sid, int(newest.get("release_id") or newest.get("id")))
+                    models.mu_mark_posted(gid, we.thread_id, sid, int(newest.get("release_id")))
                     for ee in self.state[str(gid)]["entries"]:
                         if int(ee["thread_id"]) == we.thread_id:
                             ee["last_release_ts"] = newest_ts
                             break
                     _save_state(self.state)
-                continue  # skip posting on the very first cycle
+                continue  # skip posting on the first cycle
 
-            # Post any unposted (strictly newer than this thread's last ts)
             unposted = models.mu_list_unposted_for_thread(
                 gid, we.thread_id, sid, english_only=FILTER_ENGLISH_ONLY
             )
@@ -1144,7 +1128,7 @@ class MUWatcher(commands.Cog):
                     "release_id": rid,
                     "title": tup[1], "raw_title": tup[2], "description": tup[3],
                     "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
-                    "group": tup[7], "url": tup[8], "release_ts": tup[9],
+                    "group": tup[7], "url": tup[8], "release_ts": _seconds_from_any(tup[9]),
                 }
                 rts = int(rel.get("release_ts") or -1)
                 if last_ts >= 0 and rts >= 0 and rts <= last_ts:
@@ -1157,9 +1141,8 @@ class MUWatcher(commands.Cog):
                     if posted > 0:
                         max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
                         for r in rels_to_post[:posted]:
-                            rid = int(r.get("release_id") or r.get("id"))
+                            rid = int(r.get("release_id"))
                             models.mu_mark_posted(gid, we.thread_id, sid, rid)
-                        # advance per-thread last ts in JSON state
                         for ee in self.state[str(gid)]["entries"]:
                             if int(ee["thread_id"]) == we.thread_id:
                                 prev = ee.get("last_release_ts") or -1
