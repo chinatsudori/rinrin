@@ -1362,13 +1362,6 @@ def mu_get_release(series_id: str, release_id: int) -> dict | None:
             "release_id": int(release_id), "series_id": str(series_id),
         }
 # models.py (add or merge)
-from __future__ import annotations
-import sqlite3
-from pathlib import Path
-from typing import Iterable, List, Tuple
-
-_DB_PATH = Path("./data/bot.db")
-_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_DB_PATH), isolation_level=None)  # autocommit
