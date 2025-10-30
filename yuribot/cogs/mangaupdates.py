@@ -493,8 +493,7 @@ class MUClient:
                 if m_id_in_link:
                     rid = int(m_id_in_link.group(1))
             if rid is None:
-                # NOTE: Python's hash() is process-randomized; only use as last resort.
-                # Prefer ts to keep stable across runs.
+                # NOTE: Python's hash() is process-randomized; try ts first for stability.
                 rid = ts if ts is not None else int(abs(hash((title, link))) % 10_000_000_000)
 
             releases.append({
@@ -898,35 +897,43 @@ class MUWatcher(commands.Cog):
             interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
         )
 
-        # In-memory de-dupe by release_id just in case DB returns dup rows
+        # De-dupe + filter strictly to items newer than last_release_ts for THIS thread
+        last_ts = we.last_release_ts if isinstance(we.last_release_ts, int) else -1
         seen: Set[int] = set()
-        dedup_unposted = []
+        rels_to_post: List[dict] = []
         for tup in unposted:
             rid = int(tup[0])
             if rid in seen:
                 continue
             seen.add(rid)
-            dedup_unposted.append(tup)
+            rel = models.mu_get_release(sid, rid) or {
+                "release_id": rid,
+                "title": tup[1], "raw_title": tup[2], "description": tup[3],
+                "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
+                "group": tup[7], "url": tup[8], "release_ts": tup[9],
+            }
+            rts = int(rel.get("release_ts") or -1)
+            if last_ts >= 0 and rts >= 0 and rts <= last_ts:
+                continue  # not newer than this thread's last posted ts
+            rels_to_post.append(rel)
 
-        if dedup_unposted:
-            # Build release dicts
-            rels_to_post: List[dict] = []
-            for tup in dedup_unposted:
-                rid = int(tup[0])
-                rels_to_post.append(models.mu_get_release(sid, rid) or {
-                    "release_id": rid,
-                    "title": tup[1], "raw_title": tup[2], "description": tup[3],
-                    "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
-                    "group": tup[7], "url": tup[8], "release_ts": tup[9],
-                })
-
+        if rels_to_post:
             # Post a single batch embed
             posted = await self._post_batch(tgt, we, rels_to_post)
 
-            # Mark as posted AFTER a successful send
-            for r in rels_to_post[:posted]:
-                rid = int(r.get("release_id") or r.get("id"))
-                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
+            # Mark as posted AFTER a successful send and advance per-thread last ts
+            if posted > 0:
+                max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
+                for r in rels_to_post[:posted]:
+                    rid = int(r.get("release_id") or r.get("id"))
+                    models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
+                # update JSON state for this thread
+                for e in self.state[gid]["entries"]:
+                    if int(e.get("thread_id")) == we.thread_id:
+                        prev = e.get("last_release_ts") or -1
+                        e["last_release_ts"] = int(max(prev, max_posted_ts))
+                        break
+                _save_state(self.state)
 
             return await interaction.followup.send(S("mu.check.posted", count=posted), ephemeral=True)
 
@@ -1085,12 +1092,12 @@ class MUWatcher(commands.Cog):
                     _save_state(self.state)
                 continue  # skip posting on the very first cycle
 
-            # Post any unposted
+            # Post any unposted (strictly newer than this thread's last ts)
             unposted = models.mu_list_unposted_for_thread(
                 gid, we.thread_id, sid, english_only=FILTER_ENGLISH_ONLY
             )
 
-            # de-dupe defensively
+            last_ts = we.last_release_ts if isinstance(we.last_release_ts, int) else -1
             seen: Set[int] = set()
             rels_to_post: List[dict] = []
             for tup in unposted:
@@ -1098,19 +1105,32 @@ class MUWatcher(commands.Cog):
                 if rid in seen:
                     continue
                 seen.add(rid)
-                rels_to_post.append(models.mu_get_release(sid, rid) or {
+                rel = models.mu_get_release(sid, rid) or {
                     "release_id": rid,
                     "title": tup[1], "raw_title": tup[2], "description": tup[3],
                     "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
                     "group": tup[7], "url": tup[8], "release_ts": tup[9],
-                })
+                }
+                rts = int(rel.get("release_ts") or -1)
+                if last_ts >= 0 and rts >= 0 and rts <= last_ts:
+                    continue
+                rels_to_post.append(rel)
 
             if rels_to_post:
                 try:
                     posted = await self._post_batch(thread, we, rels_to_post)
-                    for r in rels_to_post[:posted]:
-                        rid = int(r.get("release_id") or r.get("id"))
-                        models.mu_mark_posted(gid, we.thread_id, sid, rid)
+                    if posted > 0:
+                        max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
+                        for r in rels_to_post[:posted]:
+                            rid = int(r.get("release_id") or r.get("id"))
+                            models.mu_mark_posted(gid, we.thread_id, sid, rid)
+                        # advance per-thread last ts in JSON state
+                        for ee in self.state[str(gid)]["entries"]:
+                            if int(ee["thread_id"]) == we.thread_id:
+                                prev = ee.get("last_release_ts") or -1
+                                ee["last_release_ts"] = int(max(prev, max_posted_ts))
+                                break
+                        _save_state(self.state)
                 except Exception:
                     pass
 
