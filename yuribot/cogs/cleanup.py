@@ -2,14 +2,17 @@ import csv
 import io
 import logging
 import sqlite3
+from typing import Dict, Tuple, List
+
 from discord import app_commands
 from discord.ext import commands
 import discord
 
 from ..db import connect
-from .. import models  # noqa: F401  (kept if you reference later)
+from .. import models  # noqa: F401
 
 log = logging.getLogger(__name__)
+
 
 def owner_only():
     async def predicate(interaction: discord.Interaction):
@@ -24,15 +27,42 @@ def owner_only():
 
 
 class CleanupCog(commands.Cog):
-    """Maintenance and data import/export utilities."""
+    """Maintenance and data import/export utilities with a debug toggle."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # simple in-memory per-guild toggle: {guild_id: bool}
+        self._debug_flags: Dict[int, bool] = {}
 
     group = app_commands.Group(
         name="cleanup",
         description="Maintenance and import tools."
     )
+
+    # ----------------------
+    # DEBUG TOGGLE
+    # ----------------------
+    @group.command(name="debug", description="Toggle verbose debug for imports (guild-scoped).")
+    @app_commands.describe(state="on/off")
+    @app_commands.choices(state=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ])
+    @owner_only()
+    async def toggle_debug(self, interaction: discord.Interaction, state: app_commands.Choice[str]):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("Guild only.", ephemeral=True)
+        on = (state.value == "on")
+        self._debug_flags[interaction.guild_id] = on
+        await interaction.response.send_message(
+            f"Cleanup debug is now **{'ON' if on else 'OFF'}** for this server.",
+            ephemeral=True
+        )
+
+    def _is_debug(self, guild_id: int | None) -> bool:
+        if not guild_id:
+            return False
+        return self._debug_flags.get(guild_id, False)
 
     # ----------------------
     # IMPORT ACTIVITY CSV
@@ -45,7 +75,8 @@ class CleanupCog(commands.Cog):
         file="CSV attachment (columns: guild_id,month,user_id,messages)",
         target_guild_id="Target guild ID (default: current guild)",
         month="Month in YYYY-MM format (must match CSV)",
-        mode="replace=overwrite or add=merge existing data"
+        mode="replace=overwrite or add=merge existing data",
+        dry_run="If true, validate and show what would change without writing"
     )
     @app_commands.choices(mode=[
         app_commands.Choice(name="add", value="add"),
@@ -59,6 +90,7 @@ class CleanupCog(commands.Cog):
         target_guild_id: str | None = None,
         month: str | None = None,
         mode: app_commands.Choice[str] | None = None,
+        dry_run: bool = False,
     ):
         await interaction.response.defer(ephemeral=True)
 
@@ -69,6 +101,7 @@ class CleanupCog(commands.Cog):
             return await interaction.followup.send("Invalid month format. Use YYYY-MM.", ephemeral=True)
 
         mode_val = (mode.value if mode else "add")
+        debug = self._is_debug(interaction.guild_id)
 
         # Parse CSV
         content = await file.read()
@@ -79,8 +112,10 @@ class CleanupCog(commands.Cog):
         if not required_cols.issubset(set(reader.fieldnames or [])):
             return await interaction.followup.send("CSV missing required headers.", ephemeral=True)
 
-        incoming: dict[int, int] = {}
+        incoming: Dict[int, int] = {}
+        parsed_rows = 0
         for row in reader:
+            parsed_rows += 1
             try:
                 if str(row["guild_id"]).strip() != str(gid):
                     continue
@@ -92,6 +127,7 @@ class CleanupCog(commands.Cog):
                     continue
                 incoming[uid] = incoming.get(uid, 0) + cnt
             except Exception:
+                # swallow row parse issues
                 continue
 
         if not incoming:
@@ -101,9 +137,28 @@ class CleanupCog(commands.Cog):
         try:
             con = connect()
             cur = con.cursor()
-            cur.execute("BEGIN")
 
-            if mode_val == "replace":
+            # --- DEBUG: schema sanity
+            dbg_lines: List[str] = []
+            if debug:
+                # member_activity_monthly schema & PK order
+                cols = cur.execute("PRAGMA table_info(member_activity_monthly)").fetchall()
+                pk_cols = [(c[1], c[5]) for c in cols]  # (name, pk_order)
+                pk_cols_sorted = [name for (name, pk) in sorted(pk_cols, key=lambda t: t[1]) if pk]
+                dbg_lines.append(f"PK(member_activity_monthly) = {pk_cols_sorted or 'UNKNOWN'}")
+                # existing row counts
+                before_month_sum = cur.execute(
+                    "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                    (gid, month)
+                ).fetchone()[0]
+                dbg_lines.append(f"Before month sum={before_month_sum}")
+                # show 3 sample incoming
+                sample = list(incoming.items())[:3]
+                dbg_lines.append(f"Incoming unique users={len(incoming)}, parsed_rows={parsed_rows}, sample={sample}")
+
+            cur.execute("BEGIN IMMEDIATE")
+
+            if mode_val == "replace" and not dry_run:
                 cur.execute(
                     "DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?",
                     (gid, month)
@@ -111,22 +166,24 @@ class CleanupCog(commands.Cog):
 
             # Upsert month counts — match PK order (guild_id, user_id, month)
             rows = [(gid, uid, month, cnt, mode_val) for uid, cnt in incoming.items()]
-            cur.executemany(
-                """
-                INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id, month)
-                DO UPDATE SET count =
-                    CASE WHEN ?='add'
-                         THEN member_activity_monthly.count + excluded.count
-                         ELSE excluded.count
-                    END
-                """,
-                rows,
-            )
+            if not dry_run:
+                cur.executemany(
+                    """
+                    INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id, month)
+                    DO UPDATE SET count =
+                        CASE WHEN ?='add'
+                             THEN member_activity_monthly.count + excluded.count
+                             ELSE excluded.count
+                        END
+                    """,
+                    rows,
+                )
 
             # Recompute totals for the affected users
             uids = tuple(incoming.keys())
+            totals: List[Tuple[int, int]] = []
             if uids:
                 q_marks = ",".join("?" for _ in uids)
                 totals = cur.execute(
@@ -139,6 +196,7 @@ class CleanupCog(commands.Cog):
                     (gid, *uids),
                 ).fetchall()
 
+            if not dry_run:
                 cur.executemany(
                     """
                     INSERT INTO member_activity_total (guild_id, user_id, count)
@@ -149,25 +207,54 @@ class CleanupCog(commands.Cog):
                     [(gid, uid, total) for (uid, total) in totals],
                 )
 
-            con.commit()
+            if dry_run:
+                con.rollback()
+            else:
+                con.commit()
 
             total_msgs = sum(incoming.values())
+
+            # --- DEBUG: after state
+            if debug:
+                after_month_sum = cur.execute(
+                    "SELECT COALESCE(SUM(count),0) FROM member_activity_monthly WHERE guild_id=? AND month=?",
+                    (gid, month)
+                ).fetchone()[0]
+                # pick one sample user to show before/after for this month
+                sample_uid = next(iter(incoming.keys()))
+                before_u = cur.execute(
+                    "SELECT COALESCE(count,0) FROM member_activity_monthly WHERE guild_id=? AND user_id=? AND month=?",
+                    (gid, sample_uid, month)
+                ).fetchone()
+                before_u_val = before_u[0] if before_u else 0
+                dbg_lines.append(f"After month sum={after_month_sum} (Δ={after_month_sum - (0 if 'Before month sum=' not in ''.join(dbg_lines) else int(dbg_lines[1].split('=')[1]))})")
+                dbg_lines.append(f"Sample user {sample_uid} month count now={before_u_val} (+{incoming[sample_uid]}{' dry-run' if dry_run else ''})")
+                dbg_lines.append(f"Mode={mode_val}, Dry-run={dry_run}")
+                dbg_text = "```\n" + "\n".join(dbg_lines[:30]) + "\n```"
+                await interaction.followup.send(f"Debug import diagnostics:\n{dbg_text}", ephemeral=True)
+
             await interaction.followup.send(
-                f"Import complete for guild `{gid}`, month `{month}`.\n"
+                f"{'DRY RUN — ' if dry_run else ''}Import complete for guild `{gid}`, month `{month}`.\n"
                 f"• rows imported: {len(incoming)} (unique users)\n"
-                f"• total messages: {total_msgs}\n"
+                f"• total messages in file: {total_msgs}\n"
                 f"• mode: {mode_val}",
                 ephemeral=True
             )
 
         except sqlite3.Error as e:
-            if con:
-                con.rollback()
+            try:
+                if con:
+                    con.rollback()
+            except Exception:
+                pass
             log.exception("import_activity_csv.db_error", extra={"guild_id": gid})
             await interaction.followup.send(f"Database error: {e}", ephemeral=True)
         except Exception as e:
-            if con:
-                con.rollback()
+            try:
+                if con:
+                    con.rollback()
+            except Exception:
+                pass
             log.exception("import_activity_csv.failed", extra={"guild_id": gid})
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
         finally:
