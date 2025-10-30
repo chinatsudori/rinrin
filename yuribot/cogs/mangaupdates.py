@@ -1,10 +1,10 @@
-# mangaupdates.py
 from __future__ import annotations
 
 import asyncio
 import io
 import json
 import re
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,6 +218,33 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     return chbits, "\n".join(extras) if extras else ""
 
 
+# ---------- Stable release IDs -------------------------------------------------
+
+def _canon_rel_id(series_id: str | int, rel: dict) -> int:
+    """
+    Deterministic per-release ID even when MU JSON/RSS doesn't give one.
+    Combines stable fields and hashes to a 64-bit int.
+    """
+    sid = str(series_id)
+    vol = _strip(str(rel.get("volume") or ""))
+    ch  = _strip(str(rel.get("chapter") or ""))
+    sub = _strip(str(rel.get("subchapter") or ""))
+    grp = _strip(
+        rel.get("group")
+        if isinstance(rel.get("group"), str)
+        else (rel.get("group", {}) or {}).get("name", "")
+        if isinstance(rel.get("group"), dict)
+        else rel.get("group_name") or ""
+    )
+    url = _strip(rel.get("url") or rel.get("release_url") or rel.get("link") or "")
+    ttl = _strip(rel.get("title") or rel.get("raw_title") or rel.get("description") or "")
+    ts  = str(int(rel.get("release_ts") or _release_ts(rel) or 0))
+
+    key = "|".join([sid, vol, ch, sub, grp, url, ttl, ts])
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
+
+
 # --- MU tags → Forum tags mapping helpers ------------------------------------
 
 _MU_CANON_TAGS = [
@@ -400,11 +427,16 @@ class MUClient:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        for r in data.get("results", []) if isinstance(data, dict) else []:
+                        results = data.get("results", []) if isinstance(data, dict) else []
+                        # normalize timestamps + inject stable release_id
+                        for r in results:
                             ts = _parse_ts(r.get("release_date") or r.get("date"))
                             if ts is not None:
                                 r["release_ts"] = ts
-                        return data
+                            rid = _canon_rel_id(series_id, r)
+                            r["release_id"] = rid
+                            r["id"] = rid
+                        return {"results": results}
                     if resp.status in (429, 500, 502, 503, 504):
                         await asyncio.sleep(0.8 * i)
                         continue
@@ -487,18 +519,7 @@ class MUClient:
             m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
             group = (m_group.group(1).strip() if m_group else "")
 
-            rid = None
-            if link:
-                m_id_in_link = re.search(r"(\d{6,})", link)
-                if m_id_in_link:
-                    rid = int(m_id_in_link.group(1))
-            if rid is None:
-                # NOTE: Python's hash() is process-randomized; try ts first for stability.
-                rid = ts if ts is not None else int(abs(hash((title, link))) % 10_000_000_000)
-
-            releases.append({
-                "id": rid,
-                "release_id": rid,
+            rec = {
                 "chapter": chapter or "",
                 "volume": volume or "",
                 "subchapter": subchapter or "",
@@ -510,7 +531,12 @@ class MUClient:
                 "raw_title": title or "",
                 "description": desc or "",
                 "lang_hint": raw.lower(),
-            })
+            }
+            rid = _canon_rel_id(series_id, rec)
+            rec["id"] = rid
+            rec["release_id"] = rid
+
+            releases.append(rec)
 
         return {"results": releases}
 
@@ -792,7 +818,10 @@ class MUWatcher(commands.Cog):
         diff = before - len(g["entries"])
         await interaction.response.send_message(S("mu.unlink.done", count=diff), ephemeral=True)
 
-    @group.command(name="status", description="Show current watches for this server.")
+    @group.command(
+        name="status",
+        description="Show current watches for this server."
+    )
     async def status(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
@@ -874,6 +903,9 @@ class MUWatcher(commands.Cog):
         for r in results:
             if "release_ts" not in r or r["release_ts"] is None:
                 r["release_ts"] = _release_ts(r)
+            rid = _canon_rel_id(sid, r)
+            r["release_id"] = rid
+            r["id"] = rid
         models.mu_bulk_upsert_releases(sid, results)
 
         # Baseline: if first time (state last_release_ts is None), silently mark newest as posted
@@ -1072,6 +1104,9 @@ class MUWatcher(commands.Cog):
             for r in results:
                 if "release_ts" not in r or r["release_ts"] is None:
                     r["release_ts"] = _release_ts(r)
+                rid = _canon_rel_id(sid, r)
+                r["release_id"] = rid
+                r["id"] = rid
 
             models.mu_bulk_upsert_releases(sid, results)
 
