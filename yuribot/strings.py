@@ -563,7 +563,25 @@ _STRINGS.update({
         "introduce yourself, and check the channels unlocked for you."
     ),
     "rolewelcome.footer": "{guild}",
+        # ---------------- Native Polls (custom duration) ----------------
+    "poll.native.group_desc": "Create native Discord polls",
+    "poll.native.create_desc": "Create a native poll (up to 6 options) with a custom duration (in hours).",
+    "poll.native.arg.question": "Poll question (1–300 chars)",
+    "poll.native.arg.opt1": "Option 1",
+    "poll.native.arg.opt2": "Option 2",
+    "poll.native.arg.opt3": "Option 3 (optional)",
+    "poll.native.arg.opt4": "Option 4 (optional)",
+    "poll.native.arg.opt5": "Option 5 (optional)",
+    "poll.native.arg.opt6": "Option 6 (optional)",
+    "poll.native.arg.hours": "How long the poll runs (hours, 1–168). Default 48 (=2 days).",
+    "poll.native.arg.multi": "Allow users to select multiple options?",
+    "poll.native.arg.ephemeral": "Post ephemerally to the invoker only?",
+    "poll.native.err.need_two": "Provide at least **2** options.",
+    "poll.native.err.too_many": "Provide **{n}** options or fewer.",
+    "poll.native.err.create_failed": "Couldn’t create the poll: {err}",
+
 })
+
 
 
 
