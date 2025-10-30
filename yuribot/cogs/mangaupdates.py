@@ -1038,3 +1038,6 @@ class MUWatcher(commands.Cog):
             return
         g["entries"] = [e for e in g.get("entries", []) if int(e.get("thread_id")) != thread_id]
         _
+        
+async def setup(bot: commands.Bot):
+    await bot.add_cog(MUWatcher(bot))
