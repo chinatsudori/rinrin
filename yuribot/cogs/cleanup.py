@@ -109,7 +109,7 @@ class CleanupCog(commands.Cog):
                     (gid, month)
                 )
 
-            # Upsert month counts — **match PK order** (guild_id, user_id, month)
+            # Upsert month counts — match PK order (guild_id, user_id, month)
             rows = [(gid, uid, month, cnt, mode_val) for uid, cnt in incoming.items()]
             cur.executemany(
                 """
@@ -127,7 +127,7 @@ class CleanupCog(commands.Cog):
 
             # Recompute totals for the affected users
             uids = tuple(incoming.keys())
-            if uids:  # guard
+            if uids:
                 q_marks = ",".join("?" for _ in uids)
                 totals = cur.execute(
                     f"""
