@@ -1,3 +1,4 @@
+# mangaupdates.py
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,7 @@ API_BASE = "https://api.mangaupdates.com/v1"
 DATA_FILE = Path("./data/mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
-# Turn EN filter on/off
+# Turn EN filter on/off (heuristic)
 FILTER_ENGLISH_ONLY = False
 
 # Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit)
@@ -57,13 +58,12 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
 def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
     sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
-    sid = str(sid) if sid is not None else None  # keep as string
+    sid = str(sid) if sid is not None else None
     title = r.get("title") or rec.get("title") or "Unknown"
     return sid, title
 
 
 def _stringify_aliases(raw) -> List[str]:
-    """Normalize MU alias lists to a de-duplicated list[str]."""
     out: List[str] = []
     for x in (raw or []):
         if isinstance(x, str):
@@ -88,7 +88,6 @@ def _forum_post_name(s: str) -> str:
     name = re.sub(r"\s+", " ", (s or "").strip())
     if not name:
         name = "Untitled"
-    # Discord thread name must be 1–100 chars
     return name[:100]
 
 
@@ -114,7 +113,6 @@ def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
     return nums
 
 def _extract_max_chapter(text: str) -> Tuple[str, str]:
-    """Return (chapter, subchapter) choosing the MAX chapter mentioned (ranges & decimals supported)."""
     nums = _find_all_numbers(text, _CH_PATTERNS)
     if not nums:
         return "", ""
@@ -133,18 +131,15 @@ def _extract_max_volume(text: str) -> str:
     return f"{mx}".rstrip("0").rstrip(".")
 
 
-
 def _parse_ts(value: Optional[str]) -> Optional[int]:
     """Parse an ISO/RFC date string to epoch seconds; return None if unknown."""
     if not value:
         return None
     try:
-        # Accept "Z"
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         return int(dt.timestamp())
     except Exception:
         pass
-    # RSS often uses pubDate (RFC2822)
     try:
         import email.utils as eut
         dt = eut.parsedate_to_datetime(str(value))
@@ -154,21 +149,18 @@ def _parse_ts(value: Optional[str]) -> Optional[int]:
 
 
 def _release_ts(rel: dict) -> int:
-    """Uniform accessor; unknown timestamps sort as very old."""
     v = rel.get("release_ts")
     if isinstance(v, (int, float)):
         return int(v)
-    # try canonical fields
     for key in ("release_date", "date", "pubDate", "pubdate"):
         if key in rel and rel[key]:
             ts = _parse_ts(rel[key])
             if ts is not None:
                 return ts
-    return -1  # unknown -> treat as oldest
+    return -1
 
 
 def _has_ch(x) -> int:
-    """Return 1 if release looks like a chapter (not just volume)."""
     if _strip(str(x.get("chapter") or "")):
         return 1
     title = f"{x.get('title','')} {x.get('raw_title','')} {x.get('description','')}".lower()
@@ -176,10 +168,6 @@ def _has_ch(x) -> int:
 
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
-    """
-    Build a 'vX • ch Y • Z' string. If structured fields are missing,
-    fall back to parsing from title/description (handles ranges like 21–25 and decimals).
-    """
     vol = _strip(str(rel.get("volume") or ""))
     ch = _strip(str(rel.get("chapter") or ""))
     sub = _strip(str(rel.get("subchapter") or ""))
@@ -231,6 +219,7 @@ def _format_rel_bits(rel: dict) -> Tuple[str, str]:
 
     return chbits, "\n".join(extras) if extras else ""
 
+
 # --- MU tags → Forum tags mapping helpers ------------------------------------
 
 _MU_CANON_TAGS = [
@@ -245,7 +234,6 @@ _MU_CANON_TAGS = [
     "tragedy", "isekai",
 ]
 
-# forum tags you actually have (lowercase); order = priority when trimming
 _FORUM_TAG_PRIORITY = [
     "manga", "manhwa", "manhua", "webtoon",
     "fantasy", "slice of life", "drama", "sci-fi", "mystery", "horror",
@@ -254,19 +242,6 @@ _FORUM_TAG_PRIORITY = [
 ]
 
 def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
-    """
-    Map MU tags to your forum tag names (lowercased).
-
-    Rules:
-      - nsfw          ⇐ {hentai}
-      - slice of life ⇐ {slice of life, school life}
-      - psychological ⇐ {psychological}
-      - violence/gore ⇐ {action, martial arts, mecha}
-      - historical    ⇐ {historical}
-      - Keep direct: fantasy, drama, sci-fi, mystery, horror, tragedy,
-                     comedy, isekai, harem, ecchi
-      - Ignore: romance, yuri, adult, mature, smut, sports, cute
-    """
     mt = {t.lower() for t in mu_tags}
     out: Set[str] = set()
 
@@ -305,18 +280,10 @@ async def _scrape_mu_tags_and_type(
     sid: str,
     series_json: dict | None,
 ) -> Tuple[Optional[str], Set[str]]:
-    """
-    Returns (type_tag, mu_tags_set)
-      - type_tag in {"manga","manhwa","manhua","webtoon"} if detected, else None
-      - mu_tags_set = lowercased MU tags detected
-    We try JSON first; if insufficient, we fetch and parse the HTML (best-effort).
-    """
     mu_tags: Set[str] = set()
     type_tag: Optional[str] = None
 
-    # Try JSON hints
     sj = series_json or {}
-    # Some MU JSONs expose genres/categories/associated tags
     for key in ("genres", "genre", "categories", "tags", "themes"):
         raw = sj.get(key)
         if isinstance(raw, list):
@@ -328,7 +295,6 @@ async def _scrape_mu_tags_and_type(
                     if name:
                         mu_tags.add(name.lower())
 
-    # Type hints in JSON
     for key in ("type", "format", "media_type"):
         val = str(sj.get(key) or "").strip().lower()
         if val:
@@ -341,9 +307,7 @@ async def _scrape_mu_tags_and_type(
             elif "manga" in val:
                 type_tag = "manga"
 
-    # If we still need better coverage, fetch HTML and scan text
     if not type_tag or not mu_tags:
-        # new-style page
         urls = [
             f"https://www.mangaupdates.com/series/{sid}",
             f"https://www.mangaupdates.com/series.html?id={sid}",
@@ -359,7 +323,7 @@ async def _scrape_mu_tags_and_type(
             except Exception:
                 continue
 
-        text = re.sub(r"<[^>]+>", " ", page_text)  # strip tags roughly
+        text = re.sub(r"<[^>]+>", " ", page_text)
         text = re.sub(r"\s+", " ", text).lower()
 
         if not type_tag:
@@ -425,7 +389,6 @@ class MUClient:
         Try JSON endpoint; on failure, fall back to RSS and convert to JSON-like.
         """
         timeout = aiohttp.ClientTimeout(total=25)
-
         get_url = f"{API_BASE}/series/{series_id}/releases"
         params = {"page": page, "per_page": per_page}
 
@@ -439,7 +402,6 @@ class MUClient:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # normalize timestamps if present
                         for r in data.get("results", []) if isinstance(data, dict) else []:
                             ts = _parse_ts(r.get("release_date") or r.get("date"))
                             if ts is not None:
@@ -533,6 +495,7 @@ class MUClient:
                 if m_id_in_link:
                     rid = int(m_id_in_link.group(1))
             if rid is None:
+                # fallback id: stable-ish hash on (title, link)
                 rid = ts or int(abs(hash((title, link))) % 10_000_000_000)
 
             releases.append({
@@ -562,7 +525,7 @@ class WatchEntry:
     forum_channel_id: int
     thread_id: int
     last_release_id: Optional[int] = None      # kept for backward compat (unused for logic now)
-    last_release_ts: Optional[int] = None      # what we actually compare
+    last_release_ts: Optional[int] = None      # used only to decide baseline init
 
 
 def _load_state() -> Dict[str, dict]:
@@ -582,19 +545,16 @@ def _save_state(state: Dict[str, dict]) -> None:
 
 
 def _is_english_release(rel: dict) -> bool:
-    """Very heuristic: check for 'eng' hints in language or title."""
     txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
     return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
 
 
 def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
-    # 1) DB-configured forum via admin /set_mu_forum
     ch_id = models.get_mu_forum_channel(guild.id)
     if ch_id:
         ch = guild.get_channel(ch_id)
         if isinstance(ch, discord.ForumChannel):
             return ch
-    # 2) Optional fallback by name if you still want it
     lname = "ongoing-reading-room"
     for ch in guild.channels:
         if isinstance(ch, discord.ForumChannel) and ch.name.lower().strip() == lname:
@@ -603,13 +563,7 @@ def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
 
 
 async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) -> Optional[discord.File]:
-    """
-    Try to locate and fetch a series cover from the series JSON.
-    Returns a discord.File (in-memory) or None if not available/too large.
-    """
-    # Look for common fields
     urls: List[str] = []
-    # New MU API sometimes returns thumbnails/art under different keys
     for key in ("cover", "image", "image_url", "thumbnail", "thumbnail_url"):
         val = series_json.get(key)
         if isinstance(val, str) and val.startswith(("http://", "https://")):
@@ -619,7 +573,6 @@ async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) 
                 if isinstance(v, str) and v.startswith(("http://", "https://")):
                     urls.append(v)
 
-    # De-dup while preserving order
     seen = set()
     urls = [u for u in urls if not (u in seen or seen.add(u))]
 
@@ -631,7 +584,6 @@ async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) 
                 ctype = resp.headers.get("Content-Type", "").lower()
                 if not any(x in ctype for x in ("image/", "jpeg", "png", "webp")):
                     continue
-                # Limit size
                 raw = await resp.read()
                 if len(raw) > MAX_COVER_BYTES:
                     continue
@@ -684,7 +636,6 @@ class MUWatcher(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Resolve the configured forum from DB
         forum = _resolve_mu_forum(interaction.guild)
         if not isinstance(forum, discord.ForumChannel):
             return await interaction.followup.send(S("mu.link.forum_missing"), ephemeral=True)
@@ -692,7 +643,7 @@ class MUWatcher(commands.Cog):
         session = await self._session_ensure()
         client = MUClient(session)
 
-        # Search & pick the best match
+        # Search & pick best match
         try:
             results = await client.search_series(series)
         except Exception as e:
@@ -726,7 +677,7 @@ class MUWatcher(commands.Cog):
         sid = choice["sid"]
         title = choice["title"]
 
-        # Duplicate protection (per guild)
+        # Duplicate protection via JSON state (per guild)
         gid = str(interaction.guild_id)
         already = None
         for e in self.state.get(gid, {}).get("entries", []):
@@ -741,39 +692,32 @@ class MUWatcher(commands.Cog):
                 ephemeral=True,
             )
 
-        # Fetch full series for cover (best effort) and tags
+        # Fetch full series for cover and tags
         full_json: dict = {}
         try:
             full_json = await client.get_series(sid)
         except Exception:
             full_json = {}
 
-        # Scrape tags & type
         type_tag, mu_tags = await _scrape_mu_tags_and_type(session, sid, full_json)
         forum_tag_names = _map_mu_to_forum(mu_tags)
 
-        # Build applied_tags list (max 5; prioritize type first)
         tag_name_to_obj = {t.name.lower(): t for t in getattr(forum, "available_tags", [])}
         desired_order = []
-
         if type_tag and type_tag in tag_name_to_obj:
             desired_order.append(type_tag)
-
         for name in _FORUM_TAG_PRIORITY:
             if name in {"manga", "manhwa", "manhua", "webtoon"}:
-                continue  # type handled above
+                continue
             if name in forum_tag_names and name in tag_name_to_obj:
                 desired_order.append(name)
-
         applied = [tag_name_to_obj[n] for n in desired_order[:5]]
 
         cover_file: Optional[discord.File] = await _fetch_cover_image(session, full_json)
 
-        # Create the forum post (first message content)
         mu_url = full_json.get("url") or full_json.get("series_url") or f"https://www.mangaupdates.com/series.html?id={sid}"
         first_msg = f"Discussion thread for **{title}**\nLink: {mu_url}"
-
-        thread_name = _forum_post_name(series)  # use the user-entered name
+        thread_name = _forum_post_name(series)
 
         try:
             if cover_file:
@@ -796,14 +740,18 @@ class MUWatcher(commands.Cog):
         except discord.HTTPException as e:
             return await interaction.followup.send(f"HTTP error creating forum post: {e}", ephemeral=True)
 
-        # Normalize return: Thread or ThreadWithMessage
-        thread_obj: discord.Thread
-        if hasattr(created_any, "thread"):  # ThreadWithMessage
+        if hasattr(created_any, "thread"):
             thread_obj = created_any.thread  # type: ignore[attr-defined]
         else:
             thread_obj = created_any  # type: ignore[assignment]
 
-        # Persist watch mapping (guild → entries list)
+        # DB: map thread <-> series (title upsert)
+        try:
+            models.mu_register_thread_series(interaction.guild_id, thread_obj.id, sid, title)
+        except Exception:
+            pass  # best-effort; state file still preserves mapping for watcher
+
+        # Persist JSON watch mapping (aliases/title/last_ts baseline)
         g = self.state.setdefault(gid, {"entries": []})
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != thread_obj.id]
         g["entries"].append(
@@ -819,7 +767,6 @@ class MUWatcher(commands.Cog):
         )
         _save_state(self.state)
 
-        # Confirmation
         alias_preview = (", ".join(aliases[:8]) + (" …" if len(aliases) > 8 else "")) if aliases else S("mu.link.no_aliases")
         applied_names = ", ".join([t.name for t in applied]) if applied else "none"
         await interaction.followup.send(
@@ -886,30 +833,41 @@ class MUWatcher(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
+        # Resolve series id (prefer DB mapping, fallback to JSON state)
+        sid = models.mu_get_thread_series(tgt.id, interaction.guild_id)
+        we: Optional[WatchEntry] = None
+
         gid = str(interaction.guild_id)
         entries = self.state.get(gid, {}).get("entries", [])
-        entry = None
+
+        # Try match JSON entry for title/aliases + last_ts baseline
         for e in entries:
             if int(e.get("thread_id")) == tgt.id:
-                entry = e
+                we = WatchEntry(
+                    series_id=str(e["series_id"]),
+                    series_title=e.get("series_title", "Unknown"),
+                    aliases=e.get("aliases", []) or [],
+                    forum_channel_id=int(e["forum_channel_id"]),
+                    thread_id=int(e["thread_id"]),
+                    last_release_id=e.get("last_release_id"),
+                    last_release_ts=e.get("last_release_ts"),
+                )
                 break
-        if not entry:
-            return await interaction.followup.send(S("mu.check.not_linked"), ephemeral=True)
 
-        we = WatchEntry(
-            series_id=str(entry["series_id"]),
-            series_title=entry.get("series_title", "Unknown"),
-            aliases=entry.get("aliases", []) or [],
-            forum_channel_id=int(entry["forum_channel_id"]),
-            thread_id=int(entry["thread_id"]),
-            last_release_id=entry.get("last_release_id"),
-            last_release_ts=entry.get("last_release_ts"),
-        )
+        if sid is None and we is None:
+            return await interaction.followup.send(S("mu.check.not_linked"), ephemeral=True)
+        if sid is None and we is not None:
+            sid = we.series_id  # fallback to state
+        if we is None:
+            # build minimal entry for embeds
+            we = WatchEntry(series_id=str(sid), series_title="Unknown", aliases=[], forum_channel_id=tgt.parent.id, thread_id=tgt.id)
 
         session = await self._session_ensure()
         client = MUClient(session)
+
+        # Fetch releases → upsert to DB
         try:
-            rels = await client.get_series_releases(we.series_id, page=1, per_page=25)
+            rels = await client.get_series_releases(sid, page=1, per_page=25)
         except Exception as e:
             return await interaction.followup.send(S("mu.error.generic", msg=str(e)), ephemeral=True)
 
@@ -917,37 +875,56 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # normalize timestamps for JSON path if missing
+        # Normalize timestamps & bulk upsert
         for r in results:
             if "release_ts" not in r or r["release_ts"] is None:
-                ts = _release_ts(r)
-                r["release_ts"] = ts
+                r["release_ts"] = _release_ts(r)
+        models.mu_bulk_upsert_releases(sid, results)
 
-        use = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
-        if not use:
-            msg_key = "mu.error.no_releases_lang" if FILTER_ENGLISH_ONLY else "mu.error.no_releases"
-            return await interaction.followup.send(S(msg_key), ephemeral=True)
-
-        # Determine new items by timestamp
-        last_ts = we.last_release_ts or -1
-        new_items = [r for r in use if _release_ts(r) > last_ts]
-
-        if new_items:
-            # Post oldest -> newest; ping @here only for chapters
-            for r in sorted(new_items, key=lambda x: _release_ts(x)):
-                await self._post_release(tgt, we, r)
-
-            # update state with newest ts
-            top_seen_ts = max(_release_ts(r) for r in use)
-            for e in self.state[gid]["entries"]:
-                if int(e.get("thread_id")) == we.thread_id:
-                    e["last_release_ts"] = top_seen_ts
+        # Baseline: if first time (state last_release_ts is None), silently mark newest as posted
+        if we.last_release_ts is None:
+            newest_ts = max((_release_ts(r) for r in results), default=-1)
+            # find the id for newest_ts
+            newest = None
+            for r in results:
+                if _release_ts(r) == newest_ts:
+                    newest = r
                     break
-            _save_state(self.state)
-            return await interaction.followup.send(S("mu.check.posted", count=len(new_items)), ephemeral=True)
+            if newest is not None:
+                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(newest.get("release_id") or newest.get("id")))
+                # persist to JSON state for future baseline checks
+                for e in self.state[gid]["entries"]:
+                    if int(e.get("thread_id")) == we.thread_id:
+                        e["last_release_ts"] = newest_ts
+                        break
+                _save_state(self.state)
 
-        # No new — post latest known (by timestamp)
-        latest = max(use, key=lambda x: _release_ts(x))
+        # Determine unposted releases for this thread
+        unposted = models.mu_list_unposted_for_thread(
+            interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
+        )
+
+        if unposted:
+            for tup in unposted:
+                rid = int(tup[0])
+                rel = models.mu_get_release(sid, rid) or {
+                    "release_id": rid,
+                    "title": tup[1], "raw_title": tup[2], "description": tup[3],
+                    "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
+                    "group": tup[7], "url": tup[8], "release_ts": tup[9],
+                }
+                await self._post_release(tgt, we, rel)
+                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
+
+            return await interaction.followup.send(S("mu.check.posted", count=len(unposted)), ephemeral=True)
+
+        # No unposted: show latest known from DB
+        latest_ts = models.mu_latest_release_ts(sid)
+        if latest_ts == -1:
+            return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
+
+        # try to pick a release with max ts (we didn't store an index to map ts->id, so pick the last from API result)
+        latest = max(results, key=lambda x: _release_ts(x))
         chbits, extras = _format_rel_bits(latest)
         embed = discord.Embed(
             title=S("mu.latest.title", series=we.series_title, chbits=chbits),
@@ -960,13 +937,6 @@ class MUWatcher(commands.Cog):
             await tgt.send(embed=embed)
         except Exception:
             pass
-
-        if we.last_release_ts is None:
-            for e in self.state[gid]["entries"]:
-                if int(e.get("thread_id")) == we.thread_id:
-                    e["last_release_ts"] = _release_ts(latest)
-                    break
-            _save_state(self.state)
 
         await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
 
@@ -1004,8 +974,11 @@ class MUWatcher(commands.Cog):
                 self._prune_entry(gid, we.thread_id)
                 continue
 
+            sid = models.mu_get_thread_series(we.thread_id, gid) or we.series_id
+
+            # Fetch releases → upsert
             try:
-                rels = await client.get_series_releases(we.series_id, page=1, per_page=25)
+                rels = await client.get_series_releases(sid, page=1, per_page=25)
             except Exception:
                 continue
 
@@ -1017,39 +990,42 @@ class MUWatcher(commands.Cog):
                 if "release_ts" not in r or r["release_ts"] is None:
                     r["release_ts"] = _release_ts(r)
 
-            scan = [r for r in results if _is_english_release(r)] if FILTER_ENGLISH_ONLY else results
-            if not scan:
-                continue
+            models.mu_bulk_upsert_releases(sid, results)
 
-            last_ts = we.last_release_ts or -1
-            new_items = [r for r in scan if _release_ts(r) > last_ts]
-
-            gid_str = str(gid)
-            guild_blob = self.state.setdefault(gid_str, {"entries": []})
-
+            # Baseline init if needed
             if we.last_release_ts is None:
-                # initialize to newest ts silently
-                init_ts = max((_release_ts(r) for r in scan), default=-1)
-                for ee in guild_blob["entries"]:
-                    if int(ee["thread_id"]) == we.thread_id:
-                        ee["last_release_ts"] = init_ts
+                newest_ts = max((_release_ts(r) for r in results), default=-1)
+                newest = None
+                for r in results:
+                    if _release_ts(r) == newest_ts:
+                        newest = r
                         break
-                _save_state(self.state)
-                continue
+                if newest is not None:
+                    models.mu_mark_posted(gid, we.thread_id, sid, int(newest.get("release_id") or newest.get("id")))
+                    for ee in self.state[str(gid)]["entries"]:
+                        if int(ee["thread_id"]) == we.thread_id:
+                            ee["last_release_ts"] = newest_ts
+                            break
+                    _save_state(self.state)
+                continue  # skip posting on the very first cycle
 
-            for r in sorted(new_items, key=lambda x: _release_ts(x)):
+            # Post any unposted
+            unposted = models.mu_list_unposted_for_thread(
+                gid, we.thread_id, sid, english_only=FILTER_ENGLISH_ONLY
+            )
+            for tup in unposted:
+                rid = int(tup[0])
+                rel = models.mu_get_release(sid, rid) or {
+                    "release_id": rid,
+                    "title": tup[1], "raw_title": tup[2], "description": tup[3],
+                    "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
+                    "group": tup[7], "url": tup[8], "release_ts": tup[9],
+                }
                 try:
-                    await self._post_release(thread, we, r)
+                    await self._post_release(thread, we, rel)
+                    models.mu_mark_posted(gid, we.thread_id, sid, rid)
                 except Exception:
                     pass
-
-            if new_items:
-                top_seen_ts = max((_release_ts(r) for r in scan), default=we.last_release_ts or -1)
-                for ee in guild_blob["entries"]:
-                    if int(ee["thread_id"]) == we.thread_id:
-                        ee["last_release_ts"] = top_seen_ts
-                        break
-                _save_state(self.state)
 
     @poll_updates.before_loop
     async def _before_poll(self):
@@ -1061,24 +1037,4 @@ class MUWatcher(commands.Cog):
         if not g:
             return
         g["entries"] = [e for e in g.get("entries", []) if int(e.get("thread_id")) != thread_id]
-        _save_state(self.state)
-
-    async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict):
-        rid = rel.get("id") or rel.get("release_id")
-        chbits, extras = _format_rel_bits(rel)
-
-        mention_content = "@here" if _has_ch(rel) else None
-        allowed = discord.AllowedMentions(everyone=True) if mention_content else discord.AllowedMentions.none()
-
-        embed = discord.Embed(
-            title=S("mu.release.title", series=we.series_title, chbits=chbits),
-            description=extras or None,
-            color=discord.Color.blurple(),
-            timestamp=_now_utc(),
-        )
-        embed.set_footer(text=S("mu.release.footer", rid=rid))
-        await thread.send(content=mention_content, embed=embed, allowed_mentions=allowed)
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MUWatcher(bot))
+        _
