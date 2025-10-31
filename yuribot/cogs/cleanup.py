@@ -1,3 +1,4 @@
+from __future__ import annotations
 import csv
 import io
 import logging
@@ -41,6 +42,137 @@ class CleanupCog(commands.Cog):
         name="cleanup",
         description="Maintenance and import tools."
     )
+
+    # ----------------------------------------------------------------------
+    # NEW: Patch member_metrics_daily to add legacy 'messages' + sync triggers
+    # ----------------------------------------------------------------------
+    @group.command(
+        name="patch_metrics_daily_compat",
+        description="Add 'messages' column to member_metrics_daily and create sync triggers to/from 'count'.",
+    )
+    @app_commands.describe(dry_run="If true, validate and show what would happen without writing.")
+    @owner_only()
+    async def patch_metrics_daily_compat(
+        self,
+        interaction: discord.Interaction,
+        dry_run: bool = False,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        con: sqlite3.Connection | None = None
+        try:
+            con = connect()
+            cur = con.cursor()
+
+            # Inspect schema
+            cols = cur.execute("PRAGMA table_info(member_metrics_daily);").fetchall()
+            colnames = {c[1] for c in cols}
+            have_messages = ("messages" in colnames)
+            have_count = ("count" in colnames)
+
+            if not have_count:
+                return await interaction.followup.send(
+                    "Table `member_metrics_daily` has no `count` column. Aborting to avoid corruption.",
+                    ephemeral=True,
+                )
+
+            # Triggers present?
+            trig_rows = cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND name IN "
+                "('trg_mmd_sync_to_messages','trg_mmd_sync_to_count');"
+            ).fetchall()
+            trig_names = {r[0] for r in trig_rows}
+
+            actions: List[str] = []
+            cur.execute("BEGIN IMMEDIATE")
+
+            # 1) Add messages column if missing
+            if not have_messages:
+                actions.append("ALTER TABLE: add column 'messages'")
+                if not dry_run:
+                    cur.execute("ALTER TABLE member_metrics_daily ADD COLUMN messages INTEGER;")
+
+            # 2) Backfill messages from count (only where null)
+            actions.append("Backfill: messages <- count (NULL rows)")
+            if not dry_run:
+                cur.execute(
+                    "UPDATE member_metrics_daily SET messages = count WHERE messages IS NULL;"
+                )
+
+            # 3) Create triggers (IF NOT EXISTS)
+            if "trg_mmd_sync_to_messages" not in trig_names:
+                actions.append("Create trigger: trg_mmd_sync_to_messages")
+                if not dry_run:
+                    cur.execute(
+                        """
+                        CREATE TRIGGER IF NOT EXISTS trg_mmd_sync_to_messages
+                        AFTER UPDATE OF count ON member_metrics_daily
+                        FOR EACH ROW
+                        WHEN NEW.messages IS NOT NEW.count
+                        BEGIN
+                          UPDATE member_metrics_daily
+                          SET messages = NEW.count
+                          WHERE guild_id = NEW.guild_id
+                            AND user_id = NEW.user_id
+                            AND day = NEW.day;
+                        END;
+                        """
+                    )
+
+            if "trg_mmd_sync_to_count" not in trig_names:
+                actions.append("Create trigger: trg_mmd_sync_to_count")
+                if not dry_run:
+                    cur.execute(
+                        """
+                        CREATE TRIGGER IF NOT EXISTS trg_mmd_sync_to_count
+                        AFTER UPDATE OF messages ON member_metrics_daily
+                        FOR EACH ROW
+                        WHEN NEW.count IS NOT NEW.messages
+                        BEGIN
+                          UPDATE member_metrics_daily
+                          SET count = NEW.messages
+                          WHERE guild_id = NEW.guild_id
+                            AND user_id = NEW.user_id
+                            AND day = NEW.day;
+                        END;
+                        """
+                    )
+
+            if dry_run:
+                con.rollback()
+            else:
+                con.commit()
+
+            await interaction.followup.send(
+                ("DRY RUN — no changes made.\n" if dry_run else "") +
+                "Patch completed for `member_metrics_daily`.\n"
+                f"- `messages` column existed: {have_messages}\n"
+                f"- `count` column existed: {have_count}\n"
+                f"- Trigger(s) previously present: {sorted(trig_names) or 'none'}\n"
+                f"- Actions performed: {actions or ['none']}",
+                ephemeral=True,
+            )
+
+        except sqlite3.Error as e:
+            try:
+                if con:
+                    con.rollback()
+            except Exception:
+                pass
+            log.exception("patch_metrics_daily_compat.db_error")
+            await interaction.followup.send(f"Database error: {e}", ephemeral=True)
+        except Exception as e:
+            try:
+                if con:
+                    con.rollback()
+            except Exception:
+                pass
+            log.exception("patch_metrics_daily_compat.failed")
+            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+        finally:
+            with contextlib.suppress(Exception):
+                if con:
+                    con.close()
 
     # ----------------------
     # DEBUG TOGGLE
@@ -337,7 +469,7 @@ class CleanupCog(commands.Cog):
                 con = connect()
                 cur = con.cursor()
 
-                if debug:
+                if self._is_debug(interaction.guild_id):
                     await interaction.followup.send(
                         "Debug import diagnostics:\n```\n"
                         "Target = member_metrics_daily\n"
@@ -362,7 +494,7 @@ class CleanupCog(commands.Cog):
                                  ELSE excluded.messages
                             END
                         """,
-                        [(gid, uid, day, cnt, mode_val) for (gid, uid, day, cnt) in incoming_rows],
+                        [(gid, uid, day, cnt, (mode_val if mode_val else "add")) for (gid, uid, day, cnt) in incoming_rows],
                     )
 
                 # Refresh totals from metrics_daily
@@ -397,7 +529,7 @@ class CleanupCog(commands.Cog):
                 return await interaction.followup.send(
                     f"{'DRY RUN - ' if dry_run else ''}Import complete (target=member_metrics_daily) for guild `{gid}`.\n"
                     f"- rows imported: {len(incoming_rows)}\n"
-                    f"- mode: {mode_val}",
+                    f"- mode: {mode_val if mode_val else 'add'}",
                     ephemeral=True
                 )
 
