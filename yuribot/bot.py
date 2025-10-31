@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 from contextlib import suppress
-from typing import Iterable
+from typing import Iterable, List
 
 import discord
 from discord.ext import commands
@@ -65,7 +65,6 @@ class YuriBot(commands.Bot):
             return False
         ch = self.get_channel(cid)
         if not isinstance(ch, (discord.TextChannel, discord.Thread)):
-            # Try fetching if not cached yet
             with suppress(Exception):
                 ch = await self.fetch_channel(cid)  # type: ignore[assignment]
         if isinstance(ch, (discord.TextChannel, discord.Thread)):
@@ -76,12 +75,21 @@ class YuriBot(commands.Bot):
 
     # ---- lifecycle ----
     async def setup_hook(self):
-        # DB first
+        # 0) DB first
         ensure_db()
         log.info("Database ensured/connected.")
 
-        # Load cogs
-        extensions = [
+        # 1) CLEAR GLOBALS ONCE (before any cogs register commands)
+        if (os.getenv("CLEAR_GLOBALS_ONCE") or "0") == "1":
+            try:
+                self.tree.clear_commands(guild=None)  # wipe global registry in-process
+                removed = await self.tree.sync()       # push the empty set globally
+                log.warning("Cleared all GLOBAL commands (pushed %d removals).", len(removed))
+            except Exception:
+                log.exception("Failed clearing global commands")
+
+        # 2) LOAD COGS (build the command tree)
+        extensions: List[str] = [
             "yuribot.cogs.admin",
             "yuribot.cogs.modlog",
             "yuribot.cogs.botlog",
@@ -102,9 +110,11 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.lifecycle",
         ]
         await self._load_extensions(extensions)
+        names = [c.qualified_name for c in self.tree.get_commands()]
+        log.info("Command tree built: %d commands registered in-process: %s", len(names), names)
 
-        # Sync application commands
-        await self._sync_commands()
+        # 3) SYNC TO GUILDS ONLY (no globals)
+        await self._sync_guilds_only()
 
     async def _load_extensions(self, names: Iterable[str]) -> None:
         for ext in names:
@@ -114,52 +124,31 @@ class YuriBot(commands.Bot):
             except Exception:
                 log.exception("Failed to load extension: %s", ext)
 
-    async def _sync_commands(self) -> None:
+    async def _sync_guilds_only(self) -> None:
         """
-        Sync application commands without using global commands by default.
-
+        Push the current in-process tree to the specific guilds only.
         Env:
-          COMMAND_SYNC_MODE   = "guilds" | "global"     (default: "guilds")
-          SYNC_GUILDS         = comma-separated guild IDs (e.g. "123,456")
-          CLEAR_GLOBALS_ONCE  = "1" to delete any global commands before guild sync
+          SYNC_GUILDS  = comma-separated guild IDs (required)
         """
-        mode = (os.getenv("COMMAND_SYNC_MODE") or "guilds").strip().lower()
-        try:
-            if mode == "global":
-                # Publish globally (slow propagation; generally avoid for iterative dev)
-                synced = await self.tree.sync()
-                log.info("Globally synced %d commands.", len(synced))
-                return
+        raw = os.getenv("SYNC_GUILDS") or os.getenv("DEV_GUILD_ID")  # backward compat
+        gids = [int(x.strip()) for x in (raw or "").split(",") if x.strip()]
+        if not gids:
+            log.error("No guild IDs provided. Set SYNC_GUILDS='gid1,gid2'.")
+            return
 
-            # Guild-only mode (default)
-            raw = os.getenv("SYNC_GUILDS") or os.getenv("DEV_GUILD_ID")  # backward compat
-            gids = [int(x.strip()) for x in (raw or "").split(",") if x.strip()]
-            if not gids:
-                log.error("No guild IDs provided. Set SYNC_GUILDS='gid1,gid2'.")
-                return
-
-            if os.getenv("CLEAR_GLOBALS_ONCE") == "1":
-                try:
-                    # Remove any global commands so they can't shadow or be copied accidentally
-                    self.tree.clear_commands(guild=None)
-                    await self.tree.sync()
-                    log.warning("Cleared all GLOBAL commands.")
-                except Exception:
-                    log.exception("Failed clearing global commands")
-
-            # IMPORTANT: do NOT copy from globals.
-            # Sync the current in-process command tree directly to each guild.
-            for gid in gids:
+        for gid in gids:
+            try:
                 guild_obj = discord.Object(id=gid)
                 synced = await self.tree.sync(guild=guild_obj)
                 log.info("Synced %d commands to guild %s.", len(synced), gid)
-
-        except Exception:
-            log.exception("Command sync failed.")
+            except Exception:
+                log.exception("Guild sync failed for %s", gid)
 
     async def on_ready(self):
         if self.user:
             log.info("Logged in as %s (%s)", self.user, self.user.id)
+        for g in self.guilds:
+            log.info("guild: %s (%s)", g.name, g.id)
 
     async def close(self):
         # Post a restart/shutdown notice before disconnecting
@@ -169,7 +158,6 @@ class YuriBot(commands.Bot):
 
         log.info("Shutdown initiated: stopping background tasks and closing bot.")
 
-        # Stop any tasks your cogs may have registered on the bot object
         with suppress(Exception):
             if "discussion_poster_loop" in globals():
                 loop_obj = globals()["discussion_poster_loop"]
@@ -189,8 +177,10 @@ class YuriBot(commands.Bot):
 # -----------------------------------------------------------------------------
 async def _run_bot() -> None:
     token = os.getenv("DISCORD_TOKEN")
-    log.info("sync env: mode=%s, guilds=%s, clear=%s",
-         os.getenv("COMMAND_SYNC_MODE"), os.getenv("SYNC_GUILDS"), os.getenv("CLEAR_GLOBALS_ONCE"))
+    log.info(
+        "sync env: clear_globals_once=%s, sync_guilds=%s",
+        os.getenv("CLEAR_GLOBALS_ONCE"), os.getenv("SYNC_GUILDS"),
+    )
     if not token:
         log.error("Set DISCORD_TOKEN env var.")
         raise SystemExit(1)
@@ -199,7 +189,6 @@ async def _run_bot() -> None:
     stop_event = asyncio.Event()
 
     def _signal_handler(signame: str):
-        # record signal for the bot; trigger graceful shutdown
         bot._shutdown_signal = signame
         log.warning("Received %s — requesting shutdown…", signame)
         stop_event.set()
