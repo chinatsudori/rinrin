@@ -173,7 +173,7 @@ BAGE_POOL: List[str] = [
     "This was her precious treasure, regained.",
     "You can celebrate a 95% Valentine's Day.",
     "Je t'aime.",
-    "hi nice auntie ! :henyaHeart:",
+    "我爱Bagelina阿姨! :henyaHeart:",
 ]
 OOKAMI_POOL: List[str] = [
     "Hai ookami ! a::wavehi:",
