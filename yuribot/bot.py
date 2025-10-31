@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 from contextlib import suppress
-from typing import Iterable, List
+from typing import Iterable
 
 import discord
 from discord.ext import commands
@@ -41,6 +41,13 @@ def build_intents() -> discord.Intents:
 INTENTS = build_intents()
 
 # -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def _schema_bump_suffix() -> str:
+    bump = (os.getenv("COMMAND_SCHEMA_BUMP") or "").strip()
+    return f" · v{bump}" if bump else ""
+
+# -----------------------------------------------------------------------------
 # Bot
 # -----------------------------------------------------------------------------
 class YuriBot(commands.Bot):
@@ -65,6 +72,7 @@ class YuriBot(commands.Bot):
             return False
         ch = self.get_channel(cid)
         if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+            # Try fetching if not cached yet
             with suppress(Exception):
                 ch = await self.fetch_channel(cid)  # type: ignore[assignment]
         if isinstance(ch, (discord.TextChannel, discord.Thread)):
@@ -75,21 +83,21 @@ class YuriBot(commands.Bot):
 
     # ---- lifecycle ----
     async def setup_hook(self):
-        # 0) DB first
+        # DB first
         ensure_db()
         log.info("Database ensured/connected.")
 
-        # 1) CLEAR GLOBALS ONCE (before any cogs register commands)
-        if (os.getenv("CLEAR_GLOBALS_ONCE") or "0") == "1":
+        # 0) One-time global clear BEFORE building the tree (your order)
+        if (os.getenv("CLEAR_GLOBALS_ONCE") or "").strip() == "1":
             try:
-                self.tree.clear_commands(guild=None)  # wipe global registry in-process
-                removed = await self.tree.sync()       # push the empty set globally
-                log.warning("Cleared all GLOBAL commands (pushed %d removals).", len(removed))
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
+                log.warning("Global command registry cleared (one-time).")
             except Exception:
                 log.exception("Failed clearing global commands")
 
-        # 2) LOAD COGS (build the command tree)
-        extensions: List[str] = [
+        # 1) Load cogs -> builds the in-process command tree
+        extensions = [
             "yuribot.cogs.admin",
             "yuribot.cogs.modlog",
             "yuribot.cogs.botlog",
@@ -110,11 +118,20 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.lifecycle",
         ]
         await self._load_extensions(extensions)
-        names = [c.qualified_name for c in self.tree.get_commands()]
-        log.info("Command tree built: %d commands registered in-process: %s", len(names), names)
 
-        # 3) SYNC TO GUILDS ONLY (no globals)
-        await self._sync_guilds_only()
+        # 1.5) Optional schema-bump to force Discord to accept a diff
+        suffix = _schema_bump_suffix()
+        if suffix:
+            changed = 0
+            for cmd in self.tree.walk_commands():
+                desc = (cmd.description or "").rstrip()
+                if not desc.endswith(suffix):
+                    cmd.description = (desc + suffix)[:100]  # safety cap
+                    changed += 1
+            log.info("schema-bump: tagged %d commands with %r", changed, suffix)
+
+        # 2) Sync to guilds (no globals)
+        await self._sync_commands()
 
     async def _load_extensions(self, names: Iterable[str]) -> None:
         for ext in names:
@@ -124,31 +141,65 @@ class YuriBot(commands.Bot):
             except Exception:
                 log.exception("Failed to load extension: %s", ext)
 
-    async def _sync_guilds_only(self) -> None:
+        # After loading, log the commands we actually registered
+        try:
+            built = sorted([c.qualified_name for c in self.tree.walk_commands()])
+            log.info("Command tree built: %d commands registered in-process: %s", len(built), built)
+        except Exception:
+            pass
+
+    async def _sync_commands(self) -> None:
         """
-        Push the current in-process tree to the specific guilds only.
+        Sync application commands without using global commands by default.
+
         Env:
-          SYNC_GUILDS  = comma-separated guild IDs (required)
+          COMMAND_SYNC_MODE   = "guilds" | "global"     (default: "guilds")
+          SYNC_GUILDS         = comma-separated guild IDs (e.g. "123,456")
         """
+        mode = (os.getenv("COMMAND_SYNC_MODE") or "guilds").strip().lower()
         raw = os.getenv("SYNC_GUILDS") or os.getenv("DEV_GUILD_ID")  # backward compat
         gids = [int(x.strip()) for x in (raw or "").split(",") if x.strip()]
-        if not gids:
-            log.error("No guild IDs provided. Set SYNC_GUILDS='gid1,gid2'.")
-            return
 
-        for gid in gids:
-            try:
+        log.info("sync env: mode=%s, guilds=%s", mode, gids or "(none)")
+
+        try:
+            if mode == "global":
+                synced = await self.tree.sync()
+                log.info("Globally synced %d commands.", len(synced))
+                return
+
+            if not gids:
+                log.error("No guild IDs provided. Set SYNC_GUILDS='gid1,gid2'.")
+                return
+
+            for gid in gids:
                 guild_obj = discord.Object(id=gid)
                 synced = await self.tree.sync(guild=guild_obj)
                 log.info("Synced %d commands to guild %s.", len(synced), gid)
-            except Exception:
-                log.exception("Guild sync failed for %s", gid)
+
+        except Exception:
+            log.exception("Command sync failed.")
 
     async def on_ready(self):
+        # Strong diagnostics: app identity + invite URL
+        try:
+            app = await self.application_info()
+            log.info(
+                "app: name=%s id=%s owner=%s (%s)",
+                getattr(app, "name", None),
+                getattr(app, "id", None),
+                getattr(app.owner, "name", None),
+                getattr(app.owner, "id", None),
+            )
+            log.info(
+                "oauth url: https://discord.com/oauth2/authorize?client_id=%s&scope=bot%%20applications.commands&permissions=0",
+                getattr(app, "id", None),
+            )
+        except Exception:
+            log.exception("could not fetch application_info")
+
         if self.user:
             log.info("Logged in as %s (%s)", self.user, self.user.id)
-        for g in self.guilds:
-            log.info("guild: %s (%s)", g.name, g.id)
 
     async def close(self):
         # Post a restart/shutdown notice before disconnecting
@@ -158,6 +209,7 @@ class YuriBot(commands.Bot):
 
         log.info("Shutdown initiated: stopping background tasks and closing bot.")
 
+        # Stop any tasks your cogs may have registered on the bot object
         with suppress(Exception):
             if "discussion_poster_loop" in globals():
                 loop_obj = globals()["discussion_poster_loop"]
@@ -178,8 +230,11 @@ class YuriBot(commands.Bot):
 async def _run_bot() -> None:
     token = os.getenv("DISCORD_TOKEN")
     log.info(
-        "sync env: clear_globals_once=%s, sync_guilds=%s",
-        os.getenv("CLEAR_GLOBALS_ONCE"), os.getenv("SYNC_GUILDS"),
+        "boot env: clear_globals_once=%s, schema_bump=%s, mode=%s, guilds=%s",
+        os.getenv("CLEAR_GLOBALS_ONCE"),
+        os.getenv("COMMAND_SCHEMA_BUMP"),
+        os.getenv("COMMAND_SYNC_MODE"),
+        os.getenv("SYNC_GUILDS"),
     )
     if not token:
         log.error("Set DISCORD_TOKEN env var.")
@@ -189,6 +244,7 @@ async def _run_bot() -> None:
     stop_event = asyncio.Event()
 
     def _signal_handler(signame: str):
+        # record signal for the bot; trigger graceful shutdown
         bot._shutdown_signal = signame
         log.warning("Received %s — requesting shutdown…", signame)
         stop_event.set()
