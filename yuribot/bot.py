@@ -189,6 +189,8 @@ class YuriBot(commands.Bot):
 # -----------------------------------------------------------------------------
 async def _run_bot() -> None:
     token = os.getenv("DISCORD_TOKEN")
+    log.info("sync env: mode=%s, guilds=%s, clear=%s",
+         os.getenv("COMMAND_SYNC_MODE"), os.getenv("SYNC_GUILDS"), os.getenv("CLEAR_GLOBALS_ONCE"))
     if not token:
         log.error("Set DISCORD_TOKEN env var.")
         raise SystemExit(1)
