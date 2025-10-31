@@ -170,9 +170,10 @@ L_POOL: List[str] = [
 ]
 BAGE_POOL: List[str] = [
     "*To me, you are a dream I yearn to hold and yet fear to lose. To you, I am someone who can come and go, and you won't pursue.*",
-    "This was her precious treasure, regained.",
-    "You can celebrate a 95% Valentine's Day.",
-    "Je t'aime.",
+    "*It wasn't because you were perfect that I loved you. It was because I loved you... that you were perfect to me.*",
+    "*This was her precious treasure, regained.*",
+    "*You can celebrate a 95% Valentine's Day.*",
+    "*Je t'aime.*",
     "我爱Bagelina阿姨! :henyaHeart:",
 ]
 OOKAMI_POOL: List[str] = [
