@@ -368,6 +368,50 @@ def ensure_db():
             PRIMARY KEY (guild_id, thread_id, release_id)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_series ON mu_thread_posts (series_id)")
+        # --- Voice & Activity minutes (new metrics use existing member_metrics_* tables) ---
+        # We will store minutes in member_metrics_daily/total using metric keys:
+        # 'voice_minutes', 'voice_stream_minutes', 'activity_minutes'
+
+        # --- RPG progression (per member) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_rpg_progress (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            xp       INTEGER NOT NULL DEFAULT 0,
+            level    INTEGER NOT NULL DEFAULT 1,
+            # base stats; recomputed or incremented on level up
+            str      INTEGER NOT NULL DEFAULT 5,
+            int      INTEGER NOT NULL DEFAULT 5,
+            cha      INTEGER NOT NULL DEFAULT 5,
+            vit      INTEGER NOT NULL DEFAULT 5,
+            dex      INTEGER NOT NULL DEFAULT 5,
+            wis      INTEGER NOT NULL DEFAULT 5,
+            last_level_up TEXT,
+            PRIMARY KEY (guild_id, user_id)
+        )""")
+
+        # --- Channel totals (for prime_channel & per-channel XP multipliers) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_channel_totals (
+            guild_id  INTEGER NOT NULL,
+            user_id   INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            messages  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, channel_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_channel_totals ON member_channel_totals (guild_id, user_id, messages DESC)")
+
+        # Optional: cache “activity app usage” counts per day (we’ll also track minutes)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS member_activity_apps_daily (
+            guild_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            app_name TEXT    NOT NULL,
+            day      TEXT    NOT NULL,   -- YYYY-MM-DD
+            minutes  INTEGER NOT NULL DEFAULT 0,
+            launches INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, app_name, day)
+        )""")
 
         con.commit()
 
