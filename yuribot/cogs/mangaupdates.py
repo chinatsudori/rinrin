@@ -1,4 +1,4 @@
-# mangaupdates.py
+# mangaupdates_cog.py
 from __future__ import annotations
 
 import asyncio
@@ -23,23 +23,37 @@ API_BASE = "https://api.mangaupdates.com/v1"
 DATA_FILE = Path("./data/mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
-# Turn EN filter on/off (heuristic)
+# --- Behavior toggles ---------------------------------------------------------
+# 1) If True, when a thread is first linked/seen, we index ALL releases, mark them posted,
+#    and set last_release_ts to newest. No posts are sent on the first cycle.
+FIRST_RUN_SEED_ALL = True
+
+# 2) Only post English-tagged releases, based on heuristic sniffing.
 FILTER_ENGLISH_ONLY = False
 
-# Max bytes we'll attempt to upload for a cover image (8 MiB is Discord's base limit)
+# 3) Weak match threshold for search/auto-infer; show top-5 candidates if below.
+WEAK_MATCH_THRESHOLD = 0.80
+
+# Max bytes we'll attempt to upload for a cover image (Discord base limit is ~8 MiB)
 MAX_COVER_BYTES = 7_500_000
 
 # ---- SQLite integer bounds (signed 64-bit)
 MAX_SQLITE_INT = (1 << 63) - 1
 
+# -----------------------------------------------------------------------------
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _strip(s: Optional[str]) -> str:
     return (s or "").strip()
 
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
+
 
 def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
     q = _norm(query)
@@ -54,12 +68,14 @@ def _best_match_score(query: str, title: str, aliases: List[str]) -> float:
             best = max(best, 0.8)
     return best
 
+
 def _sid_title_from_result(r: dict) -> Tuple[Optional[str], str]:
     rec = r.get("record") or {}
     sid = r.get("series_id") or r.get("id") or rec.get("series_id") or rec.get("id")
     sid = str(sid) if sid is not None else None
     title = r.get("title") or rec.get("title") or "Unknown"
     return sid, title
+
 
 def _stringify_aliases(raw) -> List[str]:
     out: List[str] = []
@@ -81,11 +97,13 @@ def _stringify_aliases(raw) -> List[str]:
             uniq.append(s)
     return uniq
 
+
 def _forum_post_name(s: str) -> str:
     name = re.sub(r"\s+", " ", (s or "").strip())
     if not name:
         name = "Untitled"
     return name[:100]
+
 
 _CH_PATTERNS = [
     r"(?:\bch(?:apter)?|\bc)\.?\s*(\d+(?:\.\d+)?)",
@@ -94,6 +112,7 @@ _CH_PATTERNS = [
 _VOL_PATTERNS = [
     r"(?:\bvol(?:ume)?|\bv)\.?\s*(\d+(?:\.\d+)?)",
 ]
+
 
 def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
     nums: List[float] = []
@@ -108,6 +127,7 @@ def _find_all_numbers(text: str, patterns: List[str]) -> List[float]:
                     pass
     return nums
 
+
 def _extract_max_chapter(text: str) -> Tuple[str, str]:
     nums = _find_all_numbers(text, _CH_PATTERNS)
     if not nums:
@@ -119,12 +139,14 @@ def _extract_max_chapter(text: str) -> Tuple[str, str]:
         return ch, sub
     return s, ""
 
+
 def _extract_max_volume(text: str) -> str:
     nums = _find_all_numbers(text, _VOL_PATTERNS)
     if not nums:
         return ""
     mx = max(nums)
     return f"{mx}".rstrip("0").rstrip(".")
+
 
 def _parse_ts(value: Optional[str]) -> Optional[int]:
     """Parse an ISO/RFC date string to epoch seconds; return None if unknown."""
@@ -142,6 +164,7 @@ def _parse_ts(value: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
+
 def _release_ts(rel: dict) -> int:
     v = rel.get("release_ts")
     if isinstance(v, (int, float)):
@@ -153,9 +176,11 @@ def _release_ts(rel: dict) -> int:
                 return ts
     return -1
 
+
 def _is_english_release(rel: dict) -> bool:
     txt = f"{rel.get('title','')} {rel.get('raw_title','')} {rel.get('description','')} {rel.get('lang_hint','')}".lower()
     return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
+
 
 def _format_rel_bits(rel: dict) -> Tuple[str, str]:
     vol = _strip(str(rel.get("volume") or ""))
@@ -220,29 +245,27 @@ def _seconds_from_any(ts: int | float | None) -> int:
         v = int(ts)
     except Exception:
         return -1
-    # Heuristic: anything >= 10^11 is probably ms (>= Sun Mar 3 5138 if seconds)
-    if v >= 100_000_000_000:
+    if v >= 100_000_000_000:  # probably ms
         v //= 1000
     return max(v, -1)
+
 
 def _stable_63bit_id(key: str) -> int:
     """Deterministic signed-64 safe integer from a string key."""
     h = hashlib.sha1(key.encode("utf-8")).digest()
-    # take 8 bytes -> 64 bits; force into signed-64 range
     v = int.from_bytes(h[:8], "big") & MAX_SQLITE_INT
     if v == 0:
         v = 1
     return v
 
+
 def _normalize_release_record(series_id: str, r: dict) -> dict:
     """Return a copy of r with safe release_id and release_ts."""
     out = dict(r)
-    # normalize ts
     ts = _release_ts(out)
     ts = _seconds_from_any(ts)
     out["release_ts"] = ts
 
-    # normalize id
     rid_raw = out.get("release_id", out.get("id"))
     rid: Optional[int] = None
     try:
@@ -252,7 +275,6 @@ def _normalize_release_record(series_id: str, r: dict) -> dict:
         rid = None
 
     if rid is None or rid <= 0 or rid > MAX_SQLITE_INT:
-        # build a deterministic key from the contents
         key = "|".join([
             str(series_id),
             str(out.get("id") or ""),
@@ -285,6 +307,7 @@ _FORUM_TAG_PRIORITY = [
     "tragedy", "comedy", "isekai", "harem", "ecchi",
     "psychological", "violence/gore", "historical", "nsfw",
 ]
+
 
 def _map_mu_to_forum(mu_tags: Set[str]) -> Set[str]:
     mt = {t.lower() for t in mu_tags}
@@ -447,7 +470,6 @@ class MUClient:
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # Normalize all JSON results here
                         results = []
                         for r in data.get("results", []) if isinstance(data, dict) else []:
                             nr = _normalize_release_record(series_id, r)
@@ -528,10 +550,8 @@ class MUClient:
                 ts = None
 
             raw = f"{title} {desc}".strip()
-
             chapter, subchapter = _extract_max_chapter(raw)
             volume = _extract_max_volume(raw)
-
             m_group = re.search(r"\[(.*?)\]", title) or re.search(r"\[(.*?)\]", desc)
             group = (m_group.group(1).strip() if m_group else "")
 
@@ -585,10 +605,12 @@ def _load_state() -> Dict[str, dict]:
             return {}
     return {}
 
+
 def _save_state(state: Dict[str, dict]) -> None:
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with DATA_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
 
 def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
     ch_id = models.get_mu_forum_channel(guild.id)
@@ -601,6 +623,7 @@ def _resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
         if isinstance(ch, discord.ForumChannel) and ch.name.lower().strip() == lname:
             return ch
     return None
+
 
 async def _fetch_cover_image(session: aiohttp.ClientSession, series_json: dict) -> Optional[discord.File]:
     urls: List[str] = []
@@ -661,18 +684,15 @@ class MUWatcher(commands.Cog):
 
     group = app_commands.Group(name="mu", description="MangaUpdates watcher")
 
+    # -------------------------------------------------------------------------
+    # Create a new forum post by searching a MU title (existing behavior)
+    # -------------------------------------------------------------------------
     @group.command(
         name="link",
         description="Link a series and create a forum post in the configured MU forum for updates.",
     )
-    @app_commands.describe(
-        series="Series name or alias (MangaUpdates)",
-    )
-    async def link(
-        self,
-        interaction: discord.Interaction,
-        series: str,
-    ):
+    @app_commands.describe(series="Series name or alias (MangaUpdates)")
+    async def link(self, interaction: discord.Interaction, series: str):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
@@ -693,9 +713,9 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
-        top = results[:5]
+        # Score top 5 with aliases
         scored: List[Tuple[dict, float, List[str]]] = []
-        for r in top:
+        for r in results[:5]:
             sid, title = _sid_title_from_result(r)
             if not sid:
                 continue
@@ -714,10 +734,25 @@ class MUWatcher(commands.Cog):
             return await interaction.followup.send(S("mu.link.no_results", q=series), ephemeral=True)
 
         scored.sort(key=lambda t: t[1], reverse=True)
-        choice, _score, aliases = scored[0]
+        choice, best_score, aliases = scored[0]
+
+        # --- Optional polish: ambiguity guard
+        if best_score < WEAK_MATCH_THRESHOLD:
+            lines = []
+            for cand, sc, _als in scored:
+                sid = cand["sid"]
+                title = cand["title"]
+                lines.append(f"- **{title}** — id `{sid}` · score {sc:.2f}")
+            msg = (
+                "Match is ambiguous. Re-run with an exact MU id using `/mu link` (or use `/mu attach` in a thread):\n"
+                + "\n".join(lines)
+            )
+            return await interaction.followup.send(msg, ephemeral=True)
+
         sid = choice["sid"]
         title = choice["title"]
 
+        # Already linked?
         gid = str(interaction.guild_id)
         already = None
         for e in self.state.get(gid, {}).get("entries", []):
@@ -726,12 +761,12 @@ class MUWatcher(commands.Cog):
                 break
         if already:
             t_id = int(already.get("thread_id"))
-            mention = f"<#{t_id}>"
             return await interaction.followup.send(
-                S("mu.link.already_linked", title=title, sid=sid, thread=mention),
+                S("mu.link.already_linked", title=title, sid=sid, thread=f"<#{t_id}>"),
                 ephemeral=True,
             )
 
+        # Pull full to get cover + tags
         full_json: dict = {}
         try:
             full_json = await client.get_series(sid)
@@ -779,15 +814,12 @@ class MUWatcher(commands.Cog):
         except discord.HTTPException as e:
             return await interaction.followup.send(f"HTTP error creating forum post: {e}", ephemeral=True)
 
-        if hasattr(created_any, "thread"):
-            thread_obj = created_any.thread  # type: ignore[attr-defined]
-        else:
-            thread_obj = created_any  # type: ignore[assignment]
+        thread_obj = created_any.thread if hasattr(created_any, "thread") else created_any  # type: ignore
 
         try:
             models.mu_register_thread_series(interaction.guild_id, thread_obj.id, sid, title)
         except Exception:
-            pass  # best-effort; state file still preserves mapping for watcher
+            pass  # best-effort
 
         g = self.state.setdefault(gid, {"entries": []})
         g["entries"] = [e for e in g["entries"] if int(e.get("thread_id")) != thread_obj.id]
@@ -808,20 +840,108 @@ class MUWatcher(commands.Cog):
         applied_names = ", ".join([t.name for t in applied]) if applied else "none"
         await interaction.followup.send(
             S("mu.link.linked_ok", title=title, sid=sid, thread=thread_obj.name, aliases=alias_preview)
-            + f"\n→ {thread_obj.mention}\nTags applied: {applied_names}",
+            + "\n→ " + thread_obj.mention + f"\nTags applied: {applied_names}",
             ephemeral=True,
         )
 
+    # -------------------------------------------------------------------------
+    # Manual attach: link THIS thread to a MU series (no new post)
+    # -------------------------------------------------------------------------
+    @group.command(name="attach", description="Link THIS forum thread to a MangaUpdates series (no new post).")
+    @app_commands.describe(series="Series id or name. If a name, I’ll search and show choices if ambiguous.")
+    async def attach(self, interaction: discord.Interaction, series: str):
+        if not interaction.guild or not isinstance(interaction.channel, discord.Thread):
+            return await interaction.response.send_message("Run this inside the forum thread you want to attach.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        session = await self._session_ensure()
+        client = MUClient(session)
+
+        # Accept direct numeric id
+        sid = None
+        title = "Unknown"
+
+        if series.isdigit():
+            sid = series
+            try:
+                full = await client.get_series(sid)
+                title = str(full.get("title") or "Unknown")
+            except Exception as e:
+                return await interaction.followup.send(f"MU id `{sid}` not found: {e}", ephemeral=True)
+        else:
+            # Search with ambiguity guard
+            try:
+                results = await client.search_series(series)
+            except Exception as e:
+                return await interaction.followup.send(f"Search failed: {e}", ephemeral=True)
+            if not results:
+                return await interaction.followup.send(f"No MU results for `{series}`.", ephemeral=True)
+
+            scored: List[Tuple[dict, float, List[str]]] = []
+            for r in results[:5]:
+                rsid, rtitle = _sid_title_from_result(r)
+                if not rsid:
+                    continue
+                aliases = []
+                score = 0.0
+                try:
+                    full = await client.get_series(rsid)
+                    raw_aliases = full.get("associated_names") or full.get("associated") or full.get("associated_names_ascii") or []
+                    aliases = _stringify_aliases(raw_aliases)
+                    score = _best_match_score(series, rtitle, aliases)
+                except Exception:
+                    score = _best_match_score(series, rtitle, [])
+                scored.append(({"sid": rsid, "title": rtitle}, score, aliases))
+
+            scored.sort(key=lambda t: t[1], reverse=True)
+            choice, best_score, _ = scored[0]
+
+            if best_score < WEAK_MATCH_THRESHOLD:
+                lines = []
+                for cand, sc, _als in scored:
+                    rsid = cand["sid"]
+                    rtitle = cand["title"]
+                    lines.append(f"- **{rtitle}** — id `{rsid}` · score {sc:.2f}")
+                msg = "Match is ambiguous. Re-run with an exact MU id:\n" + "\n".join(lines)
+                return await interaction.followup.send(msg, ephemeral=True)
+
+            sid = choice["sid"]
+            title = choice["title"]
+
+        # Save in DB + state
+        try:
+            models.mu_register_thread_series(interaction.guild_id, interaction.channel.id, sid, title)
+        except Exception:
+            pass
+
+        gid = str(interaction.guild_id)
+        e = {
+            "series_id": sid,
+            "series_title": title,
+            "aliases": [],
+            "forum_channel_id": interaction.channel.parent_id or 0,
+            "thread_id": interaction.channel.id,
+            "last_release_id": None,
+            "last_release_ts": None,
+        }
+        g = self.state.setdefault(gid, {"entries": []})
+        g["entries"] = [x for x in g["entries"] if int(x.get("thread_id")) != interaction.channel.id]
+        g["entries"].append(e)
+        _save_state(self.state)
+
+        await interaction.followup.send(f"Linked this thread to **{title}** (MU id {sid}).", ephemeral=True)
+
+    # -------------------------------------------------------------------------
+    # Unlink current (or selected) thread
+    # -------------------------------------------------------------------------
     @group.command(name="unlink", description="Unlink the current forum post (or selected thread) from MangaUpdates.")
     @app_commands.describe(thread="Forum post to unlink (defaults to current)")
     async def unlink(self, interaction: discord.Interaction, thread: Optional[discord.Thread] = None):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        tgt = thread
-        if tgt is None and isinstance(interaction.channel, discord.Thread):
-            tgt = interaction.channel
-
+        tgt = thread or (interaction.channel if isinstance(interaction.channel, discord.Thread) else None)
         if not isinstance(tgt, discord.Thread):
             return await interaction.response.send_message(S("mu.unlink.need_thread"), ephemeral=True)
 
@@ -834,6 +954,9 @@ class MUWatcher(commands.Cog):
         diff = before - len(g["entries"])
         await interaction.response.send_message(S("mu.unlink.done", count=diff), ephemeral=True)
 
+    # -------------------------------------------------------------------------
+    # Status
+    # -------------------------------------------------------------------------
     @group.command(name="status", description="Show current watches for this server.")
     async def status(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -852,19 +975,47 @@ class MUWatcher(commands.Cog):
             lines.append(S("mu.status.line", title=discord.utils.escape_markdown(title), sid=sid, thread=f"<#{tid}>"))
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    # -------------------------------------------------------------------------
+    # Export mapping (thread ↔ title ↔ MU URL)
+    # -------------------------------------------------------------------------
+    @group.command(name="export_links", description="Export CSV of forum threads ↔ MU title ↔ MU link.")
+    async def export_links(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("Guild only.", ephemeral=True)
+
+        import csv
+        from io import StringIO, BytesIO
+
+        rows = models.mu_list_links_for_guild(interaction.guild_id)
+        if not rows:
+            return await interaction.response.send_message("No links found.", ephemeral=True)
+
+        buf = StringIO()
+        w = csv.writer(buf)
+        w.writerow(["guild_id", "thread_id", "thread_name", "series_id", "series_title", "mu_url"])
+        for (thread_id, series_id, series_title) in rows:
+            th = interaction.guild.get_thread(thread_id) or self.bot.get_channel(thread_id)
+            tname = th.name if isinstance(th, discord.Thread) else ""
+            url = f"https://www.mangaupdates.com/series.html?id={series_id}"
+            w.writerow([interaction.guild_id, thread_id, tname, series_id, series_title, url])
+
+        data = buf.getvalue().encode("utf-8")
+        file = discord.File(BytesIO(data), filename=f"mu-links-{interaction.guild_id}.csv")
+        await interaction.response.send_message(file=file, ephemeral=True)
+
+    # -------------------------------------------------------------------------
+    # Force check for this thread — build DB, post ONLY new updates
+    # -------------------------------------------------------------------------
     @group.command(
         name="check",
-        description="Force a check for this thread; if no update, post the latest known chapter.",
+        description="Force a check for this thread; only post if there are NEW releases.",
     )
     @app_commands.describe(thread="Forum post to check (defaults to the current thread)")
     async def check(self, interaction: discord.Interaction, thread: Optional[discord.Thread] = None):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        tgt = thread
-        if tgt is None and isinstance(interaction.channel, discord.Thread):
-            tgt = interaction.channel
-
+        tgt = thread or (interaction.channel if isinstance(interaction.channel, discord.Thread) else None)
         if not isinstance(tgt, discord.Thread) or not isinstance(tgt.parent, discord.ForumChannel):
             return await interaction.response.send_message(S("mu.check.need_thread"), ephemeral=True)
 
@@ -875,7 +1026,6 @@ class MUWatcher(commands.Cog):
 
         gid = str(interaction.guild_id)
         entries = self.state.get(gid, {}).get("entries", [])
-
         for e in entries:
             if int(e.get("thread_id")) == tgt.id:
                 we = WatchEntry(
@@ -908,25 +1058,24 @@ class MUWatcher(commands.Cog):
         if not results:
             return await interaction.followup.send(S("mu.error.no_releases"), ephemeral=True)
 
-        # Already normalized in client, but ensure here too if models call reuses elsewhere
+        # Normalize + persist into DB
         results = [_normalize_release_record(sid, r) for r in results]
         models.mu_bulk_upsert_releases(sid, results)
 
-        if we.last_release_ts is None:
+        # First-run behavior
+        if we.last_release_ts is None and FIRST_RUN_SEED_ALL:
+            # mark ALL as posted, set last_release_ts to newest, and bail
             newest_ts = max((_release_ts(r) for r in results), default=-1)
-            newest = None
             for r in results:
-                if _release_ts(r) == newest_ts:
-                    newest = r
+                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(r.get("release_id")))
+            for e in self.state[gid]["entries"]:
+                if int(e.get("thread_id")) == we.thread_id:
+                    e["last_release_ts"] = newest_ts
                     break
-            if newest is not None:
-                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(newest.get("release_id")))
-                for e in self.state[gid]["entries"]:
-                    if int(e.get("thread_id")) == we.thread_id:
-                        e["last_release_ts"] = newest_ts
-                        break
-                _save_state(self.state)
+            _save_state(self.state)
+            return await interaction.followup.send("Indexed existing releases. No new updates.", ephemeral=True)
 
+        # Normal "post only new" path
         unposted = models.mu_list_unposted_for_thread(
             interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
         )
@@ -966,22 +1115,190 @@ class MUWatcher(commands.Cog):
 
             return await interaction.followup.send(S("mu.check.posted", count=posted), ephemeral=True)
 
-        latest = max(results, key=lambda x: _release_ts(x))
-        chbits, extras = _format_rel_bits(latest)
-        embed = discord.Embed(
-            title=S("mu.latest.title", series=we.series_title, chbits=chbits),
-            description=extras or None,
-            color=discord.Color.dark_gray(),
-            timestamp=_now_utc(),
-        )
-        embed.set_footer(text=S("mu.latest.footer"))
+        await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
+
+    # -------------------------------------------------------------------------
+    # Repair/index: scan forum, infer titles, store all releases, mark posted, NO messages
+    # -------------------------------------------------------------------------
+    @group.command(
+        name="repair_index",
+        description="Scan a forum, infer MU titles from thread names, index all releases WITHOUT posting (DB repair).",
+    )
+    @app_commands.describe(
+        forum="Forum channel to scan (defaults to configured MU forum).",
+        limit_threads="Max threads to process (0=all).",
+        english_only="Only index English-tagged releases (heuristic).",
+        dry_run="If true, do everything except write DB/state."
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def repair_index(
+        self,
+        interaction: discord.Interaction,
+        forum: Optional[discord.ForumChannel] = None,
+        limit_threads: int = 0,
+        english_only: bool = False,
+        dry_run: bool = False,
+    ):
+        if not interaction.guild:
+            return await interaction.response.send_message("Guild only.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        fch = forum or _resolve_mu_forum(interaction.guild)
+        if not isinstance(fch, discord.ForumChannel):
+            return await interaction.followup.send("MU forum not configured/found.", ephemeral=True)
+
+        # Collect threads: active + archived (public)
+        threads: list[discord.Thread] = list(fch.threads)
         try:
-            await tgt.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            async for th in fch.archived_threads(limit=None, private=False):
+                threads.append(th)
         except Exception:
             pass
 
-        await interaction.followup.send(S("mu.check.no_new"), ephemeral=True)
+        # Dedupe
+        seen = set()
+        uniq = []
+        for th in threads:
+            if th.id not in seen:
+                uniq.append(th)
+                seen.add(th.id)
+        if limit_threads > 0:
+            uniq = uniq[:limit_threads]
 
+        session = await self._session_ensure()
+        client = MUClient(session)
+
+        processed = 0
+        attached = 0
+        indexed = 0
+        ambiguous: List[str] = []
+
+        for th in uniq:
+            processed += 1
+            name = th.name or ""
+            # Skip if already mapped
+            sid = models.mu_get_thread_series(th.id, interaction.guild_id)
+            if sid is None:
+                # Infer MU series by title — with ambiguity guard
+                try:
+                    results = await client.search_series(name)
+                except Exception:
+                    continue
+                if not results:
+                    ambiguous.append(f"- `{th.id}` **{name}** — no results")
+                    continue
+
+                # score top5
+                scored: List[Tuple[dict, float, List[str]]] = []
+                for r in results[:5]:
+                    rsid, rtitle = _sid_title_from_result(r)
+                    if not rsid:
+                        continue
+                    aliases = []
+                    score = 0.0
+                    try:
+                        full = await client.get_series(rsid)
+                        raw_aliases = full.get("associated_names") or full.get("associated") or full.get("associated_names_ascii") or []
+                        aliases = _stringify_aliases(raw_aliases)
+                        score = _best_match_score(name, rtitle, aliases)
+                    except Exception:
+                        score = _best_match_score(name, rtitle, [])
+                    scored.append(({"sid": rsid, "title": rtitle}, score, aliases))
+
+                scored.sort(key=lambda t: t[1], reverse=True)
+                choice, best_score, _ = scored[0]
+
+                if best_score < WEAK_MATCH_THRESHOLD:
+                    lines = []
+                    for cand, sc, _als in scored:
+                        rsid = cand["sid"]
+                        rtitle = cand["title"]
+                        lines.append(f"    - **{rtitle}** — id `{rsid}` · score {sc:.2f}")
+                    ambiguous.append(f"- `{th.id}` **{name}** is ambiguous:\n" + "\n".join(lines))
+                    continue
+
+                sid = choice["sid"]
+                title = choice["title"]
+
+                if not dry_run:
+                    try:
+                        full = await client.get_series(sid)
+                        title = str(full.get("title") or title or "Unknown")
+                    except Exception:
+                        pass
+                    try:
+                        models.mu_register_thread_series(interaction.guild_id, th.id, sid, title)
+                        attached += 1
+                    except Exception:
+                        pass
+                else:
+                    attached += 1  # would-attach
+
+            # Pull releases and index them — never post
+            sid = sid or models.mu_get_thread_series(th.id, interaction.guild_id)
+            if not sid:
+                continue
+
+            try:
+                rels = await client.get_series_releases(sid, page=1, per_page=50)
+            except Exception:
+                continue
+
+            items = rels.get("results", []) if isinstance(rels, dict) else []
+            if english_only:
+                items = [r for r in items if _is_english_release(r)]
+            if not items:
+                continue
+
+            if not dry_run:
+                models.mu_bulk_upsert_releases(sid, items)
+                # Mark ALL as posted in this thread so the watcher won’t flood
+                max_ts = max(int(r.get("release_ts") or -1) for r in items)
+                for r in items:
+                    rid = int(r.get("release_id"))
+                    models.mu_mark_posted(interaction.guild_id, th.id, sid, rid)
+
+                # Update state.last_release_ts
+                gid = str(interaction.guild_id)
+                g = self.state.setdefault(gid, {"entries": []})
+                found = False
+                for e in g["entries"]:
+                    if int(e.get("thread_id")) == th.id:
+                        prev = int(e.get("last_release_ts") or -1)
+                        e["last_release_ts"] = max(prev, max_ts)
+                        found = True
+                        break
+                if not found:
+                    g["entries"].append({
+                        "series_id": sid,
+                        "series_title": name,
+                        "aliases": [],
+                        "forum_channel_id": fch.id,
+                        "thread_id": th.id,
+                        "last_release_id": None,
+                        "last_release_ts": max_ts,
+                    })
+                _save_state(self.state)
+
+            indexed += 1
+
+        msg_lines = [
+            ("DRY RUN — " if dry_run else "") + f"Processed **{processed}** threads in <#{fch.id}>.",
+            f"Attached mappings: **{attached}**.",
+            f"Indexed releases (no posts): **{indexed}**.",
+        ]
+        if ambiguous:
+            preview = "\n".join(ambiguous[:10])
+            more = len(ambiguous) - 10
+            if more > 0:
+                preview += f"\n… and {more} more ambiguous threads."
+            msg_lines.append("\nAmbiguous or no-result threads:\n" + preview)
+
+        await interaction.followup.send("\n".join(msg_lines), ephemeral=True)
+
+    # -------------------------------------------------------------------------
+    # Posting helpers
+    # -------------------------------------------------------------------------
     async def _post_release(self, thread: discord.Thread, we: WatchEntry, rel: dict) -> bool:
         if FILTER_ENGLISH_ONLY and not _is_english_release(rel):
             return False
@@ -1048,6 +1365,9 @@ class MUWatcher(commands.Cog):
         except Exception:
             return 0
 
+    # -------------------------------------------------------------------------
+    # Poll loop — only posts new (first-run obeys FIRST_RUN_SEED_ALL)
+    # -------------------------------------------------------------------------
     @tasks.loop(seconds=POLL_SECONDS)
     async def poll_updates(self):
         if not self.bot.is_ready():
@@ -1093,23 +1413,20 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            # Already normalized in client
             models.mu_bulk_upsert_releases(sid, results)
 
-            if we.last_release_ts is None:
+            if we.last_release_ts is None and FIRST_RUN_SEED_ALL:
                 newest_ts = max((_release_ts(r) for r in results), default=-1)
-                newest = None
                 for r in results:
-                    if _release_ts(r) == newest_ts:
-                        newest = r
-                        break
-                if newest is not None:
-                    models.mu_mark_posted(gid, we.thread_id, sid, int(newest.get("release_id")))
+                    models.mu_mark_posted(gid, we.thread_id, sid, int(r.get("release_id")))
+                try:
                     for ee in self.state[str(gid)]["entries"]:
                         if int(ee["thread_id"]) == we.thread_id:
                             ee["last_release_ts"] = newest_ts
                             break
                     _save_state(self.state)
+                except Exception:
+                    pass
                 continue  # skip posting on the first cycle
 
             unposted = models.mu_list_unposted_for_thread(
