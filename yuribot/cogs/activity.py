@@ -39,6 +39,8 @@ MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 DAY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 WEEK_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
 PT_TZNAME = "America/Los_Angeles"
+_ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")  # zero-width
+WHITESPACE_PUNCT_RE = re.compile(r"[\s\.,;:!?\-\(\)\[\]\{\}_+=/\\|~`\"'<>]+", flags=re.UNICODE)
 
 # GIF detection helpers
 GIF_DOMAINS = (
@@ -58,6 +60,24 @@ except Exception:
 LESBIAN_COLORS = ["#D52D00","#EF7627","#FF9A56","#FFFFFF","#D162A4","#B55690","#A30262"]
 
 # ---------------- utils ----------------
+
+
+def _strip_custom_emojis(text: str) -> str:
+    # remove <a?:name:1234567890>
+    return CUSTOM_EMOJI_RE.sub("", text or "")
+
+def _strip_unicode_emojis(text: str) -> str:
+    return UNICODE_EMOJI_RE.sub("", text or "")
+
+def _is_emoji_only(text: str | None) -> bool:
+    if not text:
+        return False
+    t = _ZW_RE.sub("", text)
+    t = _strip_custom_emojis(t)
+    t = _strip_unicode_emojis(t)
+    t = WHITESPACE_PUNCT_RE.sub("", t)
+    return t == ""
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -248,6 +268,12 @@ class ActivityCog(commands.Cog):
                 total_xp_for_msg += int(base_emoji * mult)
         except Exception:
             log.exception("bump.emoji_chat_failed", extra={"guild_id": gid, "user_id": uid})
+        # 4b) emoji-only message => DEX-flavored signal (no extra XP)
+        try:
+            if message.content and _is_emoji_only(message.content):
+                models.bump_member_emoji_only(gid, uid, when_iso=when, inc=1)
+        except Exception:
+            log.exception("bump.emoji_only_failed", extra={"guild_id": gid, "user_id": uid})
 
         # 5) stickers
         try:
