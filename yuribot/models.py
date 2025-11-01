@@ -1247,6 +1247,7 @@ XP_RULES = {
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
     "activity_minutes": 1,
+    "gifs": 1,
 }
 
 def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int]:
@@ -1276,7 +1277,7 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
     # Stat signals (simple additive; adjust weights later if you want)
     scores = {
         "str": messages + emoji_chat,                       # throughput + expressive chat
-        "int": words,                                       # depth
+        "int": sqrt(words),                                 # depth
         "cha": mentions_recv + reacts_recv,                 # recognition
         "vit": voice_min + stream_min,                      # presence
         "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse + emoji-only flavor
