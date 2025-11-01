@@ -1248,7 +1248,7 @@ XP_RULES = {
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
     "activity_minutes": 1,
-    "gifs": 1,
+    "gif_use": 1,
 }
 
 def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int]:
