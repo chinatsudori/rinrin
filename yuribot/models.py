@@ -1673,7 +1673,21 @@ def bump_gif_usage(guild_id: int, when_iso: str, gif_key: str, source: str, inc:
             DO UPDATE SET count = count + excluded.count
         """, (guild_id, month, gif_key[:512], source[:32], inc))
         con.commit()
-
+def mu_get_release(series_id: str, release_id: int) -> dict | None:
+    with connect() as con:
+        cur = con.cursor()
+        row = cur.execute("""
+            SELECT title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts
+            FROM mu_releases WHERE series_id=? AND release_id=?
+        """, (str(series_id), int(release_id))).fetchone()
+        if not row:
+            return None
+        return {
+            "title": row[0], "raw_title": row[1], "description": row[2],
+            "volume": row[3], "chapter": row[4], "subchapter": row[5],
+            "group": row[6], "url": row[7], "release_ts": row[8],
+            "release_id": int(release_id), "series_id": str(series_id),
+        }
 def top_gifs(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, str, int]]:
     """Returns [(gif_key, source, count)] for the month, desc."""
     with connect() as con:
