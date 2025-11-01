@@ -552,24 +552,39 @@ class ActivityCog(commands.Cog):
         embed = discord.Embed(title=S("activity.rank.title"), description="\n".join(lines), color=discord.Color.gold())
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
-    # ------- /activity me_plus (full profile) -------
-    @group.command(name="me_plus", description="Your full profile: level, stats, derived metrics, voice, activities.")
-    @app_commands.describe(month="Highlight YYYY-MM (optional)", post="Post publicly?")
+    # ------- /activity me (profile) -------
+    @group.command(
+        name="me",
+        description="Profile: level, stats, derived metrics, voice, activities. You can inspect someone else."
+    )
+    @app_commands.describe(
+        user="Whose profile to view (default: you)",
+        month="Highlight YYYY-MM (optional)",
+        post="Post publicly?"
+    )
     @app_commands.autocomplete(month=_month_autocomplete)
-    async def me_plus(self, interaction: discord.Interaction, month: Optional[str] = None, post: bool = False):
+    async def me(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+        month: Optional[str] = None,
+        post: bool = False,
+    ):
         if not await _require_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
-        gid, uid = interaction.guild_id, interaction.user.id
+
+        target: discord.Member = user or interaction.user  # inspect others if provided
+        gid, uid = interaction.guild_id, target.id
         month = month or _month_default()
         if not MONTH_RE.match(month):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
-        # RPG
+    # RPG
         rpg = models.get_rpg_progress(gid, uid)
         lvl, cur, need = models.xp_progress(rpg["xp"])
 
-        # Totals for derived metrics
+    # Totals helper
         def tot(metric: str) -> int:
             with models.connect() as con:
                 cur_ = con.cursor()
@@ -579,27 +594,26 @@ class ActivityCog(commands.Cog):
                 """, (gid, uid, metric)).fetchone()
                 return int(row[0]) if row else 0
 
-        messages = tot("messages")
-        words = tot("words")
-        mentions_recv = tot("mentions")
-        mentions_sent = tot("mentions_sent")
-        emoji_chat = tot("emoji_chat")
-        emoji_react = tot("emoji_react")
-        reacts_recv = tot("reactions_received")
-        voice_min = tot("voice_minutes")
-        stream_min = tot("voice_stream_minutes")
-        act_min = tot("activity_minutes")
+        messages        = tot("messages")
+        words           = tot("words")
+        mentions_recv   = tot("mentions")
+        mentions_sent   = tot("mentions_sent")
+        emoji_chat      = tot("emoji_chat")
+        emoji_react     = tot("emoji_react")
+        reacts_recv     = tot("reactions_received")
+        voice_min       = tot("voice_minutes")
+        stream_min      = tot("voice_stream_minutes")
+        act_min         = tot("activity_minutes")
+    
+    # Deriveds (guard zero-div)
+        _safe = lambda a, b: (a / b) if b > 0 else 0.0
+        engagement_ratio = _safe(reacts_recv, messages)      # reactions received per message
+        reply_density    = _safe(mentions_sent, messages)    # mentions sent per message
+        mention_depth    = _safe(mentions_recv, messages)    # mentions received per message
+        media_ratio      = 0.0                               # reserved
+        burstiness       = 0.0                               # reserved
 
-        # Deriveds (guard zero-div)
-        def _safe(a, b): return (a / b) if b > 0 else 0.0
-        engagement_ratio = _safe(reacts_recv, messages)
-        reply_density = _safe(mentions_sent, messages)
-        mention_depth = _safe(mentions_sent, messages)
-        media_ratio = 0.0
-        burstiness = 0.0
-        response_latency = "N/A"
-
-        # Prime hour & channel
+    # Prime hour & channel
         try:
             hist = models.member_hour_histogram_total(gid, uid, tz="America/Los_Angeles")
             s1, e1, _ = _prime_window_from_hist(list(hist), window=1)
@@ -609,15 +623,30 @@ class ActivityCog(commands.Cog):
         ch_id = models.prime_channel_total(gid, uid)
         prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
-        # Embed
+    # Build embed
+        who = target.mention
         embed = discord.Embed(
-            title=S("activity.profile.title", user=interaction.user),
+            title=S("activity.profile.title", user=who),
             color=discord.Color.purple()
         )
+
+    # Single combined Level/XP field with progress bar
+        steps = 20
+        filled = steps if need == 0 else max(0, min(steps, int(round(steps * (cur / need)))))
         pct = int(round((cur / need) * 100)) if need > 0 else 100
-        embed.add_field(name=S("activity.profile.level"), value=f"**Lv {lvl}** — {rpg['xp']} XP\nProgress: {cur}/{need} ({pct}%)", inline=False)
-        stats = f"**STR** {rpg['str']}  **DEX** {rpg['dex']}  **INT** {rpg['int']}  **WIS** {rpg['wis']}  **CHA** {rpg['cha']}  **VIT** {rpg['vit']}"
+        bar = "▰" * filled + "▱" * (steps - filled)
+        embed.add_field(
+            name="Level & Progress",
+            value=f"**Lv {lvl}** — {rpg['xp']} XP\n{bar}\n{cur}/{need} ({pct}%)",
+            inline=False
+        )
+
+        stats = (
+            f"**STR** {rpg['str']}  **DEX** {rpg['dex']}  **INT** {rpg['int']}  "
+            f"**WIS** {rpg['wis']}  **CHA** {rpg['cha']}  **VIT** {rpg['vit']}"
+        )
         embed.add_field(name=S("activity.profile.stats"), value=stats, inline=False)
+
         derived = (
             f"Engagement ratio: **{engagement_ratio:.2f}**\n"
             f"Reply density: **{reply_density:.2f}**\n"
@@ -628,26 +657,20 @@ class ActivityCog(commands.Cog):
             f"Prime channel: {prime_channel}"
         )
         embed.add_field(name=S("activity.profile.derived"), value=derived, inline=False)
-        embed.add_field(name=S("activity.profile.voice"), value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min", inline=True)
-        embed.add_field(name=S("activity.profile.apps"), value=f"Activities: **{act_min}** min", inline=True)
-        # Level
-        pct = int(round((cur / need) * 100)) if need > 0 else 100
-        # 20-step progress bar
-        steps = 20
-        filled = steps if need == 0 else max(0, min(steps, int(round(steps * (cur / need)))))
-        bar = "▰" * filled + "▱" * (steps - filled)
-
+    
         embed.add_field(
-            name=S("activity.profile.level"),
-            value=(
-                f"**Lv {lvl}** — {rpg['xp']} XP\n"
-                f"Progress: {cur}/{need} ({pct}%)\n"
-                f"{bar}"
-            ),
-            inline=False
+            name=S("activity.profile.voice"),
+            value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min",
+            inline=True
+        )
+        embed.add_field(
+            name=S("activity.profile.apps"),
+            value=f"Activities: **{act_min}** min",
+            inline=True
         )
 
         await interaction.followup.send(embed=embed, ephemeral=not post)
+
 
     # ------- Master export (everything) -------
     @group.command(name="export_master", description="Export a master report: totals, RPG, derived.")
