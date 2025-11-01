@@ -186,12 +186,15 @@ class CleanupCog(commands.Cog):
             # 4) respond with summary (and optional CSV)
             total = sum(d for _, d in report)
             lines = [f"- {t}: {d}" for (t, d) in report if d > 0]
+            details = "(none)" if not lines else "Details:\n" + "\n".join(lines)
+
             msg = (
                 f"{'DRY RUN — ' if dry_run else ''}Purged activity rows for guild `{gid}`.\n"
                 f"Tables touched: {len(report)}\n"
                 f"Total rows {'to be ' if dry_run else ''}deleted: **{total}**\n"
-                f"{'(none)' if not lines else 'Details:\\n' + '\\n'.join(lines)}"
+                f"{details}"
             )
+
 
             # Optional CSV export
             if export_report:
