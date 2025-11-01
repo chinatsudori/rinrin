@@ -9,7 +9,6 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       TZ: America/Los_Angeles
       BOT_DB_PATH: /app/data/bot.sqlite3
-      DB_REQUIRE_PERSISTENCE: "1" 
     volumes:
       - botdata:/app/data            # this is the persistent mount
     restart: unless-stopped
