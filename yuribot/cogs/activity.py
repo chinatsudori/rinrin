@@ -978,3 +978,6 @@ class ActivityCog(commands.Cog):
             await interaction.response.send_message("You need **Manage Server** to do that.", ephemeral=True)
         else:
             raise error
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ActivityCog(bot))
