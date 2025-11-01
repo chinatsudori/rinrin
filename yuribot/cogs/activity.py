@@ -24,8 +24,9 @@ XP_MULTIPLIERS: Dict[int, float] = {}  # channel_id -> 2.0 / 4.0 / 8.0 etc.
 MULTIPLIER_DEFAULT = 1.0
 
 # Role multipliers (max applied across user's roles)
-ROLE_XP_MULTIPLIERS: Dict[int, float] = {}  # role_id -> 1.25 / 1.5 / 2.0 ...
-
+ROLE_XP_MULTIPLIERS: Dict[int, float] = {
+    1418285755339374785: 2.0,  # Server Boosters 
+}
 # Pinned message bonus
 PIN_MULTIPLIER: float = 2.0     # total multiplier relative to original message XP
 PIN_FALLBACK_XP: int = 50       # used if we don't have the cached original XP
