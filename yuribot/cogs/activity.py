@@ -507,4 +507,278 @@ class ActivityCog(commands.Cog):
         file = discord.File(fp=BytesIO(data), filename=f"activity-master-{gid}.csv")
         await interaction.followup.send(file=file, ephemeral=not post)
 
-    # (retain your prior /activity top, /activity graph, /activity export, /activity reset methods unchanged)
+    # ------- /activity top -------
+    @group.command(name="top", description="Leaderboard for a metric.")
+    @app_commands.describe(
+        metric="Which metric to rank by",
+        scope="day/week/month/all",
+        day="YYYY-MM-DD (for scope=day)",
+        week="YYYY-Www (for scope=week)",
+        month="YYYY-MM (for scope=month)",
+        limit="How many to show (5–50)",
+        post="Post publicly?"
+    )
+    @app_commands.choices(metric=[
+        app_commands.Choice(name="messages", value="messages"),
+        app_commands.Choice(name="words", value="words"),
+        app_commands.Choice(name="mentions (received)", value="mentions"),
+        app_commands.Choice(name="mentions_sent", value="mentions_sent"),
+        app_commands.Choice(name="emoji_chat (in text)", value="emoji_chat"),
+        app_commands.Choice(name="emoji_react (you reacted)", value="emoji_react"),
+        app_commands.Choice(name="reactions_received", value="reactions_received"),
+        app_commands.Choice(name="voice_minutes", value="voice_minutes"),
+        app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
+        app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+    ])
+    async def top(self,
+                  interaction: discord.Interaction,
+                  metric: app_commands.Choice[str],
+                  scope: Optional[str] = "month",
+                  day: Optional[str] = None,
+                  week: Optional[str] = None,
+                  month: Optional[str] = None,
+                  limit: app_commands.Range[int, 5, 50] = 20,
+                  post: bool = False):
+        if not await _require_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=not post)
+        gid = interaction.guild_id
+        metric_name = metric.value
+
+        # parse scope/key
+        try:
+            s, key = _parse_scope_and_key(scope, day, week, month)
+        except ValueError as e:
+            return await interaction.followup.send(f"Bad {str(e).replace('_',' ')}.", ephemeral=not post)
+
+        rows: List[Tuple[int, int]] = []
+
+        # Use unified tables directly to support any metric
+        with models.connect() as con:
+            cur = con.cursor()
+            if s == "all":
+                rows = cur.execute(
+                    """
+                    SELECT user_id, count
+                    FROM member_metrics_total
+                    WHERE guild_id=? AND metric=?
+                    ORDER BY count DESC
+                    LIMIT ?
+                    """, (gid, metric_name, int(limit))
+                ).fetchall()
+            else:
+                where_col = {"day": "day", "week": "week", "month": "month"}[s]
+                rows = cur.execute(
+                    f"""
+                    SELECT user_id, SUM(count) AS c
+                    FROM member_metrics_daily
+                    WHERE guild_id=? AND metric=? AND {where_col}=?
+                    GROUP BY user_id
+                    ORDER BY c DESC
+                    LIMIT ?
+                    """, (gid, metric_name, key, int(limit))
+                ).fetchall()
+
+        if not rows:
+            return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
+
+        # format
+        lines = []
+        for i, (uid, cnt) in enumerate(rows, start=1):
+            m = interaction.guild.get_member(int(uid))
+            name = m.mention if m else f"<@{int(uid)}>"
+            lines.append(f"{i}. {name} — **{int(cnt)}** {metric_name}")
+
+        title_scope = s if s == "all" else f"{s}:{key}"
+        embed = discord.Embed(
+            title=f"Top {metric_name} — {title_scope}",
+            description="\n".join(lines),
+            color=discord.Color.blurple()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=not post)
+
+    # ------- /activity graph -------
+    @group.command(name="graph", description="Plot daily messages for a month (guild or a user).")
+    @app_commands.describe(
+        month="YYYY-MM (default: current month)",
+        user="Optional: pick a member to graph",
+        post="Post publicly?"
+    )
+    @app_commands.autocomplete(month=_month_autocomplete)
+    async def graph(self,
+                    interaction: discord.Interaction,
+                    month: Optional[str] = None,
+                    user: Optional[discord.Member] = None,
+                    post: bool = False):
+        if not await _require_guild(interaction):
+            return
+        if not _HAS_MPL:
+            return await interaction.response.send_message("Matplotlib not available on this runtime.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=not post)
+        gid = interaction.guild_id
+        month = month or _month_default()
+        if not MONTH_RE.match(month):
+            return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
+
+        uid = user.id if user else None
+        rows = models.member_daily_counts_month(gid, uid, month)
+        if not rows:
+            return await interaction.followup.send("No data for that month.", ephemeral=not post)
+
+        # Build X/Y
+        xs = [d for (d, _) in rows]
+        ys = [int(c) for (_, c) in rows]
+
+        # Pre-size figure
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import LinearSegmentedColormap
+        fig = plt.figure(figsize=(max(8, len(xs)*0.25), 4.5), dpi=160)
+
+        # Gradient bar color
+        try:
+            cmap = LinearSegmentedColormap.from_list("lesbian", LESBIAN_COLORS)
+        except Exception:
+            cmap = None
+
+        ax = fig.add_subplot(111)
+        ax.bar(range(len(xs)), ys, align="center",
+               color=[cmap(i/len(xs)) if cmap else None for i in range(len(xs))])
+        ax.set_title(f"Messages per day — {month}" + (f" — {user.display_name}" if user else " — Server"))
+        ax.set_ylabel("Messages")
+        ax.set_xticks(range(len(xs)))
+        ax.set_xticklabels([x.split("-")[-1] for x in xs], rotation=0)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+        buf = io.BytesIO()
+        fig.tight_layout()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+
+        file = discord.File(buf, filename=f"activity-{month}" + (f"-{uid}" if uid else "") + ".png")
+        await interaction.followup.send(file=file, ephemeral=not post)
+
+    # ------- /activity export -------
+    @group.command(name="export", description="Export a CSV for a metric and month.")
+    @app_commands.describe(
+        metric="Metric to export",
+        month="YYYY-MM (default: current month)",
+        post="Post publicly?"
+    )
+    @app_commands.choices(metric=[
+        app_commands.Choice(name="messages", value="messages"),
+        app_commands.Choice(name="words", value="words"),
+        app_commands.Choice(name="mentions", value="mentions"),
+        app_commands.Choice(name="mentions_sent", value="mentions_sent"),
+        app_commands.Choice(name="emoji_chat", value="emoji_chat"),
+        app_commands.Choice(name="emoji_react", value="emoji_react"),
+        app_commands.Choice(name="reactions_received", value="reactions_received"),
+        app_commands.Choice(name="voice_minutes", value="voice_minutes"),
+        app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
+        app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+    ])
+    async def export(self,
+                     interaction: discord.Interaction,
+                     metric: app_commands.Choice[str],
+                     month: Optional[str] = None,
+                     post: bool = False):
+        if not await _require_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=not post)
+
+        gid = interaction.guild_id
+        month = month or _month_default()
+        if not MONTH_RE.match(month):
+            return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
+
+        # Pull all per-day counts for the month
+        with models.connect() as con:
+            cur = con.cursor()
+            rows = cur.execute("""
+                SELECT user_id, day, count
+                FROM member_metrics_daily
+                WHERE guild_id=? AND metric=? AND month=?
+                ORDER BY user_id ASC, day ASC
+            """, (gid, metric.value, month)).fetchall()
+
+        import csv
+        from io import StringIO, BytesIO
+        buf = StringIO()
+        w = csv.writer(buf)
+        w.writerow(["guild_id", "metric", "user_id", "day", "count"])
+        for uid, day, cnt in rows:
+            w.writerow([gid, metric.value, int(uid), str(day), int(cnt)])
+
+        data = buf.getvalue().encode("utf-8")
+        file = discord.File(fp=BytesIO(data), filename=f"activity-{metric.value}-{month}-{gid}.csv")
+        await interaction.followup.send(file=file, ephemeral=not post)
+
+    # ------- /activity reset -------
+    @group.command(name="reset", description="Admin: reset metrics (careful).")
+    @app_commands.describe(
+        metric="Which metric to reset (messages has special legacy handling)",
+        scope="day/week/month/all",
+        key="Key for day/week/month (YYYY-MM-DD / YYYY-Www / YYYY-MM). Ignored for all.",
+        post="Post publicly?"
+    )
+    @app_commands.choices(metric=[
+        app_commands.Choice(name="messages", value="messages"),
+        app_commands.Choice(name="words", value="words"),
+        app_commands.Choice(name="mentions", value="mentions"),
+        app_commands.Choice(name="mentions_sent", value="mentions_sent"),
+        app_commands.Choice(name="emoji_chat", value="emoji_chat"),
+        app_commands.Choice(name="emoji_react", value="emoji_react"),
+        app_commands.Choice(name="reactions_received", value="reactions_received"),
+        app_commands.Choice(name="voice_minutes", value="voice_minutes"),
+        app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
+        app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+    ])
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def reset(self,
+                    interaction: discord.Interaction,
+                    metric: app_commands.Choice[str],
+                    scope: str,
+                    key: Optional[str] = None,
+                    post: bool = False):
+        if not await _require_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=not post)
+
+        gid = interaction.guild_id
+        m = metric.value
+        s = scope
+        k = key
+
+        # Validate key formats
+        try:
+            if s == "day" and (not k or not DAY_RE.match(k)):
+                raise ValueError("Use YYYY-MM-DD for day")
+            if s == "week" and (not k or not WEEK_RE.match(k)):
+                raise ValueError("Use YYYY-Www for week")
+            if s == "month" and (not k or not MONTH_RE.match(k)):
+                raise ValueError("Use YYYY-MM for month")
+            if s == "all":
+                k = None
+        except ValueError as e:
+            return await interaction.followup.send(str(e), ephemeral=not post)
+
+        # For messages, use special extended routine to keep legacy mirrors in sync
+        try:
+            if m == "messages":
+                models.reset_member_activity(gid, scope=s, key=k)
+            else:
+                models._reset_metric(gid, metric=m, scope=s, key=k)
+        except Exception:
+            log.exception("reset.failed", extra={"guild_id": gid, "metric": m, "scope": s, "key": k})
+            return await interaction.followup.send("Reset failed. Check logs.", ephemeral=not post)
+
+        await interaction.followup.send(f"Reset **{m}** for **{s}{f'={k}' if k else ''}**.", ephemeral=not post)
+
+    # ---- permissions failure for reset ----
+    @reset.error
+    async def _reset_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("You need **Manage Server** to do that.", ephemeral=True)
+        else:
+            raise error
