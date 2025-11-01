@@ -1421,7 +1421,7 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
 
     return {
         "str": messages + emoji_chat,                     # throughput + expressive chat
-        "int": sqrt(float(words)),                        # depth
+        "int": max(0, float(words) // 30),                        # depth
         "cha": mentions_recv + reacts_recv,               # recognition
         "vit": voice_min + stream_min,                    # presence
         "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse
