@@ -528,4 +528,13 @@ _STRINGS.update({
         "introduce yourself, and check the channels unlocked for you."
     ),
     "rolewelcome.footer": "{guild}",
+    # --- Activity: profile (/activity me) ---
+
+    "activity.profile.title": "Activity profile — {user}",
+    "activity.profile.stats": "Stats",
+    "activity.profile.derived": "Signals",
+    "activity.profile.voice": "Voice",
+    "activity.profile.apps": "Activities",
+    "activity.profile.level_section": "Level & Progress",
 })
+
