@@ -1249,22 +1249,66 @@ XP_RULES = {
     "activity_minutes": 1,
 }
 
-def _infer_primary_stat(con: sqlite3.Connection, guild_id: int, user_id: int) -> str:
-    """Pick a stat from activity mix."""
+def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int]:
+    """
+    Build per-stat 'activity score' using unified totals.
+    Emoji-only messages increase DEX signal.
+    """
     cur = con.cursor()
     totals = dict(cur.execute("""
         SELECT metric, count FROM member_metrics_total
         WHERE guild_id=? AND user_id=?
     """, (guild_id, user_id)).fetchall())
-    candidates = {
-        "str": totals.get("messages", 0) + totals.get("emoji_chat", 0),
-        "int": totals.get("words", 0),
-        "cha": totals.get("mentions", 0) + totals.get("reactions_received", 0),
-        "vit": totals.get("voice_minutes", 0) + totals.get("voice_stream_minutes", 0),
-        "dex": totals.get("emoji_react", 0) + totals.get("mentions_sent", 0),
-        "wis": totals.get("activity_minutes", 0),
+
+    # Base signals from existing metrics
+    messages            = int(totals.get("messages", 0))
+    words               = int(totals.get("words", 0))
+    mentions_recv       = int(totals.get("mentions", 0))
+    mentions_sent       = int(totals.get("mentions_sent", 0))
+    emoji_chat          = int(totals.get("emoji_chat", 0))
+    emoji_react         = int(totals.get("emoji_react", 0))
+    reacts_recv         = int(totals.get("reactions_received", 0))
+    voice_min           = int(totals.get("voice_minutes", 0))
+    stream_min          = int(totals.get("voice_stream_minutes", 0))
+    activity_min        = int(totals.get("activity_minutes", 0))
+    emoji_only_msgs     = int(totals.get("emoji_only", 0))  # NEW
+
+    # Stat signals (simple additive; adjust weights later if you want)
+    scores = {
+        "str": messages + emoji_chat,                       # throughput + expressive chat
+        "int": words,                                       # depth
+        "cha": mentions_recv + reacts_recv,                 # recognition
+        "vit": voice_min + stream_min,                      # presence
+        "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse + emoji-only flavor
+        "wis": activity_min,                                # focused sessions
     }
-    return max(candidates, key=candidates.get)
+    return scores
+
+_LEVELUP_DISTR = [4, 3, 2, 1, 1, 0]  # highest -> lowest activity types
+
+def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -> None:
+    """
+    Apply stat gains based on current activity score ordering:
+    +4, +3, +2, +1, +1, 0 to the 6 stats in rank order.
+    Ties are stable by the order below.
+    """
+    cur = con.cursor()
+    scores = _stat_activity_scores(con, guild_id, user_id)
+    order = ["str", "dex", "int", "wis", "cha", "vit"]  # stable tiebreaker
+    ranked = sorted(order, key=lambda k: (-scores.get(k, 0), order.index(k)))
+
+    # Build SQL: add gains to each stat
+    sets = []
+    params = []
+    for stat, add in zip(ranked, _LEVELUP_DISTR):
+        if add > 0:
+            sets.append(f"{stat}={stat}+?")
+            params.append(add)
+    if not sets:
+        return
+    params += [guild_id, user_id]
+    cur.execute(f"UPDATE member_rpg_progress SET {', '.join(sets)} WHERE guild_id=? AND user_id=?", params)
+
 
 def _two_secondaries(primary: str) -> tuple[str, str]:
     wheel = ["str", "dex", "int", "wis", "cha", "vit"]
@@ -1272,7 +1316,6 @@ def _two_secondaries(primary: str) -> tuple[str, str]:
     return (wheel[(i+1)%6], wheel[(i+2)%6])
 
 def _apply_xp(con: sqlite3.Connection, guild_id: int, user_id: int, add_xp: int) -> tuple[int, int]:
-    """Add XP and auto-level. Returns (new_level, new_total_xp)."""
     cur = con.cursor()
     row = cur.execute("""
         SELECT xp, level FROM member_rpg_progress
@@ -1291,13 +1334,18 @@ def _apply_xp(con: sqlite3.Connection, guild_id: int, user_id: int, add_xp: int)
     new_level = level_from_xp(xp)
 
     if new_level > level:
-        prim = _infer_primary_stat(con, guild_id, user_id)
-        s1, s2 = _two_secondaries(prim)
-        cur.execute(f"UPDATE member_rpg_progress SET {prim}={prim}+2, {s1}={s1}+1, {s2}={s2}+1 WHERE guild_id=? AND user_id=?", (guild_id, user_id))
-        cur.execute("UPDATE member_rpg_progress SET level=?, xp=?, last_level_up=datetime('now') WHERE guild_id=? AND user_id=?", (new_level, xp, guild_id, user_id))
+        # Apply new ranked distribution +4,+3,+2,+1,+1,0
+        _apply_levelup_stats(con, guild_id, user_id)
+        cur.execute("""
+            UPDATE member_rpg_progress
+               SET level=?, xp=?, last_level_up=datetime('now')
+             WHERE guild_id=? AND user_id=?
+        """, (new_level, xp, guild_id, user_id))
     else:
         cur.execute("UPDATE member_rpg_progress SET xp=? WHERE guild_id=? AND user_id=?", (xp, guild_id, user_id))
+
     return new_level, xp
+
 
 def award_xp_for_event(guild_id: int, user_id: int, base_xp: float, channel_multiplier: float = 1.0) -> tuple[int, int]:
     """Round after multiplier; returns (new_level, total_xp)."""
@@ -1637,4 +1685,9 @@ def top_gifs(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, str,
             ORDER BY count DESC
             LIMIT ?
         """, (guild_id, month, limit)).fetchall()
+def bump_member_emoji_only(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, _ = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_only", day, week_key, month, inc)
+        con.commit()
 
