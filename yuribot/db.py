@@ -430,6 +430,15 @@ def ensure_db() -> None:
             last_level_up TEXT,
             PRIMARY KEY (guild_id, user_id)
         )""")
+            # MU performance helpers
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_lookup
+            ON mu_thread_posts (guild_id, thread_id, series_id, release_id)
+        """)
+
+        # Polls convenience (optional)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_poll_options_poll ON poll_options (poll_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes (poll_id)")
 
         # --- Channel totals (for prime_channel & per-channel XP multipliers) ---
         cur.execute("""
