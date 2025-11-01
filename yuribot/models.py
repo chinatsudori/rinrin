@@ -1704,4 +1704,22 @@ def bump_member_emoji_only(guild_id: int, user_id: int, when_iso: str, inc: int 
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_only", day, week_key, month, inc)
         con.commit()
+def mu_list_links_for_guild(guild_id: int) -> list[tuple[int, str, str]]:
+    """
+    Returns [(thread_id, series_id, series_title)] for the guild, newest threads first when possible.
+    """
+    with connect() as con:
+        cur = con.cursor()
+        rows = cur.execute("""
+            SELECT ts.thread_id,
+                   ts.series_id,
+                   COALESCE(s.title, '')
+            FROM mu_thread_series ts
+            LEFT JOIN mu_series s
+              ON s.series_id = ts.series_id
+            WHERE ts.guild_id=?
+            ORDER BY ts.thread_id DESC
+        """, (guild_id,)).fetchall()
+        # Ensure types are sane
+        return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
 
