@@ -1,36 +1,30 @@
 from __future__ import annotations
-from typing import Any, Mapping, Iterable
+from typing import Any, Mapping, Dict
 import random
 
-# =========================
+# ===============================================================
 # Persona / flavor toggles
-# =========================
-RIN_PERSONA_ENABLED = True          # master switch (turn off to go fully neutral)
-RIN_FLAVOR_PROB = 0.0              # chance to sprinkle a quip on eligible lines (0.0–1.0)
+# ===============================================================
+RIN_PERSONA_ENABLED = True     # master switch (False = fully neutral)
+RIN_FLAVOR_PROB = 0.0          # 0.0–1.0 chance to append a short quip
 
-# Apply to keys that start with these prefixes; everything else stays neutral
+# Eligible prefixes (light, SFW sass)
 _RIN_ALLOW_PREFIXES: tuple[str, ...] = (
     "common.", "activity.", "movie.", "music.", "poll.", "series.", "discuss.",
     "stats.", "tools.", "welcome.", "fun.", "move_any.", "emoji.", "sticker.",
-    "mu.",  # MU watcher confirmations/errors are fair game for light sass
+    "mu.",
 )
 
-# Never flavor these (audit/mod actions, admin, timeouts, etc.)
+# Never flavor these (serious/audit)
 _RIN_DENY_PREFIXES: tuple[str, ...] = (
-    "botlog.", "modlog.", "timeout.", "admin.",  # sensitive/serious
+    "botlog.", "modlog.", "timeout.", "admin.",
 )
 
-# Tiny quip pools — short, sardonic, little-sis vibe; SFW; no spammy emojis
-_RIN_Q = {
-    "ok": [
-        "ok ok~", "kinda slayed ngl", "noted 💅", "heard ya", "mkay~",
-    ],
-    "oops": [
-        "eep—my bad", "uhh yikes", "scuffed…", "whoopsies", "brb crying",
-    ],
-    "hint": [
-        "you got this", "i believe in u", "pro gamer move time", "brain on pls", "tiny hint: read closely",
-    ],
+# Tiny quip pools
+_RIN_Q: Dict[str, list[str]] = {
+    "ok":   ["ok ok~", "kinda slayed ngl", "noted 💅", "heard ya", "mkay~"],
+    "oops": ["eep—my bad", "uhh yikes", "scuffed…", "whoopsies", "brb crying"],
+    "hint": ["you got this", "i believe in u", "pro gamer move time", "brain on pls", "tiny hint: read closely"],
 }
 
 def _rin_pick(kind: str) -> str:
@@ -38,12 +32,13 @@ def _rin_pick(kind: str) -> str:
     return random.choice(pool) if pool else ""
 
 
+# ===============================================================
+# Storage + formatting helpers
+# ===============================================================
 class _NeutralMap(dict[str, str]):
     """
-    A dict that accepts values as either plain strings or mappings.
-    If a mapping is provided, it prefers the 'neutral' key; otherwise
-    it falls back to the first string value found. Non-strings are
-    stringified conservatively.
+    Accepts values as either strings or mappings.
+    If a mapping is provided, prefer 'neutral'; else first string value.
     """
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(key, self._flatten(value))
@@ -69,52 +64,33 @@ class _NeutralMap(dict[str, str]):
                 return ""
         return str(value)
 
-
-# Global storage for strings
 _STRINGS: dict[str, str] = _NeutralMap()
 
 
 def _eligible_for_flavor(key: str) -> bool:
     if not RIN_PERSONA_ENABLED:
         return False
-    for p in _RIN_DENY_PREFIXES:
-        if key.startswith(p):
-            return False
-    if not _RIN_ALLOW_PREFIXES:
+    if any(key.startswith(p) for p in _RIN_DENY_PREFIXES):
         return False
     return any(key.startswith(p) for p in _RIN_ALLOW_PREFIXES)
 
 
 def _pepper(text: str, key: str) -> str:
-    """
-    Lightly season certain messages. Keep short; preserve placeholders;
-    do not touch markdown or code blocks beyond appending a tiny quip.
-    """
-    if not _eligible_for_flavor(key):
+    """Append a tiny quip to eligible messages (never alters placeholders)."""
+    if not _eligible_for_flavor(key) or random.random() > RIN_FLAVOR_PROB:
         return text
-    if random.random() > RIN_FLAVOR_PROB:
-        return text
-
     lower = text.lower()
-    # pick a vibe
     if any(w in lower for w in ("error", "failed", "couldn’t", "couldn't", "invalid", "missing", "forbidden")):
         quip = _rin_pick("oops")
     elif any(w in lower for w in ("try", "hint", "help", "use", "provide", "format")):
         quip = _rin_pick("hint")
     else:
         quip = _rin_pick("ok") or "ok~"
-
-    # Append with a thin separator, keep it compact
-    if text.endswith((".", "!", "…")):
-        return f"{text} {quip}"
-    return f"{text} — {quip}"
+    return f"{text} {quip}" if text.endswith((".", "!", "…")) else f"{text} — {quip}"
 
 
 def S(key: str, /, **fmt: Any) -> str:
-    """
-    Fetch and format a localized string by key, then (optionally) add
-    a tiny Rinrin flavor. If formatting fails, return the raw template.
-    """
+    """Lookup + format with optional persona quip. Safe on format errors."""
     template = _STRINGS.get(key, key)
     try:
         text = template.format(**fmt) if fmt else template
@@ -122,8 +98,7 @@ def S(key: str, /, **fmt: Any) -> str:
         text = template
     return _pepper(text, key)
 
-
-# Optional short alias
+# Optional alias
 T = S
 
 
@@ -148,7 +123,7 @@ _STRINGS.update({
     "activity.me.month": "This month ({month})",
     "activity.me.total": "Total",
     "activity.me.recent": "Recent months",
-    "activity.none_yet": "No Data.",
+    "activity.none_yet": "No data.",
     "activity.reset.need_month": "Provide `month` (YYYY-MM) for monthly reset.",
     "activity.reset.done": "Stats wiped.",
 
@@ -163,11 +138,11 @@ _STRINGS.update({
         "- Polls: {polls}\n"
         "- Discussion forum: {discussion}"
     ),
+    "admin.mu_forum.set_ok": "MangaUpdates forum set to {channel}.",
 
     # ---------------- Botlog (audit) ----------------
     "botlog.common.none": "(none)",
     "botlog.common.unknown": "(unknown)",
-
     "botlog.title.message_created": "Message Created",
     "botlog.title.message_deleted": "Message Deleted",
     "botlog.title.message_edited": "Message Edited",
@@ -193,7 +168,6 @@ _STRINGS.update({
     "botlog.title.voice_join": "Voice Join",
     "botlog.title.voice_leave": "Voice Leave",
     "botlog.title.voice_move": "Voice Move",
-
     "botlog.field.author": "Author",
     "botlog.field.channel": "Channel",
     "botlog.field.content": "Content",
@@ -215,7 +189,6 @@ _STRINGS.update({
     "botlog.field.emojis": "Emojis",
     "botlog.field.from": "From",
     "botlog.field.to": "To",
-
     "botlog.change.role_name": "Name: **{before}** → **{after}**",
     "botlog.change.role_color": "Color: {before} → {after}",
     "botlog.change.role_perms": "Permissions changed",
@@ -223,7 +196,7 @@ _STRINGS.update({
     "botlog.change.channel_topic": "Topic changed",
     "botlog.change.channel_nsfw": "NSFW: {before} → {after}",
 
-    # ---------------- Collection ----------------
+    # ---------------- Collections ----------------
     "collection.error.no_cfg_with_hint": "No config for club '{club}'. Run /club setup.",
     "collection.error.no_cfg": "No config for club '{club}'.",
     "collection.error.no_open": "No open collection.",
@@ -252,20 +225,16 @@ _STRINGS.update({
     "sticker.none_for_month": "No sticker usage for **{month}**.",
     "sticker.row": "{name} — **{count}**",
 
-    # ---------------- Modlog (new) ----------------
+    # ---------------- Modlog ----------------
     "modlog.err.perms": "Insufficient permissions.",
     "modlog.err.no_channel": "Mod logs channel not set. Run `/set_mod_logs` first.",
     "modlog.err.bad_channel": "Configured mod logs channel is invalid. Re-run `/set_mod_logs`.",
     "modlog.done": "Logged.",
-
-    # Temperature labels
     "modlog.temp.gentle": "🟢 Gentle Nudge",
     "modlog.temp.formal": "💙 Formal Warning",
     "modlog.temp.escalated": "💜 Escalated Warning",
     "modlog.temp.critical": "❤️ Critical / Harmful Behavior",
     "modlog.temp.unknown": "Temp {n}",
-
-    # Embed content
     "modlog.embed.title": "Moderation — {temp}",
     "modlog.embed.user": "User",
     "modlog.embed.rule": "Rule",
@@ -274,8 +243,6 @@ _STRINGS.update({
     "modlog.embed.details": "Details",
     "modlog.embed.actions": "Actions",
     "modlog.embed.footer": "Actor: {actor} ({actor_id})",
-
-    # DM (optional)
     "modlog.dm.title": "Moderation Notice",
     "modlog.dm.rule": "Rule",
     "modlog.dm.status": "Status",
@@ -285,8 +252,6 @@ _STRINGS.update({
     "modlog.dm.actions": "Actions",
     "modlog.dm.actions_warning": "Warning recorded",
     "modlog.dm.could_not_dm": "Could not DM {user} (privacy settings).",
-
-    # Action reasons / outcomes
     "modlog.reason.timeout_default": "Timed out by moderator.",
     "modlog.reason.ban_default": "Banned by moderator.",
     "modlog.action.timeout.denied_perm": "Timeout requested ({m}m) — **denied** (missing permission).",
@@ -297,8 +262,6 @@ _STRINGS.update({
     "modlog.action.ban.ok": "Ban: **applied**",
     "modlog.action.ban.forbidden": "Ban requested — **forbidden**.",
     "modlog.action.ban.http": "Ban requested — **HTTP error**: {err}",
-
-    # Relay
     "modlog.relay.title": "User Reply (DM)",
     "modlog.relay.footer": "From: {author} ({author_id})",
     "modlog.relay.attachments": "Attachments",
@@ -346,7 +309,24 @@ _STRINGS.update({
     "music.queued.single": "Queued **{title}** ({duration}) — {where}.",
     "music.queued.bulk": "Queued **{count}** tracks{more_text}.",
 
-    # ---------------- Polls ----------------
+    # ---------------- Native Polls ----------------
+    "poll.native.group_desc": "Create native Discord polls",
+    "poll.native.create_desc": "Create a native poll (up to 6 options) with a custom duration (in hours).",
+    "poll.native.arg.question": "Poll question (1–300 chars)",
+    "poll.native.arg.opt1": "Option 1",
+    "poll.native.arg.opt2": "Option 2",
+    "poll.native.arg.opt3": "Option 3 (optional)",
+    "poll.native.arg.opt4": "Option 4 (optional)",
+    "poll.native.arg.opt5": "Option 5 (optional)",
+    "poll.native.arg.opt6": "Option 6 (optional)",
+    "poll.native.arg.hours": "How long the poll runs (hours, 1–168). Default 48 (=2 days).",
+    "poll.native.arg.multi": "Allow users to select multiple options?",
+    "poll.native.arg.ephemeral": "Post ephemerally to the invoker only?",
+    "poll.native.err.need_two": "Provide at least **2** options.",
+    "poll.native.err.too_many": "Provide **{n}** options or fewer.",
+    "poll.native.err.create_failed": "Couldn’t create the poll: {err}",
+
+    # ---------------- Polls (legacy/custom) ----------------
     "poll.create.error.no_cfg": "No config for club '{club}'. Run /club setup.",
     "poll.create.error.no_collection": "No collection found.",
     "poll.create.error.no_valid_numbers": "No valid numbers.",
@@ -392,11 +372,9 @@ _STRINGS.update({
 
     # ---------------- Stats (/ping, /uptime, /botinfo) ----------------
     "stats.ping.message": "🏓 **Ping**\n• Gateway: `{gw_ms} ms`\n• Round-trip: `{rt_ms} ms`",
-
     "stats.uptime.title": "⏱️ Uptime",
     "stats.uptime.field.uptime": "Uptime",
     "stats.uptime.field.since": "Since (UTC)",
-
     "stats.botinfo.title": "Bot Info",
     "stats.botinfo.na": "n/a",
     "stats.botinfo.field.guilds": "Guilds",
@@ -410,8 +388,7 @@ _STRINGS.update({
     "stats.botinfo.field.cpu": "CPU",
     "stats.botinfo.field.runtime": "Runtime",
     "stats.botinfo.value.runtime": "py {py} · discord.py {dpy}",
-
-    # Backward-compatible aliases (do not remove if older code uses them)
+    # legacy aliases kept for compatibility
     "stats.common.na": "n/a",
     "stats.botinfo.field.members": "Members (cached)",
     "stats.botinfo.field.gateway": "Gateway Ping",
@@ -428,11 +405,9 @@ _STRINGS.update({
     "timeout.error.http_apply": "HTTP error applying timeout: {err}",
     "timeout.error.forbidden_remove": "Forbidden: I lack permission to remove timeout.",
     "timeout.error.http_remove": "HTTP error removing timeout: {err}",
-
     "timeout.dm.title": "You’ve been timed out in {guild}",
     "timeout.dm.no_reason": "No reason provided.",
     "timeout.dm.field.duration": "Duration",
-    # seconds-aware
     "timeout.dm.value.duration": "{d}d {h}h {m}m {s}s",
     "timeout.dm.field.until": "Until (UTC)",
     "timeout.audit.default_reason": "Timed out by moderator.",
@@ -443,7 +418,6 @@ _STRINGS.update({
     "timeout.log.field.duration": "Duration",
     "timeout.log.field.until": "Until (UTC)",
     "timeout.log.field.reason": "Reason",
-    # seconds-aware
     "timeout.done": "Timed out {user} for **{d}d {h}h {m}m {s}s** (until <t:{until_ts}:F> UTC).",
     "timeout.remove.title": "Timeout Removed",
     "timeout.remove.done": "Removed timeout from {user}.",
@@ -472,10 +446,8 @@ _STRINGS.update({
     "move_any.header": "**{author}** — {ts}\n{jump}",
     "move_any.sticker.line_with_url": "[Sticker: {name}]({url})",
     "move_any.sticker.line_no_url": "(Sticker: {name})",
-
     "move_any.thread.created_body": "Post created by bot to receive copied messages.",
     "move_any.thread.starter_msg": "Starting thread **{title}** for copied messages…",
-
     "move_any.error.bad_ids": "Invalid source_id or destination_id.",
     "move_any.error.bad_ids_neutral": "Bad IDs. Pass channel/thread IDs or jump URLs.",
     "move_any.error.bad_source_type": "Source must be a Text Channel or Thread.",
@@ -491,25 +463,19 @@ _STRINGS.update({
     "move_any.error.forbidden_thread": "Forbidden: cannot create a thread in that channel.",
     "move_any.error.create_thread_failed": "Failed to create thread: {err}",
     "move_any.error.unsupported_destination": "Unsupported destination channel type.",
-
     "move_any.info.none_matched": "No messages matched that range.",
     "move_any.info.dry_run": "Dry run: would copy **{count}** message(s) from **{src}** → **{dst}**.",
     "move_any.info.webhook_fallback": "Couldn’t use a webhook (missing permission or create failed); falling back to normal sending.",
-
     "move_any.notice.cant_delete_source": "Note: Could not delete originals (missing **Manage Messages** in source).",
-
     "move_any.summary": "Copied **{copied}/{total}** message(s) from **{src}** → **{dst}**.",
     "move_any.summary_failed_tail": "Failed: {failed}.",
     "move_any.summary_deleted_tail": "Deleted original: {deleted}.",
-
     "move_any.reply.header": "Replying to **{author}** · {jump}\n> {snippet}",
     "move_any.reply.attach_only": "(attachment)",
-
-    # pinmatch summaries
     "move_any.pin.summary": "Pinned **{pinned}** out of **{total}** source pin(s) in {dst}.",
     "move_any.pin.summary_misses_tail": "\nMissed **{missed}** (first {shown} IDs):\n```\n{sample}\n```",
 
-    # ---------------- MU (linking) ----------------
+    # ---------------- MangaUpdates ----------------
     "mu.link.need_forum": "Please run this inside a **Forum post** or pass the `thread:` option with a forum post.",
     "mu.link.no_results": "No results on MangaUpdates for **{q}**.",
     "mu.link.no_aliases": "—",
@@ -518,7 +484,6 @@ _STRINGS.update({
     "mu.unlink.done": "Unlinked **{count}** mapping(s).",
     "mu.status.none": "No threads are currently linked.",
     "mu.status.line": "- **{title}** (`{sid}`) → {thread}",
-
     "mu.check.need_thread": "Use this inside a **forum post thread**, or pass `thread:`.",
     "mu.check.not_linked": "This thread is not linked to any MangaUpdates series. Use `/mu link` here.",
     "mu.check.posted": "Posted **{count}** new release(s).",
@@ -536,17 +501,11 @@ _STRINGS.update({
     "mu.release.date_raw": "Date: {date}",
     "mu.release.title": "{series} — {chbits}",
     "mu.release.footer": "MangaUpdates • Release ID {rid}",
-
-    "mu.latest.title": "{series} — Latest: {chbits}",
-    "mu.latest.footer": "Latest known (no new releases)",
-
     "mu.error.generic": "MangaUpdates error: {msg}",
     "mu.error.no_releases": "No releases were found for that series.",
     "mu.error.search_http": "MangaUpdates search failed (HTTP {code}).",
     "mu.error.series_http": "MangaUpdates series {sid} failed (HTTP {code}).",
     "mu.error.releases_http": "MangaUpdates releases for {sid} failed (HTTP {code}).",
-    "admin.mu_forum.set_ok": "MangaUpdates forum set to {channel}.",
-    "mu.link.forum_missing": "No MangaUpdates forum is configured. Ask an admin to run `/set_mu_forum`.",
 
     # ---------------- Tools: Timestamp ----------------
     "tools.timestamp.invalid_dt": "Invalid date/time. Use `YYYY-MM-DD` and `HH:MM` (or `HH:MM:SS`).",
@@ -562,34 +521,11 @@ _STRINGS.update({
     "tools.timestamp.label.time": "Time",
     "tools.timestamp.label.time_short": "Time (short)",
 
-        # ---- Role Welcome ----
+    # ---------------- Role Welcome ----------------
     "rolewelcome.title": "Welcome aboard!",
     "rolewelcome.desc": (
         "You’ve just been granted access. Take a minute to read pinned messages, "
         "introduce yourself, and check the channels unlocked for you."
     ),
     "rolewelcome.footer": "{guild}",
-        # ---------------- Native Polls (custom duration) ----------------
-    "poll.native.group_desc": "Create native Discord polls",
-    "poll.native.create_desc": "Create a native poll (up to 6 options) with a custom duration (in hours).",
-    "poll.native.arg.question": "Poll question (1–300 chars)",
-    "poll.native.arg.opt1": "Option 1",
-    "poll.native.arg.opt2": "Option 2",
-    "poll.native.arg.opt3": "Option 3 (optional)",
-    "poll.native.arg.opt4": "Option 4 (optional)",
-    "poll.native.arg.opt5": "Option 5 (optional)",
-    "poll.native.arg.opt6": "Option 6 (optional)",
-    "poll.native.arg.hours": "How long the poll runs (hours, 1–168). Default 48 (=2 days).",
-    "poll.native.arg.multi": "Allow users to select multiple options?",
-    "poll.native.arg.ephemeral": "Post ephemerally to the invoker only?",
-    "poll.native.err.need_two": "Provide at least **2** options.",
-    "poll.native.err.too_many": "Provide **{n}** options or fewer.",
-    "poll.native.err.create_failed": "Couldn’t create the poll: {err}",
-
 })
-
-
-
-
-
-
