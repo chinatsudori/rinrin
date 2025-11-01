@@ -630,6 +630,22 @@ class ActivityCog(commands.Cog):
         embed.add_field(name=S("activity.profile.derived"), value=derived, inline=False)
         embed.add_field(name=S("activity.profile.voice"), value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min", inline=True)
         embed.add_field(name=S("activity.profile.apps"), value=f"Activities: **{act_min}** min", inline=True)
+        # Level
+        pct = int(round((cur / need) * 100)) if need > 0 else 100
+        # 20-step progress bar
+        steps = 20
+        filled = steps if need == 0 else max(0, min(steps, int(round(steps * (cur / need)))))
+        bar = "▰" * filled + "▱" * (steps - filled)
+
+        embed.add_field(
+            name=S("activity.profile.level"),
+            value=(
+                f"**Lv {lvl}** — {rpg['xp']} XP\n"
+                f"Progress: {cur}/{need} ({pct}%)\n"
+                f"{bar}"
+            ),
+            inline=False
+        )
 
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
