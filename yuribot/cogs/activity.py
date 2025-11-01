@@ -649,7 +649,7 @@ class ActivityCog(commands.Cog):
         prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
     # Build embed
-        who = target.mention
+        who = target.display_name
         embed = discord.Embed(
             title=S("activity.profile.title", user=who),
             color=discord.Color.purple()
