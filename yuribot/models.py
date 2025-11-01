@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import sqlite3
 from typing import Optional, List, Tuple, Dict, Iterable
 from datetime import datetime, timezone
@@ -13,23 +12,27 @@ from .db import connect
 log = logging.getLogger(__name__)
 
 # =============================================================================
-# Internal time helpers
+# Time helpers
 # =============================================================================
 
 def _now_iso_utc() -> str:
+    """Current UTC timestamp as ISO8601 (seconds resolution)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 def _iso_parts(when_iso: str) -> tuple[str, str, str, int]:
     """
-    Return (day, week_key, month, hour_utc) from ISO timestamp.
-    week_key = 'YYYY-Www' using ISO calendar.
+    Return (day, week_key, month, hour_utc) for an ISO timestamp.
+    week_key = 'YYYY-Www' (ISO week).
     """
     dt = datetime.fromisoformat(when_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
-    y, w, _ = dt.isocalendar()  # ISO year/week
-    day = dt.strftime("%Y-%m-%d")
-    month = dt.strftime("%Y-%m")
-    week_key = f"{y}-W{int(w):02d}"
-    return day, week_key, month, dt.hour
+    y, w, _ = dt.isocalendar()
+    return dt.strftime("%Y-%m-%d"), f"{y}-W{int(w):02d}", dt.strftime("%Y-%m"), dt.hour
+
+
+# =============================================================================
+# Internal DB helpers
+# =============================================================================
 
 def _upsert_metric_daily_and_total(
     con: sqlite3.Connection,
@@ -42,18 +45,25 @@ def _upsert_metric_daily_and_total(
     inc: int,
 ) -> None:
     cur = con.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO member_metrics_daily (guild_id, user_id, metric, day, week, month, count)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(guild_id, user_id, metric, day) DO UPDATE SET
           count = count + excluded.count
-    """, (guild_id, user_id, metric, day, week_key, month, inc))
-    cur.execute("""
+        """,
+        (guild_id, user_id, metric, day, week_key, month, inc),
+    )
+    cur.execute(
+        """
         INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(guild_id, user_id, metric) DO UPDATE SET
           count = count + excluded.count
-    """, (guild_id, user_id, metric, inc))
+        """,
+        (guild_id, user_id, metric, inc),
+    )
+
 
 def _bump_hour_hist(
     con: sqlite3.Connection,
@@ -61,19 +71,26 @@ def _bump_hour_hist(
     user_id: int,
     metric: str,
     hour_utc: int,
-    inc: int = 1
+    inc: int = 1,
 ) -> None:
     cur = con.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO member_hour_hist (guild_id, user_id, metric, hour_utc, count)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(guild_id, user_id, metric, hour_utc) DO UPDATE SET
           count = count + excluded.count
-    """, (guild_id, user_id, metric, hour_utc, inc))
+        """,
+        (guild_id, user_id, metric, hour_utc, inc),
+    )
+
 
 # =============================================================================
-# Guild & Club Configuration
+# Guild “config” (compat): map to clubs with a reserved type
 # =============================================================================
+
+# We store one row per guild in `clubs` using a reserved type. No schema change.
+_GUILD_CFG_TYPE = "__guild__"
 
 def upsert_guild_cfg(
     guild_id: int,
@@ -82,33 +99,39 @@ def upsert_guild_cfg(
     polls: int,
     discussion_forum: int | None = None,
 ) -> None:
+    """Back-compat ‘guild config’ using clubs table."""
     with connect() as con:
         cur = con.cursor()
         cur.execute(
             """
-            INSERT INTO guild_config (guild_id, announcements_channel_id, planning_forum_id, polls_channel_id, discussion_forum_id)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
+            INSERT INTO clubs (guild_id, club_type, announcements_channel_id, planning_forum_id, polls_channel_id, discussion_forum_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, club_type) DO UPDATE SET
               announcements_channel_id=excluded.announcements_channel_id,
               planning_forum_id=excluded.planning_forum_id,
               polls_channel_id=excluded.polls_channel_id,
               discussion_forum_id=excluded.discussion_forum_id
             """,
-            (guild_id, ann, planning_forum, polls, discussion_forum),
+            (guild_id, _GUILD_CFG_TYPE, ann, planning_forum, polls, discussion_forum),
         )
         con.commit()
-    log.debug("upsert_guild_cfg: guild=%s ann=%s planning=%s polls=%s discussion=%s",
-              guild_id, ann, planning_forum, polls, discussion_forum)
+    log.debug(
+        "upsert_guild_cfg: guild=%s ann=%s planning=%s polls=%s discussion=%s",
+        guild_id, ann, planning_forum, polls, discussion_forum,
+    )
+
 
 def get_guild_cfg(guild_id: int) -> Optional[Dict[str, Optional[int]]]:
+    """Fetch the reserved clubs row for this guild if present."""
     with connect() as con:
         cur = con.cursor()
         row = cur.execute(
             """
             SELECT announcements_channel_id, planning_forum_id, polls_channel_id, discussion_forum_id
-            FROM guild_config WHERE guild_id=?
+            FROM clubs
+            WHERE guild_id=? AND club_type=?
             """,
-            (guild_id,),
+            (guild_id, _GUILD_CFG_TYPE),
         ).fetchone()
     if not row:
         return None
@@ -118,6 +141,11 @@ def get_guild_cfg(guild_id: int) -> Optional[Dict[str, Optional[int]]]:
         "polls_channel_id": row[2],
         "discussion_forum_id": row[3],
     }
+
+
+# =============================================================================
+# Clubs
+# =============================================================================
 
 def upsert_club_cfg(
     guild_id: int,
@@ -146,9 +174,10 @@ def upsert_club_cfg(
             "SELECT id FROM clubs WHERE guild_id=? AND club_type=?",
             (guild_id, club_type),
         ).fetchone()
-        cid = int(row[0])
+    cid = int(row[0])
     log.debug("upsert_club_cfg: guild=%s club=%s -> id=%s", guild_id, club_type, cid)
     return cid
+
 
 def get_club_cfg(guild_id: int, club_type: str) -> Optional[Dict[str, int]]:
     with connect() as con:
@@ -170,6 +199,7 @@ def get_club_cfg(guild_id: int, club_type: str) -> Optional[Dict[str, int]]:
         "discussion_forum_id": row[4],
     }
 
+
 def get_club_by_planning_forum(guild_id: int, forum_id: int) -> Optional[Tuple[int, str]]:
     with connect() as con:
         cur = con.cursor()
@@ -181,6 +211,7 @@ def get_club_by_planning_forum(guild_id: int, forum_id: int) -> Optional[Tuple[i
             (guild_id, forum_id),
         ).fetchone()
         return row if row else None
+
 
 # =============================================================================
 # Collections & Submissions
@@ -194,10 +225,8 @@ def open_collection(guild_id: int, club_id: int, opens_at: str, closes_at: str) 
             (guild_id, club_id, opens_at, closes_at),
         )
         con.commit()
-        cid = cur.lastrowid
-    log.info("open_collection: guild=%s club=%s id=%s opens=%s closes=%s",
-             guild_id, club_id, cid, opens_at, closes_at)
-    return cid
+        return cur.lastrowid
+
 
 def latest_collection(guild_id: int, club_id: int) -> Optional[Tuple[int, str, str, str]]:
     with connect() as con:
@@ -211,12 +240,13 @@ def latest_collection(guild_id: int, club_id: int) -> Optional[Tuple[int, str, s
             (guild_id, club_id),
         ).fetchone()
 
+
 def close_collection_by_id(collection_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
         cur.execute("UPDATE collections SET status='closed' WHERE id=?", (collection_id,))
         con.commit()
-    log.info("close_collection_by_id: id=%s", collection_id)
+
 
 def add_submission(
     guild_id: int,
@@ -238,10 +268,8 @@ def add_submission(
             (guild_id, club_id, collection_id, author_id, title, link, thread_id, created_at),
         )
         con.commit()
-        sid = cur.lastrowid
-    log.debug("add_submission: collection=%s submission_id=%s author=%s title=%r",
-              collection_id, sid, author_id, title)
-    return sid
+        return cur.lastrowid
+
 
 def list_submissions_for_collection(collection_id: int) -> List[Tuple]:
     with connect() as con:
@@ -255,9 +283,11 @@ def list_submissions_for_collection(collection_id: int) -> List[Tuple]:
             (collection_id,),
         ).fetchall()
 
+
 def get_submission(collection_id: int, ordinal: int) -> Optional[Tuple]:
     rows = list_submissions_for_collection(collection_id)
     return rows[ordinal - 1] if 1 <= ordinal <= len(rows) else None
+
 
 def get_submissions_by_ordinals(collection_id: int, ordinals: List[int]) -> List[Tuple]:
     rows = list_submissions_for_collection(collection_id)
@@ -268,6 +298,7 @@ def get_submissions_by_ordinals(collection_id: int, ordinals: List[int]) -> List
             out.append(rows[o - 1])
             seen.add(o)
     return out
+
 
 # =============================================================================
 # Polls
@@ -290,10 +321,8 @@ def create_poll(
             (guild_id, club_id, channel_id, created_at, closes_at),
         )
         con.commit()
-        pid = cur.lastrowid
-    log.info("create_poll: id=%s guild=%s club=%s channel=%s closes_at=%s",
-             pid, guild_id, club_id, channel_id, closes_at)
-    return pid
+        return cur.lastrowid
+
 
 def add_poll_option(poll_id: int, label: str, submission_id: int) -> None:
     with connect() as con:
@@ -304,14 +333,13 @@ def add_poll_option(poll_id: int, label: str, submission_id: int) -> None:
         )
         con.commit()
 
+
 def set_poll_message(poll_id: int, channel_id: int, message_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
-        cur.execute(
-            "UPDATE polls SET channel_id=?, message_id=? WHERE id=?",
-            (channel_id, message_id, poll_id),
-        )
+        cur.execute("UPDATE polls SET channel_id=?, message_id=? WHERE id=?", (channel_id, message_id, poll_id))
         con.commit()
+
 
 def record_vote(poll_id: int, user_id: int, option_id: int) -> None:
     with connect() as con:
@@ -325,6 +353,7 @@ def record_vote(poll_id: int, user_id: int, option_id: int) -> None:
             (poll_id, user_id, option_id),
         )
         con.commit()
+
 
 def tally_poll(poll_id: int) -> List[Tuple[int, str, int]]:
     with connect() as con:
@@ -341,20 +370,20 @@ def tally_poll(poll_id: int) -> List[Tuple[int, str, int]]:
             (poll_id,),
         ).fetchall()
 
+
 def close_poll(poll_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
         cur.execute("UPDATE polls SET status='closed' WHERE id=?", (poll_id,))
         con.commit()
 
+
 def get_poll_channel_and_message(poll_id: int) -> Optional[Tuple[int, int, int]]:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute(
-            "SELECT channel_id, message_id, guild_id FROM polls WHERE id=?",
-            (poll_id,),
-        ).fetchone()
+        row = cur.execute("SELECT channel_id, message_id, guild_id FROM polls WHERE id=?", (poll_id,)).fetchone()
         return row if row else None
+
 
 # =============================================================================
 # Series / Schedule
@@ -377,9 +406,8 @@ def create_series(
             (guild_id, club_id, title, link or "", source_submission_id),
         )
         con.commit()
-        sid = cur.lastrowid
-    log.info("create_series: id=%s guild=%s club=%s title=%r", sid, guild_id, club_id, title)
-    return sid
+        return cur.lastrowid
+
 
 def latest_active_series_for_guild(guild_id: int) -> Optional[Tuple[int, str, str]]:
     with connect() as con:
@@ -394,6 +422,7 @@ def latest_active_series_for_guild(guild_id: int) -> Optional[Tuple[int, str, st
             (guild_id,),
         ).fetchone()
 
+
 def list_series(guild_id: int, club_id: int) -> List[Tuple[int, str, str, str]]:
     with connect() as con:
         cur = con.cursor()
@@ -406,14 +435,13 @@ def list_series(guild_id: int, club_id: int) -> List[Tuple[int, str, str, str]]:
             (guild_id, club_id),
         ).fetchall()
 
+
 def get_series(series_id: int) -> Optional[Tuple[int, int, str, str, str]]:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute(
-            "SELECT id, guild_id, title, link, status FROM series WHERE id=?",
-            (series_id,),
-        ).fetchone()
+        row = cur.execute("SELECT id, guild_id, title, link, status FROM series WHERE id=?", (series_id,)).fetchone()
         return row if row else None
+
 
 def latest_active_series(guild_id: int, club_id: int) -> Optional[Tuple[int, str, str]]:
     with connect() as con:
@@ -426,6 +454,7 @@ def latest_active_series(guild_id: int, club_id: int) -> Optional[Tuple[int, str
             """,
             (guild_id, club_id),
         ).fetchone()
+
 
 def add_discussion_section(
     series_id: int,
@@ -446,6 +475,7 @@ def add_discussion_section(
         )
         con.commit()
 
+
 def due_discussions(now_iso: str, limit: int = 25) -> List[Tuple]:
     with connect() as con:
         cur = con.cursor()
@@ -463,6 +493,7 @@ def due_discussions(now_iso: str, limit: int = 25) -> List[Tuple]:
             (now_iso, limit),
         ).fetchall()
 
+
 def mark_discussion_posted(section_id: int, thread_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
@@ -472,8 +503,9 @@ def mark_discussion_posted(section_id: int, thread_id: int) -> None:
         )
         con.commit()
 
+
 # =============================================================================
-# Settings: mod/bot logs + welcome
+# Settings: mod/bot logs + welcome + MU forum
 # =============================================================================
 
 def set_mod_logs_channel(guild_id: int, channel_id: int) -> None:
@@ -489,14 +521,13 @@ def set_mod_logs_channel(guild_id: int, channel_id: int) -> None:
         )
         con.commit()
 
+
 def get_mod_logs_channel(guild_id: int) -> Optional[int]:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute(
-            "SELECT mod_logs_channel_id FROM guild_settings WHERE guild_id=?",
-            (guild_id,),
-        ).fetchone()
+        row = cur.execute("SELECT mod_logs_channel_id FROM guild_settings WHERE guild_id=?", (guild_id,)).fetchone()
         return int(row[0]) if row else None
+
 
 def set_bot_logs_channel(guild_id: int, channel_id: int) -> None:
     with connect() as con:
@@ -511,14 +542,13 @@ def set_bot_logs_channel(guild_id: int, channel_id: int) -> None:
         )
         con.commit()
 
+
 def get_bot_logs_channel(guild_id: int) -> Optional[int]:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute(
-            "SELECT bot_logs_channel_id FROM guild_settings WHERE guild_id=?",
-            (guild_id,),
-        ).fetchone()
+        row = cur.execute("SELECT bot_logs_channel_id FROM guild_settings WHERE guild_id=?", (guild_id,)).fetchone()
         return int(row[0]) if row else None
+
 
 def set_welcome_settings(guild_id: int, channel_id: int, image_filename: str) -> None:
     with connect() as con:
@@ -535,6 +565,7 @@ def set_welcome_settings(guild_id: int, channel_id: int, image_filename: str) ->
         )
         con.commit()
 
+
 def get_welcome_settings(guild_id: int) -> Optional[Dict[str, str | int]]:
     with connect() as con:
         cur = con.cursor()
@@ -545,33 +576,37 @@ def get_welcome_settings(guild_id: int) -> Optional[Dict[str, str | int]]:
             """,
             (guild_id,),
         ).fetchone()
-        if not row:
-            return None
-        return {
-            "welcome_channel_id": row[0],
-            "welcome_image_filename": row[1] or "welcome.png",
-        }
+    if not row:
+        return None
+    return {
+        "welcome_channel_id": row[0],
+        "welcome_image_filename": row[1] or "welcome.png",
+    }
+
 
 def set_mu_forum_channel(guild_id: int, channel_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO guild_settings (guild_id, mu_forum_channel_id)
             VALUES (?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET mu_forum_channel_id=excluded.mu_forum_channel_id
-        """, (guild_id, channel_id))
+            """,
+            (guild_id, channel_id),
+        )
         con.commit()
+
 
 def get_mu_forum_channel(guild_id: int) -> int | None:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("""
-            SELECT mu_forum_channel_id FROM guild_settings WHERE guild_id=?
-        """, (guild_id,)).fetchone()
+        row = cur.execute("SELECT mu_forum_channel_id FROM guild_settings WHERE guild_id=?", (guild_id,)).fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
+
 # =============================================================================
-# Emoji / Sticker stats
+# Emoji / Sticker / GIF stats
 # =============================================================================
 
 def bump_emoji_usage(
@@ -598,6 +633,7 @@ def bump_emoji_usage(
         )
         con.commit()
 
+
 def top_emojis(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, str, int, int, int]]:
     with connect() as con:
         cur = con.cursor()
@@ -612,13 +648,8 @@ def top_emojis(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, st
             (guild_id, month, limit),
         ).fetchall()
 
-def bump_sticker_usage(
-    guild_id: int,
-    when_iso: str,
-    sticker_id: int,
-    sticker_name: str,
-    inc: int = 1,
-) -> None:
+
+def bump_sticker_usage(guild_id: int, when_iso: str, sticker_id: int, sticker_name: str, inc: int = 1) -> None:
     month = when_iso[:7]
     with connect() as con:
         cur = con.cursor()
@@ -634,6 +665,7 @@ def bump_sticker_usage(
         )
         con.commit()
 
+
 def top_stickers(guild_id: int, month: str, limit: int = 20) -> List[Tuple[int, str, int]]:
     with connect() as con:
         cur = con.cursor()
@@ -648,16 +680,12 @@ def top_stickers(guild_id: int, month: str, limit: int = 20) -> List[Tuple[int, 
             (guild_id, month, limit),
         ).fetchall()
 
+
 # =============================================================================
-# Member activity: unified metrics (messages/words/mentions/emoji...) + legacy mirrors
+# Member activity (unified metrics + legacy mirrors)
 # =============================================================================
 
-def bump_member_message(
-    guild_id: int,
-    user_id: int,
-    when_iso: str | None = None,
-    inc: int = 1,
-) -> None:
+def bump_member_message(guild_id: int, user_id: int, when_iso: str | None = None, inc: int = 1) -> None:
     when_iso = when_iso or _now_iso_utc()
     day, week_key, month, hour_utc = _iso_parts(when_iso)
     with connect() as con:
@@ -687,6 +715,7 @@ def bump_member_message(
         _bump_hour_hist(con, guild_id, user_id, "messages", hour_utc, inc)
         con.commit()
 
+
 def top_members_month(guild_id: int, month: str, limit: int = 20) -> List[Tuple[int, int]]:
     with connect() as con:
         cur = con.cursor()
@@ -700,6 +729,7 @@ def top_members_month(guild_id: int, month: str, limit: int = 20) -> List[Tuple[
             """,
             (guild_id, month, limit),
         ).fetchall()
+
 
 def top_members_total(guild_id: int, limit: int = 20) -> List[Tuple[int, int]]:
     with connect() as con:
@@ -715,15 +745,13 @@ def top_members_total(guild_id: int, limit: int = 20) -> List[Tuple[int, int]]:
             (guild_id, limit),
         ).fetchall()
 
+
 def member_stats(guild_id: int, user_id: int) -> Tuple[int, List[Tuple[str, int]]]:
     """Return (total_count, [(month, count)...] sorted by month desc)."""
     with connect() as con:
         cur = con.cursor()
         total = cur.execute(
-            """
-            SELECT count FROM member_activity_total
-            WHERE guild_id=? AND user_id=?
-            """,
+            "SELECT count FROM member_activity_total WHERE guild_id=? AND user_id=?",
             (guild_id, user_id),
         ).fetchone()
         total_count = int(total[0]) if total else 0
@@ -738,6 +766,7 @@ def member_stats(guild_id: int, user_id: int) -> Tuple[int, List[Tuple[str, int]
         ).fetchall()
         return total_count, rows
 
+
 def reset_member_activity(guild_id: int, scope: str = "month", key: str | None = None) -> None:
     """Extended: resets unified 'messages' too when appropriate."""
     with connect() as con:
@@ -748,67 +777,83 @@ def reset_member_activity(guild_id: int, scope: str = "month", key: str | None =
             cur.execute("DELETE FROM member_metrics_daily WHERE guild_id=? AND metric='messages'", (guild_id,))
             cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (guild_id,))
             cur.execute("DELETE FROM member_hour_hist WHERE guild_id=? AND metric='messages'", (guild_id,))
-        elif scope in ("day","week","month") and key:
-            cur.execute(f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric='messages' AND {scope}=?", (guild_id, key))
+        elif scope in ("day", "week", "month") and key:
+            cur.execute(
+                f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric='messages' AND {scope}=?",
+                (guild_id, key),
+            )
             if scope == "month":
                 cur.execute("DELETE FROM member_activity_monthly WHERE guild_id=? AND month=?", (guild_id, key))
             cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (guild_id,))
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
                 SELECT guild_id, user_id, 'messages', SUM(count)
                 FROM member_metrics_daily
                 WHERE guild_id=? AND metric='messages'
                 GROUP BY guild_id, user_id
-            """, (guild_id,))
+                """,
+                (guild_id,),
+            )
             cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (guild_id,))
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO member_activity_total (guild_id, user_id, count)
                 SELECT guild_id, user_id, SUM(count)
                 FROM member_activity_monthly
                 WHERE guild_id=?
                 GROUP BY guild_id, user_id
-            """, (guild_id,))
+                """,
+                (guild_id,),
+            )
         else:
             raise ValueError("bad_scope_or_key")
         con.commit()
 
+
 # ---- Unified bumpers for other metrics ----
 
 def bump_member_words(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "words", day, week_key, month, inc)
         con.commit()
 
+
 def bump_member_mentioned(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "mentions", day, week_key, month, inc)
         con.commit()
 
+
 def bump_member_mentions_sent(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "mentions_sent", day, week_key, month, inc)
         con.commit()
 
+
 def bump_member_emoji_chat(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_chat", day, week_key, month, inc)
         con.commit()
 
+
 def bump_member_emoji_react(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_react", day, week_key, month, inc)
         con.commit()
 
+
 def bump_reactions_received(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
-    day, week_key, month, hour_utc = _iso_parts(when_iso)
+    day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "reactions_received", day, week_key, month, inc)
         con.commit()
+
 
 def bump_voice_minutes(guild_id: int, user_id: int, when_iso: str, minutes: int, stream_minutes: int = 0) -> None:
     if minutes <= 0 and stream_minutes <= 0:
@@ -818,8 +863,11 @@ def bump_voice_minutes(guild_id: int, user_id: int, when_iso: str, minutes: int,
         if minutes > 0:
             _upsert_metric_daily_and_total(con, guild_id, user_id, "voice_minutes", day, week_key, month, int(minutes))
         if stream_minutes > 0:
-            _upsert_metric_daily_and_total(con, guild_id, user_id, "voice_stream_minutes", day, week_key, month, int(stream_minutes))
+            _upsert_metric_daily_and_total(
+                con, guild_id, user_id, "voice_stream_minutes", day, week_key, month, int(stream_minutes)
+            )
         con.commit()
+
 
 def bump_activity_minutes(guild_id: int, user_id: int, when_iso: str, app_name: str, minutes: int, launches: int = 0) -> None:
     if minutes <= 0 and launches <= 0:
@@ -828,38 +876,50 @@ def bump_activity_minutes(guild_id: int, user_id: int, when_iso: str, app_name: 
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "activity_minutes", day, week_key, month, int(minutes))
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO member_activity_apps_daily (guild_id, user_id, app_name, day, minutes, launches)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, app_name, day) DO UPDATE SET
               minutes = minutes + excluded.minutes,
               launches = launches + excluded.launches
-        """, (guild_id, user_id, app_name or "(unknown)", day, int(minutes), int(launches)))
+            """,
+            (guild_id, user_id, app_name or "(unknown)", day, int(minutes), int(launches)),
+        )
         con.commit()
+
 
 # ---- Channel totals (for “prime channel”) ----
 
 def bump_channel_message_total(guild_id: int, user_id: int, channel_id: int, inc: int = 1) -> None:
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO member_channel_totals (guild_id, user_id, channel_id, messages)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, channel_id) DO UPDATE SET
               messages = messages + excluded.messages
-        """, (guild_id, user_id, channel_id, int(inc)))
+            """,
+            (guild_id, user_id, channel_id, int(inc)),
+        )
         con.commit()
+
 
 def prime_channel_total(guild_id: int, user_id: int) -> int | None:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("""
+        row = cur.execute(
+            """
             SELECT channel_id FROM member_channel_totals
             WHERE guild_id=? AND user_id=?
             ORDER BY messages DESC
             LIMIT 1
-        """, (guild_id, user_id)).fetchone()
+            """,
+            (guild_id, user_id),
+        ).fetchone()
         return int(row[0]) if row else None
+
 
 # ---- Period/total leaderboards (unified) ----
 
@@ -879,20 +939,26 @@ def _top_members_by_period(guild_id: int, metric: str, scope: str, key: str, lim
             (guild_id, metric, key, limit),
         ).fetchall()
 
+
 def top_members_messages_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
     return _top_members_by_period(guild_id, "messages", scope, key, limit)
+
 
 def top_members_words_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
     return _top_members_by_period(guild_id, "words", scope, key, limit)
 
+
 def top_members_mentions_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
     return _top_members_by_period(guild_id, "mentions", scope, key, limit)
+
 
 def top_members_emoji_chat_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
     return _top_members_by_period(guild_id, "emoji_chat", scope, key, limit)
 
+
 def top_members_emoji_react_period(guild_id: int, scope: str, key: str, limit: int) -> List[Tuple[int, int]]:
     return _top_members_by_period(guild_id, "emoji_react", scope, key, limit)
+
 
 def _top_members_total(guild_id: int, metric: str, limit: int) -> List[Tuple[int, int]]:
     with connect() as con:
@@ -908,10 +974,12 @@ def _top_members_total(guild_id: int, metric: str, limit: int) -> List[Tuple[int
             (guild_id, metric, limit),
         ).fetchall()
 
+
 def top_members_messages_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     rows = _top_members_total(guild_id, "messages", limit)
     if rows:
         return rows
+    # Fallback to legacy totals if unified missing (back-compat).
     with connect() as con:
         cur = con.cursor()
         return cur.execute(
@@ -925,17 +993,22 @@ def top_members_messages_total(guild_id: int, limit: int) -> List[Tuple[int, int
             (guild_id, limit),
         ).fetchall()
 
+
 def top_members_words_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     return _top_members_total(guild_id, "words", limit)
+
 
 def top_members_mentions_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     return _top_members_total(guild_id, "mentions", limit)
 
+
 def top_members_emoji_chat_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     return _top_members_total(guild_id, "emoji_chat", limit)
 
+
 def top_members_emoji_react_total(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     return _top_members_total(guild_id, "emoji_react", limit)
+
 
 # ---- Member-centric helpers ----
 
@@ -943,51 +1016,67 @@ def member_word_stats(guild_id: int, user_id: int) -> Tuple[int, List[Tuple[str,
     """Return (total_words, [(month, count)...] sorted desc)."""
     with connect() as con:
         cur = con.cursor()
-        total_row = cur.execute("""
+        total_row = cur.execute(
+            """
             SELECT count FROM member_metrics_total
             WHERE guild_id=? AND user_id=? AND metric='words'
-        """, (guild_id, user_id)).fetchone()
+            """,
+            (guild_id, user_id),
+        ).fetchone()
         total = int(total_row[0]) if total_row else 0
-
-        rows = cur.execute("""
+        rows = cur.execute(
+            """
             SELECT month, SUM(count) as c
             FROM member_metrics_daily
             WHERE guild_id=? AND user_id=? AND metric='words'
             GROUP BY month
             ORDER BY month DESC
-        """, (guild_id, user_id)).fetchall()
+            """,
+            (guild_id, user_id),
+        ).fetchall()
         return total, rows
+
 
 def member_daily_counts_month(guild_id: int, user_id: int | None, month: str) -> List[Tuple[str, int]]:
     """[(YYYY-MM-DD, count)] for messages in a month; user_id=None -> guild aggregate."""
     with connect() as con:
         cur = con.cursor()
         if user_id is None:
-            rows = cur.execute("""
+            rows = cur.execute(
+                """
                 SELECT day, SUM(count) AS c
                 FROM member_metrics_daily
                 WHERE guild_id=? AND metric='messages' AND month=?
                 GROUP BY day
                 ORDER BY day ASC
-            """, (guild_id, month)).fetchall()
+                """,
+                (guild_id, month),
+            ).fetchall()
         else:
-            rows = cur.execute("""
+            rows = cur.execute(
+                """
                 SELECT day, count
                 FROM member_metrics_daily
                 WHERE guild_id=? AND user_id=? AND metric='messages' AND month=?
                 ORDER BY day ASC
-            """, (guild_id, user_id, month)).fetchall()
+                """,
+                (guild_id, user_id, month),
+            ).fetchall()
         return rows
+
 
 def member_hour_histogram_total(guild_id: int, user_id: int, tz: str = "UTC") -> List[int]:
     """Return 24-bucket histogram for messages, rotated to tz."""
     with connect() as con:
         cur = con.cursor()
-        rows = cur.execute("""
+        rows = cur.execute(
+            """
             SELECT hour_utc, count FROM member_hour_hist
             WHERE guild_id=? AND user_id=? AND metric='messages'
-        """, (guild_id, user_id)).fetchall()
-    counts_utc = [0]*24
+            """,
+            (guild_id, user_id),
+        ).fetchall()
+    counts_utc = [0] * 24
     for h, c in rows:
         counts_utc[int(h)] += int(c)
 
@@ -998,33 +1087,40 @@ def member_hour_histogram_total(guild_id: int, user_id: int, tz: str = "UTC") ->
         target = ZoneInfo(tz)
         now = datetime.now(timezone.utc)
         offset = int((now.astimezone(target).utcoffset() or 0).total_seconds() // 3600)
-        rotated = [0]*24
+        rotated = [0] * 24
         for h in range(24):
-            pt_h = (h + offset) % 24
-            rotated[pt_h] = counts_utc[h]
+            rotated[(h + offset) % 24] = counts_utc[h]
         return rotated
     except Exception:
         return counts_utc
+
 
 def available_months(guild_id: int) -> List[str]:
     """Months with any message activity (prefer unified table, fallback to legacy)."""
     with connect() as con:
         cur = con.cursor()
-        rows = cur.execute("""
+        rows = cur.execute(
+            """
             SELECT DISTINCT month FROM member_metrics_daily
             WHERE guild_id=? AND metric='messages'
             ORDER BY month DESC
             LIMIT 36
-        """, (guild_id,)).fetchall()
+            """,
+            (guild_id,),
+        ).fetchall()
         if rows:
             return [r[0] for r in rows]
-        rows2 = cur.execute("""
+        rows2 = cur.execute(
+            """
             SELECT DISTINCT month FROM member_activity_monthly
             WHERE guild_id=?
             ORDER BY month DESC
             LIMIT 36
-        """, (guild_id,)).fetchall()
+            """,
+            (guild_id,),
+        ).fetchall()
         return [r[0] for r in rows2]
+
 
 def _reset_metric(guild_id: int, metric: str, scope: str, key: str | None) -> None:
     with connect() as con:
@@ -1034,37 +1130,51 @@ def _reset_metric(guild_id: int, metric: str, scope: str, key: str | None) -> No
             cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric=?", (guild_id, metric))
             if metric == "messages":
                 cur.execute("DELETE FROM member_hour_hist WHERE guild_id=? AND metric='messages'", (guild_id,))
-        elif scope in ("day","week","month") and key:
-            cur.execute(f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric=? AND {scope}=?", (guild_id, metric, key))
-            cur.execute("""
+        elif scope in ("day", "week", "month") and key:
+            cur.execute(
+                f"DELETE FROM member_metrics_daily WHERE guild_id=? AND metric=? AND {scope}=?",
+                (guild_id, metric, key),
+            )
+            cur.execute(
+                """
                 DELETE FROM member_metrics_total
                 WHERE guild_id=? AND metric=? AND user_id IN (
                   SELECT DISTINCT user_id FROM member_metrics_daily
                   WHERE guild_id=? AND metric=?
                 )
-            """, (guild_id, metric, guild_id, metric))
-            cur.execute("""
+                """,
+                (guild_id, metric, guild_id, metric),
+            )
+            cur.execute(
+                """
                 INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
                 SELECT guild_id, user_id, metric, SUM(count)
                 FROM member_metrics_daily
                 WHERE guild_id=? AND metric=?
                 GROUP BY guild_id, user_id, metric
-            """, (guild_id, metric))
+                """,
+                (guild_id, metric),
+            )
         else:
             raise ValueError("bad_scope_or_key")
         con.commit()
 
+
 def reset_member_words(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "words", scope, key)
+
 
 def reset_member_mentions(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "mentions", scope, key)
 
+
 def reset_member_emoji_chat(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "emoji_chat", scope, key)
 
+
 def reset_member_emoji_react(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "emoji_react", scope, key)
+
 
 # =============================================================================
 # Admin utilities: views, CSV ingest, rebuilders, cleanup
@@ -1074,27 +1184,34 @@ def ensure_activity_views() -> None:
     """Create simple rollup views for leaderboards/graphs."""
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
-        CREATE VIEW IF NOT EXISTS v_messages_daily AS
-        SELECT guild_id, user_id, day, week, month, count
-        FROM member_metrics_daily
-        WHERE metric='messages'
-        """)
-        cur.execute("""
-        CREATE VIEW IF NOT EXISTS v_messages_weekly AS
-        SELECT guild_id, user_id, week, SUM(count) AS count
-        FROM member_metrics_daily
-        WHERE metric='messages'
-        GROUP BY guild_id, user_id, week
-        """)
-        cur.execute("""
-        CREATE VIEW IF NOT EXISTS v_messages_monthly AS
-        SELECT guild_id, user_id, month, SUM(count) AS count
-        FROM member_metrics_daily
-        WHERE metric='messages'
-        GROUP BY guild_id, user_id, month
-        """)
+        cur.execute(
+            """
+            CREATE VIEW IF NOT EXISTS v_messages_daily AS
+            SELECT guild_id, user_id, day, week, month, count
+            FROM member_metrics_daily
+            WHERE metric='messages'
+            """
+        )
+        cur.execute(
+            """
+            CREATE VIEW IF NOT EXISTS v_messages_weekly AS
+            SELECT guild_id, user_id, week, SUM(count) AS count
+            FROM member_metrics_daily
+            WHERE metric='messages'
+            GROUP BY guild_id, user_id, week
+            """
+        )
+        cur.execute(
+            """
+            CREATE VIEW IF NOT EXISTS v_messages_monthly AS
+            SELECT guild_id, user_id, month, SUM(count) AS count
+            FROM member_metrics_daily
+            WHERE metric='messages'
+            GROUP BY guild_id, user_id, month
+            """
+        )
         con.commit()
+
 
 def import_month_csv_rows(rows: Iterable[Tuple[int, str, int, int]]) -> int:
     """
@@ -1122,61 +1239,81 @@ def import_month_csv_rows(rows: Iterable[Tuple[int, str, int, int]]) -> int:
 
     with connect() as con:
         cur = con.cursor()
-        cur.executemany("""
+        cur.executemany(
+            """
             INSERT INTO member_metrics_daily (guild_id, user_id, metric, day, week, month, count)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, metric, day) DO UPDATE SET
               count = count + excluded.count
-        """, prepared)
-        cur.executemany("""
+            """,
+            prepared,
+        )
+        cur.executemany(
+            """
             INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, month) DO UPDATE SET
               count = count + excluded.count
-        """, legacy_monthly)
+            """,
+            legacy_monthly,
+        )
 
         gids = sorted({g for (g, _, _, _, _, _, _) in prepared})
         for gid in gids:
             cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (gid,))
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
                 SELECT guild_id, user_id, 'messages', SUM(count)
                 FROM member_metrics_daily
                 WHERE guild_id=? AND metric='messages'
                 GROUP BY guild_id, user_id
-            """, (gid,))
+                """,
+                (gid,),
+            )
             cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (gid,))
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO member_activity_total (guild_id, user_id, count)
                 SELECT guild_id, user_id, SUM(count)
                 FROM member_activity_monthly
                 WHERE guild_id=?
                 GROUP BY guild_id, user_id
-            """, (gid,))
+                """,
+                (gid,),
+            )
         con.commit()
     return len(prepared)
+
 
 def rebuild_activity_totals_for_guild(guild_id: int) -> None:
     """Recompute unified totals (all metrics) from daily; legacy totals from legacy monthly."""
     with connect() as con:
         cur = con.cursor()
         cur.execute("DELETE FROM member_metrics_total WHERE guild_id=?", (guild_id,))
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
             SELECT guild_id, user_id, metric, SUM(count)
             FROM member_metrics_daily
             WHERE guild_id=?
             GROUP BY guild_id, user_id, metric
-        """, (guild_id,))
+            """,
+            (guild_id,),
+        )
         cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (guild_id,))
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO member_activity_total (guild_id, user_id, count)
             SELECT guild_id, user_id, SUM(count)
             FROM member_activity_monthly
             WHERE guild_id=?
             GROUP BY guild_id, user_id
-        """, (guild_id,))
+            """,
+            (guild_id,),
+        )
         con.commit()
+
 
 def cleanup_activity(guild_id: int | None = None) -> int:
     """
@@ -1206,17 +1343,18 @@ def cleanup_activity(guild_id: int | None = None) -> int:
         con.commit()
     return total_deleted
 
+
 # =============================================================================
 # RPG progression & XP
 # =============================================================================
 
-# MMO-ish level curve: total XP needed to reach level L
-# L1 -> 0, L2 -> 100, L3 -> 282, L10 ~ 5.7k, L20 ~ 36k
 def _xp_for_level(level: int) -> int:
+    """Total XP required to reach `level`. L1→0, L2→100, L3→282, L10≈5.7k, L20≈36k."""
     if level <= 1:
         return 0
     # ∫ 100*x^1.5 dx ≈ 40 * (level-1)^(2.5)
     return int(40 * (level - 1) ** 2.5)
+
 
 def level_from_xp(total_xp: int) -> int:
     lo, hi = 1, 300
@@ -1228,6 +1366,7 @@ def level_from_xp(total_xp: int) -> int:
             hi = mid - 1
     return lo
 
+
 def xp_progress(total_xp: int) -> tuple[int, int, int]:
     """Return (level, current_into_level, needed_for_next)."""
     lvl = level_from_xp(total_xp)
@@ -1235,8 +1374,9 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
     nxt = _xp_for_level(lvl + 1) - _xp_for_level(lvl)
     return (lvl, cur, nxt)
 
+
 # Base XP rules (before per-channel multipliers in the cog)
-XP_RULES = {
+XP_RULES: Dict[str, float] = {
     "messages": 5,               # per message
     "words_per_20": 2,           # +2 per 20 words (floor)
     "mentions_received": 3,
@@ -1248,45 +1388,49 @@ XP_RULES = {
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
     "activity_minutes": 1,
+    # keep both for compatibility with older code:
+    "gifs": 1,
     "gif_use": 1,
 }
 
-def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int]:
+
+def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int | float]:
     """
     Build per-stat 'activity score' using unified totals.
     Emoji-only messages increase DEX signal.
     """
     cur = con.cursor()
-    totals = dict(cur.execute("""
-        SELECT metric, count FROM member_metrics_total
-        WHERE guild_id=? AND user_id=?
-    """, (guild_id, user_id)).fetchall())
+    totals = dict(
+        cur.execute(
+            "SELECT metric, count FROM member_metrics_total WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        ).fetchall()
+    )
 
-    # Base signals from existing metrics
-    messages            = int(totals.get("messages", 0))
-    words               = int(totals.get("words", 0))
-    mentions_recv       = int(totals.get("mentions", 0))
-    mentions_sent       = int(totals.get("mentions_sent", 0))
-    emoji_chat          = int(totals.get("emoji_chat", 0))
-    emoji_react         = int(totals.get("emoji_react", 0))
-    reacts_recv         = int(totals.get("reactions_received", 0))
-    voice_min           = int(totals.get("voice_minutes", 0))
-    stream_min          = int(totals.get("voice_stream_minutes", 0))
-    activity_min        = int(totals.get("activity_minutes", 0))
-    emoji_only_msgs     = int(totals.get("emoji_only", 0))  # NEW
+    messages        = int(totals.get("messages", 0))
+    words           = int(totals.get("words", 0))
+    mentions_recv   = int(totals.get("mentions", 0))
+    mentions_sent   = int(totals.get("mentions_sent", 0))
+    emoji_chat      = int(totals.get("emoji_chat", 0))
+    emoji_react     = int(totals.get("emoji_react", 0))
+    reacts_recv     = int(totals.get("reactions_received", 0))
+    voice_min       = int(totals.get("voice_minutes", 0))
+    stream_min      = int(totals.get("voice_stream_minutes", 0))
+    activity_min    = int(totals.get("activity_minutes", 0))
+    emoji_only_msgs = int(totals.get("emoji_only", 0))
 
-    # Stat signals (simple additive; adjust weights later if you want)
-    scores = {
-        "str": messages + emoji_chat,                       # throughput + expressive chat
-        "int": sqrt(float(words)),                                 # depth
-        "cha": mentions_recv + reacts_recv,                 # recognition
-        "vit": voice_min + stream_min,                      # presence
-        "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse + emoji-only flavor
-        "wis": activity_min,                                # focused sessions
+    return {
+        "str": messages + emoji_chat,                     # throughput + expressive chat
+        "int": sqrt(float(words)),                        # depth
+        "cha": mentions_recv + reacts_recv,               # recognition
+        "vit": voice_min + stream_min,                    # presence
+        "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse
+        "wis": activity_min,                              # focused sessions
     }
-    return scores
+
 
 _LEVELUP_DISTR = [4, 3, 2, 1, 1, 0]  # highest -> lowest activity types
+
 
 def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -> None:
     """
@@ -1299,9 +1443,7 @@ def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -
     order = ["str", "dex", "int", "wis", "cha", "vit"]  # stable tiebreaker
     ranked = sorted(order, key=lambda k: (-scores.get(k, 0), order.index(k)))
 
-    # Build SQL: add gains to each stat
-    sets = []
-    params = []
+    sets, params = [], []
     for stat, add in zip(ranked, _LEVELUP_DISTR):
         if add > 0:
             sets.append(f"{stat}={stat}+?")
@@ -1312,22 +1454,17 @@ def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -
     cur.execute(f"UPDATE member_rpg_progress SET {', '.join(sets)} WHERE guild_id=? AND user_id=?", params)
 
 
-def _two_secondaries(primary: str) -> tuple[str, str]:
-    wheel = ["str", "dex", "int", "wis", "cha", "vit"]
-    i = wheel.index(primary)
-    return (wheel[(i+1)%6], wheel[(i+2)%6])
-
 def _apply_xp(con: sqlite3.Connection, guild_id: int, user_id: int, add_xp: int) -> tuple[int, int]:
     cur = con.cursor()
-    row = cur.execute("""
-        SELECT xp, level FROM member_rpg_progress
-        WHERE guild_id=? AND user_id=?
-    """, (guild_id, user_id)).fetchone()
+    row = cur.execute(
+        "SELECT xp, level FROM member_rpg_progress WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id),
+    ).fetchone()
     if not row:
-        cur.execute("""
-            INSERT INTO member_rpg_progress (guild_id, user_id, xp, level)
-            VALUES (?, ?, 0, 1)
-        """, (guild_id, user_id))
+        cur.execute(
+            "INSERT INTO member_rpg_progress (guild_id, user_id, xp, level) VALUES (?, ?, 0, 1)",
+            (guild_id, user_id),
+        )
         xp, level = 0, 1
     else:
         xp, level = int(row[0]), int(row[1])
@@ -1336,13 +1473,15 @@ def _apply_xp(con: sqlite3.Connection, guild_id: int, user_id: int, add_xp: int)
     new_level = level_from_xp(xp)
 
     if new_level > level:
-        # Apply new ranked distribution +4,+3,+2,+1,+1,0
         _apply_levelup_stats(con, guild_id, user_id)
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE member_rpg_progress
                SET level=?, xp=?, last_level_up=datetime('now')
              WHERE guild_id=? AND user_id=?
-        """, (new_level, xp, guild_id, user_id))
+            """,
+            (new_level, xp, guild_id, user_id),
+        )
     else:
         cur.execute("UPDATE member_rpg_progress SET xp=? WHERE guild_id=? AND user_id=?", (xp, guild_id, user_id))
 
@@ -1357,34 +1496,48 @@ def award_xp_for_event(guild_id: int, user_id: int, base_xp: float, channel_mult
         con.commit()
         return lvl, xp
 
+
 def get_rpg_progress(guild_id: int, user_id: int) -> dict:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("""
+        row = cur.execute(
+            """
             SELECT xp, level, str, int, cha, vit, dex, wis, COALESCE(last_level_up, '')
             FROM member_rpg_progress
             WHERE guild_id=? AND user_id=?
-        """, (guild_id, user_id)).fetchone()
+            """,
+            (guild_id, user_id),
+        ).fetchone()
         if not row:
-            return {"xp": 0, "level": 1, "str":5, "int":5, "cha":5, "vit":5, "dex":5, "wis":5, "last_level_up":""}
+            return {"xp": 0, "level": 1, "str": 5, "int": 5, "cha": 5, "vit": 5, "dex": 5, "wis": 5, "last_level_up": ""}
         return {
-            "xp": int(row[0]), "level": int(row[1]),
-            "str": int(row[2]), "int": int(row[3]), "cha": int(row[4]),
-            "vit": int(row[5]), "dex": int(row[6]), "wis": int(row[7]),
+            "xp": int(row[0]),
+            "level": int(row[1]),
+            "str": int(row[2]),
+            "int": int(row[3]),
+            "cha": int(row[4]),
+            "vit": int(row[5]),
+            "dex": int(row[6]),
+            "wis": int(row[7]),
             "last_level_up": row[8],
         }
 
-def top_levels(guild_id: int, limit: int = 20) -> list[tuple[int,int,int]]:
-    """[(user_id, level, xp)] by level desc, xp desc."""
+
+def top_levels(guild_id: int, limit: int = 20) -> list[tuple[int, int, int]]:
+    """[(user_id, level, xp)] sorted by level desc, xp desc."""
     with connect() as con:
         cur = con.cursor()
-        return cur.execute("""
+        return cur.execute(
+            """
             SELECT user_id, level, xp
             FROM member_rpg_progress
             WHERE guild_id=?
             ORDER BY level DESC, xp DESC
             LIMIT ?
-        """, (guild_id, limit)).fetchall()
+            """,
+            (guild_id, limit),
+        ).fetchall()
+
 
 # =============================================================================
 # Mod actions (discipline)
@@ -1423,15 +1576,10 @@ def add_mod_action(
             ),
         )
         con.commit()
-        mid = cur.lastrowid
-    log.info("add_mod_action: id=%s guild=%s user=%s action=%s rule=%r", mid, guild_id, target_user_id, action, rule)
-    return mid
+        return cur.lastrowid
 
-def list_mod_actions_for_user(
-    guild_id: int,
-    target_user_id: int,
-    limit: int = 20,
-) -> List[Tuple]:
+
+def list_mod_actions_for_user(guild_id: int, target_user_id: int, limit: int = 20) -> List[Tuple]:
     with connect() as con:
         cur = con.cursor()
         return cur.execute(
@@ -1445,12 +1593,14 @@ def list_mod_actions_for_user(
             (guild_id, target_user_id, limit),
         ).fetchall()
 
+
 # =============================================================================
 # Movie Night (reuses club slots)
 # =============================================================================
 
 def get_movie_cfg(guild_id: int):
     return get_club_cfg(guild_id, "movie")
+
 
 def set_movie_cfg(guild_id: int, announcements_id: int, projection_channel_id: int, polls_id: int) -> int:
     return upsert_club_cfg(
@@ -1461,6 +1611,7 @@ def set_movie_cfg(guild_id: int, announcements_id: int, projection_channel_id: i
         polls=polls_id,
         discussion=0,
     )
+
 
 def create_movie_events(
     guild_id: int,
@@ -1481,14 +1632,18 @@ def create_movie_events(
             (guild_id, club_id, title, link or "", show_date_iso, event_id_morning, event_id_evening),
         )
         con.commit()
-        mid = cur.lastrowid
-    log.info("create_movie_events: id=%s guild=%s club=%s title=%r", mid, guild_id, club_id, title)
-    return mid
+        return cur.lastrowid
+
+
+# =============================================================================
+# Role welcome (first-time DM tracking)
+# =============================================================================
 
 def role_welcome_already_sent(guild_id: int, user_id: int, role_id: int) -> bool:
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS role_welcome_sent (
                 guild_id INTEGER NOT NULL,
                 user_id  INTEGER NOT NULL,
@@ -1496,24 +1651,29 @@ def role_welcome_already_sent(guild_id: int, user_id: int, role_id: int) -> bool
                 sent_at  TEXT    NOT NULL,
                 PRIMARY KEY (guild_id, user_id, role_id)
             )
-        """)
-        row = cur.execute("""
-            SELECT 1 FROM role_welcome_sent
-            WHERE guild_id=? AND user_id=? AND role_id=?
-            LIMIT 1
-        """, (guild_id, user_id, role_id)).fetchone()
+            """
+        )
+        row = cur.execute(
+            "SELECT 1 FROM role_welcome_sent WHERE guild_id=? AND user_id=? AND role_id=? LIMIT 1",
+            (guild_id, user_id, role_id),
+        ).fetchone()
         return bool(row)
+
 
 def role_welcome_mark_sent(guild_id: int, user_id: int, role_id: int) -> None:
     when_iso = _now_iso_utc()
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT OR REPLACE INTO role_welcome_sent
             (guild_id, user_id, role_id, sent_at)
             VALUES (?, ?, ?, ?)
-        """, (guild_id, user_id, role_id, when_iso))
+            """,
+            (guild_id, user_id, role_id, when_iso),
+        )
         con.commit()
+
 
 # =============================================================================
 # MangaUpdates persistence
@@ -1524,17 +1684,24 @@ def mu_register_thread_series(guild_id: int, thread_id: int, series_id: str, ser
     now = _now_iso_utc()
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO mu_series (series_id, title, created_at)
             VALUES (?, ?, ?)
             ON CONFLICT(series_id) DO UPDATE SET title=excluded.title
-        """, (str(series_id), series_title, now))
-        cur.execute("""
+            """,
+            (str(series_id), series_title, now),
+        )
+        cur.execute(
+            """
             INSERT INTO mu_thread_series (guild_id, thread_id, series_id)
             VALUES (?, ?, ?)
             ON CONFLICT(guild_id, thread_id) DO UPDATE SET series_id=excluded.series_id
-        """, (guild_id, thread_id, str(series_id)))
+            """,
+            (guild_id, thread_id, str(series_id)),
+        )
         con.commit()
+
 
 def mu_get_thread_series(thread_id: int, guild_id: int | None = None) -> str | None:
     with connect() as con:
@@ -1542,8 +1709,12 @@ def mu_get_thread_series(thread_id: int, guild_id: int | None = None) -> str | N
         if guild_id is None:
             row = cur.execute("SELECT series_id FROM mu_thread_series WHERE thread_id=?", (thread_id,)).fetchone()
         else:
-            row = cur.execute("SELECT series_id FROM mu_thread_series WHERE guild_id=? AND thread_id=?", (guild_id, thread_id)).fetchone()
+            row = cur.execute(
+                "SELECT series_id FROM mu_thread_series WHERE guild_id=? AND thread_id=?",
+                (guild_id, thread_id),
+            ).fetchone()
         return row[0] if row else None
+
 
 def mu_upsert_release(
     series_id: str,
@@ -1564,22 +1735,36 @@ def mu_upsert_release(
     with connect() as con:
         cur = con.cursor()
         try:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO mu_releases
                     (series_id, release_id, title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                str(series_id), int(release_id), title, raw_title, description,
-                volume, chapter, subchapter, group_name, url, int(release_ts), now
-            ))
+                """,
+                (
+                    str(series_id),
+                    int(release_id),
+                    title,
+                    raw_title,
+                    description,
+                    volume,
+                    chapter,
+                    subchapter,
+                    group_name,
+                    url,
+                    int(release_ts),
+                    now,
+                ),
+            )
             con.commit()
             return True
         except sqlite3.IntegrityError:
             return False
 
+
 def mu_bulk_upsert_releases(series_id: str, items: list[dict]) -> list[int]:
     """Upsert many releases; return newly inserted release_ids (ascending by release_ts)."""
-    inserted: list[tuple[int,int]] = []  # (release_ts, release_id)
+    inserted: list[tuple[int, int]] = []
     for r in items:
         rid = int(r.get("release_id") or r.get("id"))
         ok = mu_upsert_release(
@@ -1601,14 +1786,13 @@ def mu_bulk_upsert_releases(series_id: str, items: list[dict]) -> list[int]:
     inserted.sort(key=lambda x: x[0])  # oldest → newest
     return [rid for _, rid in inserted]
 
+
 def mu_latest_release_ts(series_id: str) -> int:
-    """Most recent known release_ts for a series (or -1)."""
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("""
-            SELECT COALESCE(MAX(release_ts), -1) FROM mu_releases WHERE series_id=?
-        """, (str(series_id),)).fetchone()
+        row = cur.execute("SELECT COALESCE(MAX(release_ts), -1) FROM mu_releases WHERE series_id=?", (str(series_id),)).fetchone()
         return int(row[0] if row and row[0] is not None else -1)
+
 
 def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *, english_only: bool = False) -> list[tuple]:
     """
@@ -1617,7 +1801,8 @@ def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *
     """
     with connect() as con:
         cur = con.cursor()
-        rows = cur.execute("""
+        rows = cur.execute(
+            """
             SELECT r.release_id, r.title, r.raw_title, r.description, r.volume, r.chapter, r.subchapter,
                    r.group_name, r.url, r.release_ts
             FROM mu_releases r
@@ -1625,7 +1810,9 @@ def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *
               ON tp.guild_id=? AND tp.thread_id=? AND tp.series_id=r.series_id AND tp.release_id=r.release_id
             WHERE r.series_id=? AND tp.release_id IS NULL
             ORDER BY r.release_ts ASC, r.release_id ASC
-        """, (guild_id, thread_id, str(series_id))).fetchall()
+            """,
+            (guild_id, thread_id, str(series_id)),
+        ).fetchall()
 
         if not english_only:
             return rows
@@ -1633,32 +1820,41 @@ def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *
         def _is_en(title, raw, desc):
             txt = f"{title or ''} {raw or ''} {desc or ''}".lower()
             return any(k in txt for k in ("eng", "english", "[en]", "(en)"))
+
         return [r for r in rows if _is_en(r[1], r[2], r[3])]
+
 
 def mu_mark_posted(guild_id: int, thread_id: int, series_id: str, release_id: int, when_iso: str | None = None) -> None:
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO mu_thread_posts (guild_id, thread_id, series_id, release_id, posted_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, thread_id, release_id) DO NOTHING
-        """, (guild_id, thread_id, str(series_id), int(release_id), when_iso or _now_iso_utc()))
+            """,
+            (guild_id, thread_id, str(series_id), int(release_id), when_iso or _now_iso_utc()),
+        )
         con.commit()
+
 
 def bump_member_gifs(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
     day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "gifs", day, week_key, month, inc)
         con.commit()
+
+
 def bump_gif_usage(guild_id: int, when_iso: str, gif_key: str, source: str, inc: int = 1) -> None:
     """
-    gif_key: stable key for the GIF (prefer the direct media URL if available; else the provider page URL)
-    source: short provider token like 'tenor', 'giphy', 'imgur', 'discord', 'other'
+    gif_key: stable key for the GIF (prefer direct media URL; else provider page URL)
+    source: provider token like 'tenor', 'giphy', 'imgur', 'discord', 'other'
     """
     month = when_iso[:7]
     with connect() as con:
         cur = con.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS gif_usage_monthly (
                 guild_id INTEGER NOT NULL,
                 month    TEXT    NOT NULL,   -- YYYY-MM
@@ -1667,61 +1863,82 @@ def bump_gif_usage(guild_id: int, when_iso: str, gif_key: str, source: str, inc:
                 count    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, month, gif_key)
             )
-        """)
-        cur.execute("""
+            """
+        )
+        cur.execute(
+            """
             INSERT INTO gif_usage_monthly (guild_id, month, gif_key, source, count)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, month, gif_key)
             DO UPDATE SET count = count + excluded.count
-        """, (guild_id, month, gif_key[:512], source[:32], inc))
+            """,
+            (guild_id, month, gif_key[:512], source[:32], inc),
+        )
         con.commit()
+
+
 def mu_get_release(series_id: str, release_id: int) -> dict | None:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("""
+        row = cur.execute(
+            """
             SELECT title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts
             FROM mu_releases WHERE series_id=? AND release_id=?
-        """, (str(series_id), int(release_id))).fetchone()
+            """,
+            (str(series_id), int(release_id)),
+        ).fetchone()
         if not row:
             return None
         return {
-            "title": row[0], "raw_title": row[1], "description": row[2],
-            "volume": row[3], "chapter": row[4], "subchapter": row[5],
-            "group": row[6], "url": row[7], "release_ts": row[8],
-            "release_id": int(release_id), "series_id": str(series_id),
+            "title": row[0],
+            "raw_title": row[1],
+            "description": row[2],
+            "volume": row[3],
+            "chapter": row[4],
+            "subchapter": row[5],
+            "group": row[6],
+            "url": row[7],
+            "release_ts": row[8],
+            "release_id": int(release_id),
+            "series_id": str(series_id),
         }
+
+
 def top_gifs(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, str, int]]:
     """Returns [(gif_key, source, count)] for the month, desc."""
     with connect() as con:
         cur = con.cursor()
-        return cur.execute("""
+        return cur.execute(
+            """
             SELECT gif_key, source, count
             FROM gif_usage_monthly
             WHERE guild_id=? AND month=?
             ORDER BY count DESC
             LIMIT ?
-        """, (guild_id, month, limit)).fetchall()
+            """,
+            (guild_id, month, limit),
+        ).fetchall()
+
+
 def bump_member_emoji_only(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
     day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
         _upsert_metric_daily_and_total(con, guild_id, user_id, "emoji_only", day, week_key, month, inc)
         con.commit()
+
+
 def mu_list_links_for_guild(guild_id: int) -> list[tuple[int, str, str]]:
-    """
-    Returns [(thread_id, series_id, series_title)] for the guild, newest threads first when possible.
-    """
+    """Returns [(thread_id, series_id, series_title)] newest threads first when possible."""
     with connect() as con:
         cur = con.cursor()
-        rows = cur.execute("""
-            SELECT ts.thread_id,
-                   ts.series_id,
-                   COALESCE(s.title, '')
+        rows = cur.execute(
+            """
+            SELECT ts.thread_id, ts.series_id, COALESCE(s.title, '')
             FROM mu_thread_series ts
-            LEFT JOIN mu_series s
-              ON s.series_id = ts.series_id
+            LEFT JOIN mu_series s ON s.series_id = ts.series_id
             WHERE ts.guild_id=?
             ORDER BY ts.thread_id DESC
-        """, (guild_id,)).fetchall()
-        # Ensure types are sane
+            """,
+            (guild_id,),
+        ).fetchall()
         return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
-
