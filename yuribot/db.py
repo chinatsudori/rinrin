@@ -1,11 +1,15 @@
 from __future__ import annotations
-
-import os
-import sqlite3
+import os, sqlite3, logging
 from typing import Optional
 
-# Point to your desired DB location. Override via ENV if needed.
-DB_PATH = os.environ.get("BOT_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "bot.sqlite3"))
+log = logging.getLogger(__name__)
+
+def _resolved_db_path() -> str:
+    """Resolve DB path every call; prefer env, fall back to package data dir."""
+    env = os.environ.get("BOT_DB_PATH")
+    if env:
+        return os.path.abspath(env)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "bot.sqlite3"))
 
 
 # ----------------------------
@@ -30,32 +34,35 @@ def _table_sql(con: sqlite3.Connection, table: str) -> Optional[str]:
 # Public: connect() and ensure_db()
 # ----------------------------
 def connect() -> sqlite3.Connection:
-    """
-    Open a connection with consistent pragmas.
-    Call ensure_db() once at startup to guarantee schema exists.
-    """
-    con = sqlite3.connect(DB_PATH, timeout=5)
+    path = _resolved_db_path()
+    con = sqlite3.connect(path, timeout=5)
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA busy_timeout=3000")
     return con
 
-
 def ensure_db() -> None:
-    """
-    Idempotently create/upgrade all tables, views, and indexes used by the bot.
-    Safe to call multiple times (e.g., on startup).
-    """
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH, timeout=5) as con:
+    path = _resolved_db_path()
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with sqlite3.connect(path, timeout=5) as con:
         cur = con.cursor()
-
-        # Pragmas (persist for this connection)
         cur.execute("PRAGMA journal_mode=WAL")
+        journal = cur.execute("PRAGMA journal_mode").fetchone()[0]
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=3000")
+
+        # visibility: what file are we actually using?
+        try:
+            st = os.stat(path)
+            size = st.st_size
+        except FileNotFoundError:
+            size = 0
+        log.info("db.open path=%s size=%d journal=%s", path, size, journal)
+
 
         # --- clubs (no CHECK on club_type) ---
         cur.execute("""
