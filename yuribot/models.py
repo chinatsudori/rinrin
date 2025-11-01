@@ -1449,3 +1449,177 @@ def available_months(guild_id: int) -> List[str]:
         """, (guild_id, guild_id))
         return [r["month"] for r in cur.fetchall()]
 
+
+# =====================================================================
+# Unified views + CSV importer + rebuilders + cleanup (append section)
+# =====================================================================
+from typing import Iterable, Tuple
+from datetime import datetime, timezone
+
+def ensure_activity_views() -> None:
+    """Create simple rollup views for leaderboards/graphs."""
+    with connect() as con:
+        cur = con.cursor()
+        # Daily view (messages only)
+        cur.execute("""
+        CREATE VIEW IF NOT EXISTS v_messages_daily AS
+        SELECT guild_id, user_id, day, week, month, count
+        FROM member_metrics_daily
+        WHERE metric='messages'
+        """)
+        # Weekly rollup
+        cur.execute("""
+        CREATE VIEW IF NOT EXISTS v_messages_weekly AS
+        SELECT guild_id, user_id, week, SUM(count) AS count
+        FROM member_metrics_daily
+        WHERE metric='messages'
+        GROUP BY guild_id, user_id, week
+        """)
+        # Monthly rollup (from unified)
+        cur.execute("""
+        CREATE VIEW IF NOT EXISTS v_messages_monthly AS
+        SELECT guild_id, user_id, month, SUM(count) AS count
+        FROM member_metrics_daily
+        WHERE metric='messages'
+        GROUP BY guild_id, user_id, month
+        """)
+        con.commit()
+
+
+def import_month_csv_rows(rows: Iterable[Tuple[int, str, int, int]]) -> int:
+    """
+    Ingest rows shaped as (guild_id, month, user_id, messages).
+    Data are written to the unified daily table as if sent on the **first day**
+    of the given month; weekly key is computed from that day.
+    Also mirrors into legacy monthly/total for backward compatibility.
+
+    Returns number of rows ingested.
+    """
+    # Normalize & batch
+    prepared: list[tuple[int, int, str, str, str, int]] = []
+    # legacy mirrors
+    legacy_monthly: list[tuple[int, int, str, int]] = []
+
+    for guild_id, month, user_id, msgs in rows:
+        # month 'YYYY-MM' -> first day ISO
+        day_iso = f"{month}-01"
+        try:
+            dt = datetime.fromisoformat(day_iso).replace(tzinfo=timezone.utc)
+        except Exception:
+            # tolerate missing Z; ensure UTC
+            dt = datetime.strptime(day_iso, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        iso_year, iso_week, _ = dt.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        prepared.append((guild_id, user_id, "messages", day_iso, week_key, month, int(msgs)))
+        legacy_monthly.append((guild_id, user_id, month, int(msgs)))
+
+    if not prepared:
+        return 0
+
+    with connect() as con:
+        cur = con.cursor()
+        # Bulk upsert unified daily
+        cur.executemany("""
+            INSERT INTO member_metrics_daily (guild_id, user_id, metric, day, week, month, count)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, metric, day) DO UPDATE SET
+              count = count + excluded.count
+        """, prepared)
+
+        # Mirror into legacy monthly
+        cur.executemany("""
+            INSERT INTO member_activity_monthly (guild_id, user_id, month, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, month) DO UPDATE SET
+              count = count + excluded.count
+        """, legacy_monthly)
+
+        # Rebuild unified totals for just the affected guilds
+        gids = sorted({g for (g, _, _, _, _, _, _) in prepared})
+        for gid in gids:
+            # Unified 'messages' totals
+            cur.execute("DELETE FROM member_metrics_total WHERE guild_id=? AND metric='messages'", (gid,))
+            cur.execute("""
+                INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+                SELECT guild_id, user_id, 'messages', SUM(count)
+                FROM member_metrics_daily
+                WHERE guild_id=? AND metric='messages'
+                GROUP BY guild_id, user_id
+            """, (gid,))
+            # Legacy totals
+            cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (gid,))
+            cur.execute("""
+                INSERT INTO member_activity_total (guild_id, user_id, count)
+                SELECT guild_id, user_id, SUM(count)
+                FROM member_activity_monthly
+                WHERE guild_id=?
+                GROUP BY guild_id, user_id
+            """, (gid,))
+        con.commit()
+    return len(prepared)
+
+
+def rebuild_activity_totals_for_guild(guild_id: int) -> None:
+    """
+    Recompute unified totals (messages/words/mentions/emoji_chat/emoji_react)
+    from member_metrics_daily, and legacy totals from legacy monthly.
+    """
+    with connect() as con:
+        cur = con.cursor()
+        # Unified: wipe + rebuild per metric for guild
+        cur.execute("DELETE FROM member_metrics_total WHERE guild_id=?", (guild_id,))
+        cur.execute("""
+            INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+            SELECT guild_id, user_id, metric, SUM(count)
+            FROM member_metrics_daily
+            WHERE guild_id=?
+            GROUP BY guild_id, user_id, metric
+        """, (guild_id,))
+
+        # Legacy: rebuild totals from legacy monthly
+        cur.execute("DELETE FROM member_activity_total WHERE guild_id=?", (guild_id,))
+        cur.execute("""
+            INSERT INTO member_activity_total (guild_id, user_id, count)
+            SELECT guild_id, user_id, SUM(count)
+            FROM member_activity_monthly
+            WHERE guild_id=?
+            GROUP BY guild_id, user_id
+        """, (guild_id,))
+        con.commit()
+
+
+def cleanup_activity(guild_id: int | None = None) -> int:
+    """
+    Purge all data written by the Activity cog.
+    If guild_id is None, purges for ALL guilds. Returns total rows deleted.
+    Tables affected:
+      - member_metrics_daily / member_metrics_total / member_hour_hist
+      - member_activity_monthly / member_activity_total (legacy mirrors)
+      - emoji_usage_monthly / sticker_usage_monthly
+    """
+    tables = [
+        "member_metrics_daily",
+        "member_metrics_total",
+        "member_hour_hist",
+        "member_activity_monthly",
+        "member_activity_total",
+        "emoji_usage_monthly",
+        "sticker_usage_monthly",
+    ]
+    total_deleted = 0
+    with connect() as con:
+        cur = con.cursor()
+        if guild_id is None:
+            for t in tables:
+                cur.execute(f"SELECT changes()")
+                cur.execute(f"DELETE FROM {t}")
+                total_deleted += cur.execute("SELECT changes()").fetchone()[0]
+        else:
+            for t in tables:
+                # some tables lack a guild_id column? all listed have it.
+                cur.execute(f"DELETE FROM {t} WHERE guild_id=?", (guild_id,))
+                total_deleted += cur.execute("SELECT changes()").fetchone()[0]
+        con.commit()
+    return total_deleted
+
+
