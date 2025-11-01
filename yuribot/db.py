@@ -10,7 +10,21 @@ def _resolved_db_path() -> str:
     if env:
         return os.path.abspath(env)
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "bot.sqlite3"))
-
+def _is_fresh_db(path: str) -> bool:
+    # brand-new SQLite is usually < 4KB; also check no rows in a core table
+    if not os.path.exists(path) or os.stat(path).st_size < 4096:
+        return True
+    try:
+        con = sqlite3.connect(path, timeout=5)
+        cur = con.cursor()
+        # if this table exists and has rows, it's not fresh
+        cur.execute("SELECT COUNT(*) FROM guild_settings")
+        has = cur.fetchone()[0]
+        con.close()
+        return False if has else True
+    except Exception:
+        # table might not exist yet -> treat as fresh
+        return True
 
 # ----------------------------
 # Internal helpers (schema)
@@ -35,6 +49,14 @@ def _table_sql(con: sqlite3.Connection, table: str) -> Optional[str]:
 # ----------------------------
 def connect() -> sqlite3.Connection:
     path = _resolved_db_path()
+    
+    # Hard guard if requested
+    if os.getenv("DB_REQUIRE_PERSISTENCE") == "1" and _is_fresh_db(path):
+        raise RuntimeError(
+            f"Refusing to start on fresh DB: {path}. "
+            "Set BOT_DB_PATH to a persistent location or unset DB_REQUIRE_PERSISTENCE."
+        )
+
     con = sqlite3.connect(path, timeout=5)
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
