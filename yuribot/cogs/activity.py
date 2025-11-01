@@ -1,45 +1,52 @@
 from __future__ import annotations
 
-import csv
 import io
 import logging
 import re
 from calendar import monthrange
-from datetime import datetime, timezone
-from io import StringIO, BytesIO
-from typing import Optional, List, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Tuple, Dict
 
 import discord
-from discord.ext import commands
 from discord import app_commands
-
-try:
-    import matplotlib.pyplot as plt  # type: ignore
-    _HAS_MPL = True
-except Exception:
-    _HAS_MPL = False
-
-try:
-    from zoneinfo import ZoneInfo  # py>=3.9
-except Exception:
-    ZoneInfo = None  # type: ignore
+from discord.ext import commands, tasks
 
 from .. import models
 from ..strings import S
 
 log = logging.getLogger(__name__)
 
+# =========================
+# Config: XP Multipliers
+# =========================
+# You can edit these lists, or wire commands later to set them per-guild.
+XP_MULTIPLIERS: Dict[int, float] = {}  # channel_id -> 2.0 / 4.0 / 8.0 etc.
+MULTIPLIER_DEFAULT = 1.0
+
+# ex:
+# XP_MULTIPLIERS.update({
+#     123456789012345678: 2.0,  # lounge
+#     234567890123456789: 4.0,  # events
+#     345678901234567890: 8.0,  # elite pit
+# })
+
+# Regex & constants (same as before) ----------------
+WORD_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
+CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:(\d+)>")
+UNICODE_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]")
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 DAY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 WEEK_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
-WORD_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
-
-# Custom emoji: <a:name:id> or <:name:id>
-CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
-# Loosely match Unicode emoji ranges
-UNICODE_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]")
-
 PT_TZNAME = "America/Los_Angeles"
+
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    _HAS_MPL = True
+except Exception:
+    _HAS_MPL = False
+
+LESBIAN_COLORS = ["#D52D00","#EF7627","#FF9A56","#FFFFFF","#D162A4","#B55690","#A30262"]
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -56,25 +63,36 @@ def _day_default() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 def _count_words(text: str | None) -> int:
-    if not text:
-        return 0
-    return len(WORD_RE.findall(text))
+    return 0 if not text else len(WORD_RE.findall(text))
 
 def _count_emojis_text(text: str | None) -> int:
     if not text:
         return 0
     return len(CUSTOM_EMOJI_RE.findall(text)) + len(UNICODE_EMOJI_RE.findall(text))
 
+def _ch_mult(ch: discord.abc.GuildChannel | None) -> float:
+    if not ch:
+        return MULTIPLIER_DEFAULT
+    return XP_MULTIPLIERS.get(getattr(ch, "id", 0), MULTIPLIER_DEFAULT)
+
+async def _require_guild(inter: discord.Interaction) -> bool:
+    if not inter.guild:
+        if not inter.response.is_done():
+            await inter.response.send_message(S("common.guild_only"), ephemeral=True)
+        else:
+            await inter.followup.send(S("common.guild_only"), ephemeral=True)
+        return False
+    return True
+
 def _fmt_rank(rows: list[tuple[int, int]], guild: discord.Guild, limit: int) -> str:
     lines: List[str] = []
     for i, (uid, cnt) in enumerate(rows[:limit], start=1):
-        member = guild.get_member(uid)
-        name = member.mention if member else f"<@{uid}>"
-        lines.append(S("activity.leaderboard.row", i=i, name=name, count=cnt))
+        m = guild.get_member(uid)
+        name = m.mention if m else f"<@{uid}>"
+        lines.append(f"{i}. {name} — **{cnt}**")
     return "\n".join(lines) if lines else S("activity.leaderboard.empty")
 
 def _prime_window_from_hist(hour_counts: List[int], window: int = 1) -> tuple[int, int, int]:
-    """Return (start_hour, end_hour, total_in_window) for best contiguous window size."""
     best_sum, best_h = -1, 0
     for h in range(24):
         s = sum(hour_counts[(h + i) % 24] for i in range(window))
@@ -89,15 +107,7 @@ def _fmt_hour_range_local(start: int, end: int, tzlabel: str = "PT") -> str:
         return f"{hh}{ampm}"
     return f"{h12(start)}–{h12(end)} {tzlabel}"
 
-def _fmt_scope_footer(limit: int, scope: str, key: Optional[str], metric: str) -> str:
-    return f"Top {limit} — {'all-time' if scope=='all' else f'{scope}={key}'} — {metric}"
-
-def _parse_scope_and_key(
-    scope: str | None,
-    day: str | None,
-    week: str | None,
-    month: str | None,
-) -> tuple[str, Optional[str]]:
+def _parse_scope_and_key(scope: str | None, day: str | None, week: str | None, month: str | None) -> tuple[str, Optional[str]]:
     s = scope or "month"
     if s == "day":
         key = day or _day_default()
@@ -112,708 +122,389 @@ def _parse_scope_and_key(
         if not MONTH_RE.match(key):
             raise ValueError("bad_month_format")
     else:
-        s = "all"
-        key = None
+        s = "all"; key = None
     return s, key
 
-async def _require_guild(inter: discord.Interaction) -> bool:
-    if not inter.guild:
-        if not inter.response.is_done():
-            await inter.response.send_message(S("common.guild_only"), ephemeral=True)
-        else:
-            await inter.followup.send(S("common.guild_only"), ephemeral=True)
-        return False
-    return True
-
-
-def _have_word_models() -> bool:
-    return all(
-        hasattr(models, attr) for attr in (
-            "bump_member_words",
-            "top_members_words_period",
-            "top_members_words_total",
-            "member_word_stats",
-            "reset_member_words",
-        )
-    )
-
-def _have_mention_models() -> bool:
-    return all(hasattr(models, a) for a in (
-        "bump_member_mentioned",
-        "top_members_mentions_period",
-        "top_members_mentions_total",
-    ))
-
-def _have_emoji_models() -> bool:
-    return all(hasattr(models, a) for a in (
-        "bump_member_emoji_chat",
-        "bump_member_emoji_react",
-        "top_members_emoji_chat_period",
-        "top_members_emoji_react_period",
-        "top_members_emoji_chat_total",
-        "top_members_emoji_react_total",
-    ))
-
-def _have_periodic_models() -> bool:
-    return all(hasattr(models, a) for a in (
-        "top_members_messages_period",
-        "top_members_messages_total",
-        "member_daily_counts_month",
-        "member_hour_histogram_total",
-    ))
-
+# =========================
+# Activity Cog (+MMO)
+# =========================
 class ActivityCog(commands.Cog):
-    """Message activity tracking: messages, words, mentions, emoji (chat vs react), with day/week/month/all scopes."""
+    """Activity tracking + RPG progression."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # track voice sessions (join -> leave)
+        self._vc_sessions: dict[tuple[int,int], dict] = {}  # (guild_id, user_id) -> {joined: dt, ch_id: int, stream_on: bool}
+        self._poll_presence.start()
 
+    def cog_unload(self):
+        self._poll_presence.cancel()
 
+    # ---------- Events ----------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot:
             return
+        gid = message.guild.id
+        uid = message.author.id
+        ch = message.channel
+        when = _now_iso()
+        mult = _ch_mult(ch)
 
-        # Messages
+        # 1) messages
         try:
-            models.bump_member_message(
-                message.guild.id,
-                message.author.id,
-                when_iso=_now_iso(),
-                inc=1,
-            )
+            models.bump_member_message(gid, uid, when_iso=when, inc=1)
+            models.bump_channel_message_total(gid, uid, getattr(ch, "id", 0), 1)
+            # XP
+            models.award_xp_for_event(gid, uid, models.XP_RULES["messages"], mult)
         except Exception:
-            log.exception(
-                "activity.bump_failed",
-                extra={
-                    "guild_id": getattr(message.guild, "id", None),
-                    "user_id": getattr(message.author, "id", None),
-                },
-            )
+            log.exception("bump.messages_failed", extra={"guild_id": gid, "user_id": uid})
 
-        # Words
-        if _have_word_models():
-            try:
-                inc_words = _count_words(message.content)
-                if inc_words > 0:
-                    models.bump_member_words(
-                        message.guild.id,
-                        message.author.id,
-                        when_iso=_now_iso(),
-                        inc=inc_words,
-                    )
-            except Exception:
-                log.exception(
-                    "activity.bump_words_failed",
-                    extra={
-                        "guild_id": message.guild.id,
-                        "user_id": message.author.id,
-                    },
-                )
+        # 2) words
+        try:
+            wc = _count_words(message.content)
+            if wc > 0:
+                models.bump_member_words(gid, uid, when_iso=when, inc=wc)
+                # XP: +2 per 20 words
+                add = (wc // 20) * models.XP_RULES["words_per_20"]
+                if add:
+                    models.award_xp_for_event(gid, uid, add, mult)
+        except Exception:
+            log.exception("bump.words_failed", extra={"guild_id": gid, "user_id": uid})
 
-        # Mentions (credit the mentioned members)
-        if _have_mention_models():
-            try:
-                mentioned_ids = {m.id for m in message.mentions if not m.bot}
-                for uid in mentioned_ids:
-                    models.bump_member_mentioned(message.guild.id, uid, when_iso=_now_iso(), inc=1)
-            except Exception:
-                log.exception("activity.bump_mentions_failed", extra={"guild_id": message.guild.id})
+        # 3) mentions: credit RECEIVED and SENT
+        try:
+            mentioned_ids = {m.id for m in message.mentions if not m.bot}
+            for mid in mentioned_ids:
+                models.bump_member_mentioned(gid, mid, when_iso=when, inc=1)
+                models.award_xp_for_event(gid, mid, models.XP_RULES["mentions_received"], mult)
+            if mentioned_ids:
+                models.bump_member_mentions_sent(gid, uid, when_iso=when, inc=len(mentioned_ids))
+                models.award_xp_for_event(gid, uid, models.XP_RULES["mentions_sent"] * len(mentioned_ids), mult)
+        except Exception:
+            log.exception("bump.mentions_failed", extra={"guild_id": gid})
 
-        # Emoji usage in chat (content)
-        if _have_emoji_models():
-            try:
-                ecount = _count_emojis_text(message.content)
-                if ecount > 0:
-                    models.bump_member_emoji_chat(message.guild.id, message.author.id, when_iso=_now_iso(), inc=ecount)
-            except Exception:
-                log.exception("activity.bump_emoji_chat_failed", extra={"guild_id": message.guild.id, "user_id": message.author.id})
+        # 4) emoji in chat
+        try:
+            ec = _count_emojis_text(message.content)
+            if ec > 0:
+                models.bump_member_emoji_chat(gid, uid, when_iso=when, inc=ec)
+                models.award_xp_for_event(gid, uid, models.XP_RULES["emoji_chat"] * ec, mult)
+        except Exception:
+            log.exception("bump.emoji_chat_failed", extra={"guild_id": gid, "user_id": uid})
+
+        # 5) stickers
+        try:
+            if message.stickers:
+                for st in message.stickers:
+                    models.bump_sticker_usage(gid, when, sticker_id=st.id, sticker_name=(st.name or ""), inc=1)
+                models.award_xp_for_event(gid, uid, models.XP_RULES["sticker_use"] * len(message.stickers), mult)
+        except Exception:
+            log.exception("bump.sticker_failed", extra={"guild_id": gid, "user_id": uid})
+
+        # 6) emoji catalog monthly (best-effort, no XP)
+        try:
+            if message.content:
+                for m in CUSTOM_EMOJI_RE.finditer(message.content):
+                    models.bump_emoji_usage(gid, when, f"custom:{m.group(1)}", "", True, False, 1)
+                for ch_ in UNICODE_EMOJI_RE.findall(message.content):
+                    key = "uni:" + "-".join(f"{ord(c):X}" for c in ch_)
+                    models.bump_emoji_usage(gid, when, key, "", False, False, 1)
+        except Exception:
+            pass
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.guild_id is None or payload.user_id is None:
             return
-        guild = self.bot.get_guild(payload.guild_id)
-        if not guild:
-            return
-        member = guild.get_member(payload.user_id)
-        if not member or member.bot:
-            return
-        if _have_emoji_models():
-            try:
-                models.bump_member_emoji_react(payload.guild_id, payload.user_id, when_iso=_now_iso(), inc=1)
-            except Exception:
-                log.exception("activity.bump_emoji_react_add_failed", extra={"guild_id": payload.guild_id, "user_id": payload.user_id})
+        gid = int(payload.guild_id)
+        uid = int(payload.user_id)
+        when = _now_iso()
+        guild = self.bot.get_guild(gid)
+        # ignore bot reactors
+        if guild:
+            m = guild.get_member(uid)
+            if m and m.bot:
+                return
 
-    group = app_commands.Group(name="activity", description="Member message activity")
+        ch = guild.get_channel(payload.channel_id) if guild else None
+        mult = _ch_mult(ch)
+
+        # award reactor
+        try:
+            models.bump_member_emoji_react(gid, uid, when_iso=when, inc=1)
+            models.award_xp_for_event(gid, uid, models.XP_RULES["emoji_react"], mult)
+        except Exception:
+            log.exception("bump.emoji_react_failed", extra={"guild_id": gid, "user_id": uid})
+
+        # credit reaction RECEIVED to the message author
+        try:
+            if guild and ch and hasattr(ch, "fetch_message"):
+                msg = await ch.fetch_message(payload.message_id)
+                if msg and msg.author and not msg.author.bot:
+                    models.bump_reactions_received(gid, msg.author.id, when, 1)
+                    models.award_xp_for_event(gid, msg.author.id, models.XP_RULES["reactions_received"], _ch_mult(ch))
+        except Exception:
+            # ignore fetch failures (rate limits or perms)
+            pass
+
+        # monthly emoji catalog (no XP)
+        try:
+            em = payload.emoji
+            if getattr(em, "id", None):
+                models.bump_emoji_usage(gid, when, f"custom:{int(em.id)}", str(em.name or ""), True, True, 1)
+            else:
+                ch_ = str(em)
+                key = "uni:" + "-".join(f"{ord(c):X}" for c in ch_)
+                models.bump_emoji_usage(gid, when, key, "", False, True, 1)
+        except Exception:
+            pass
+
+    # ---- Voice sessions: minutes & streaming ----
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if member.bot or not member.guild:
+            return
+        gid, uid = member.guild.id, member.id
+        key = (gid, uid)
+        now = datetime.now(timezone.utc)
+
+        # join session
+        if before.channel is None and after.channel is not None:
+            self._vc_sessions[key] = {"joined": now, "ch_id": after.channel.id, "stream_on": bool(after.self_stream)}
+            return
+
+        # update streaming flag
+        if key in self._vc_sessions and after.channel is not None:
+            self._vc_sessions[key]["stream_on"] = bool(after.self_stream)
+
+        # left channel or moved
+        if before.channel is not None and (after.channel is None or after.channel.id != before.channel.id):
+            info = self._vc_sessions.pop(key, None)
+            if info:
+                minutes = max(0, int((now - info["joined"]).total_seconds() // 60))
+                stream_minutes = minutes if info.get("stream_on") else 0
+                when = _now_iso()
+                models.bump_voice_minutes(gid, uid, when, minutes, stream_minutes)
+                # XP with channel multiplier of the channel they were in
+                mult = XP_MULTIPLIERS.get(info["ch_id"], MULTIPLIER_DEFAULT)
+                if minutes:
+                    models.award_xp_for_event(gid, uid, models.XP_RULES["voice_minutes"] * minutes, mult)
+                if stream_minutes:
+                    models.award_xp_for_event(gid, uid, models.XP_RULES["voice_stream_minutes"] * stream_minutes, mult)
+
+    # ---- Presence poll: approximate “Activities” minutes ----
+    @tasks.loop(minutes=5)
+    async def _poll_presence(self):
+        # lightweight: walk guilds; for each member’s current activities, if any app-like, add +5 minutes
+        now_iso = _now_iso()
+        for guild in list(self.bot.guilds):
+            try:
+                for m in list(guild.members):
+                    if m.bot:
+                        continue
+                    apps = [a for a in m.activities or [] if getattr(a, "name", None)]
+                    if not apps:
+                        continue
+                    # credit each distinct app 5 minutes
+                    names = {str(getattr(a, "name", "")[:64]) for a in apps if a}
+                    for nm in names:
+                        models.bump_activity_minutes(guild.id, m.id, now_iso, nm, minutes=5, launches=0)
+                        # XP (no channel multiplier context; use 1.0)
+                        models.award_xp_for_event(guild.id, m.id, models.XP_RULES["activity_minutes"] * 5, 1.0)
+            except Exception:
+                # never bring the bot down
+                continue
+
+    @_poll_presence.before_loop
+    async def _before_poll_presence(self):
+        await self.bot.wait_until_ready()
+
+    # ---------- Slash commands ----------
+    group = app_commands.Group(name="activity", description="Member activity + RPG")
 
     async def _month_autocomplete(self, inter: discord.Interaction, current: str):
         gid = inter.guild_id
         try:
-            available = getattr(models, "available_months", lambda _gid: [])(gid) or []
+            available = models.available_months(gid) or []
         except Exception:
-            log.exception("activity.month_autocomplete_failed", extra={"guild_id": gid})
             available = []
-
         if not available:
             now = datetime.now(timezone.utc)
             y, m = now.year, now.month
             for _ in range(12):
                 available.append(f"{y:04d}-{m:02d}")
                 m -= 1
-                if m == 0:
-                    m = 12
-                    y -= 1
-
+                if m == 0: m = 12; y -= 1
         filtered = [c for c in available if c.startswith(current)] if current else available
         return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
 
-    @group.command(name="top", description="Top members by messages, words, mentions, or emojis.")
-    @app_commands.describe(
-        scope="day/week/month/all",
-        day="YYYY-MM-DD (for scope=day)",
-        week="YYYY-Www (ISO week, e.g. 2025-W41)",
-        month="YYYY-MM (for scope=month)",
-        limit="Top N (5–50)",
-        metric="messages, words, mentions, emoji_chat, or emoji_react",
-        post="If true, post publicly in this channel",
-    )
-    @app_commands.choices(scope=[
-        app_commands.Choice(name="day", value="day"),
-        app_commands.Choice(name="week", value="week"),
-        app_commands.Choice(name="month", value="month"),
-        app_commands.Choice(name="all", value="all"),
-    ])
-    @app_commands.choices(metric=[
-        app_commands.Choice(name="messages", value="messages"),
-        app_commands.Choice(name="words", value="words"),
-        app_commands.Choice(name="mentions", value="mentions"),
-        app_commands.Choice(name="emoji_chat", value="emoji_chat"),
-        app_commands.Choice(name="emoji_react", value="emoji_react"),
-    ])
-    @app_commands.autocomplete(month=_month_autocomplete)
-    async def top(
-        self,
-        interaction: discord.Interaction,
-        scope: app_commands.Choice[str] | None = None,
-        day: Optional[str] = None,
-        week: Optional[str] = None,
-        month: Optional[str] = None,
-        limit: app_commands.Range[int, 5, 50] = 20,
-        metric: app_commands.Choice[str] | None = None,
-        post: bool = False,
-    ):
+    # existing /activity top, /activity graph, /activity export, /activity reset
+    # (use the versions from the previous cog you pasted — unchanged)
+
+    # ------- New: /activity rank (by level) -------
+    @group.command(name="rank", description="Top members by Level.")
+    @app_commands.describe(limit="How many to list (5–50)", post="Post publicly?")
+    async def rank(self, interaction: discord.Interaction,
+                   limit: app_commands.Range[int, 5, 50] = 20,
+                   post: bool = False):
         if not await _require_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
-        try:
-            scope_val, key = _parse_scope_and_key(scope.value if scope else None, day, week, month)
-            metric_val = (metric.value if metric else "messages")
+        rows = models.top_levels(interaction.guild_id, int(limit))
+        if not rows:
+            return await interaction.followup.send("No one has started their journey yet.", ephemeral=not post)
+        lines = []
+        for i, (uid, lvl, xp) in enumerate(rows, start=1):
+            m = interaction.guild.get_member(uid)
+            name = m.mention if m else f"<@{uid}>"
+            lines.append(f"{i}. {name} — **Lv {lvl}** ({xp} XP)")
+        embed = discord.Embed(title=S("activity.rank.title"), description="\n".join(lines), color=discord.Color.gold())
+        await interaction.followup.send(embed=embed, ephemeral=not post)
 
-            # Capability guards
-            if metric_val == "words" and not _have_word_models():
-                return await interaction.followup.send("Word-count tracking isn’t enabled in the backing storage.", ephemeral=not post)
-            if metric_val == "mentions" and not _have_mention_models():
-                return await interaction.followup.send("Mention tracking isn’t enabled.", ephemeral=not post)
-            if metric_val in {"emoji_chat", "emoji_react"} and not _have_emoji_models():
-                return await interaction.followup.send("Emoji tracking isn’t enabled.", ephemeral=not post)
-
-            lim = int(limit)
-            # Fetch rows
-            if scope_val == "all":
-                if metric_val == "words":
-                    rows = models.top_members_words_total(interaction.guild_id, lim) if _have_word_models() else []
-                elif metric_val == "mentions":
-                    rows = models.top_members_mentions_total(interaction.guild_id, lim) if _have_mention_models() else []
-                elif metric_val == "emoji_chat":
-                    rows = models.top_members_emoji_chat_total(interaction.guild_id, lim) if _have_emoji_models() else []
-                elif metric_val == "emoji_react":
-                    rows = models.top_members_emoji_react_total(interaction.guild_id, lim) if _have_emoji_models() else []
-                else:
-                    rows = models.top_members_messages_total(interaction.guild_id, lim)
-            else:
-                if metric_val == "words":
-                    rows = models.top_members_words_period(interaction.guild_id, scope=scope_val, key=key, limit=lim)
-                elif metric_val == "mentions":
-                    rows = models.top_members_mentions_period(interaction.guild_id, scope=scope_val, key=key, limit=lim)
-                elif metric_val == "emoji_chat":
-                    rows = models.top_members_emoji_chat_period(interaction.guild_id, scope=scope_val, key=key, limit=lim)
-                elif metric_val == "emoji_react":
-                    rows = models.top_members_emoji_react_period(interaction.guild_id, scope=scope_val, key=key, limit=lim)
-                else:
-                    rows = models.top_members_messages_period(interaction.guild_id, scope=scope_val, key=key, limit=lim)
-
-            desc = _fmt_rank(rows, interaction.guild, lim)
-            embed = discord.Embed(
-                title=f"{S('activity.leaderboard.title')} ({metric_val})",
-                description=desc or S("activity.leaderboard.empty"),
-                color=discord.Color.blurple()
-            )
-            embed.set_footer(text=_fmt_scope_footer(lim, scope_val, key, metric_val))
-            await interaction.followup.send(embed=embed, ephemeral=not post)
-
-            log.info("activity.top.used", extra={
-                "guild_id": interaction.guild_id, "user_id": interaction.user.id,
-                "scope": scope_val, "key": key, "limit": lim, "metric": metric_val, "post": post
-            })
-        except ValueError as ve:
-            key = str(ve)
-            if key == "bad_month_format":
-                msg = S("activity.bad_month_format")
-            elif key == "bad_day_format":
-                msg = "Use YYYY-MM-DD for day."
-            elif key == "bad_week_format":
-                msg = "Use YYYY-Www (e.g. 2025-W41) for week."
-            else:
-                msg = S("common.error_generic")
-            await interaction.followup.send(msg, ephemeral=not post)
-        except Exception:
-            log.exception("activity.top.failed", extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id})
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
-
-    @group.command(name="me", description="Your counts and prime chat window (messages or words).")
-    @app_commands.describe(
-        month="Optional YYYY-MM to highlight",
-        metric="messages or words",
-        post="If true, post publicly in this channel",
-    )
-    @app_commands.choices(metric=[
-        app_commands.Choice(name="messages", value="messages"),
-        app_commands.Choice(name="words", value="words"),
-    ])
+    # ------- Upgraded: /activity me (full profile) -------
+    @group.command(name="me_plus", description="Your full profile: level, stats, derived metrics, voice, activities.")
+    @app_commands.describe(month="Highlight YYYY-MM (optional)", post="Post publicly?")
     @app_commands.autocomplete(month=_month_autocomplete)
-    async def me(
-        self,
-        interaction: discord.Interaction,
-        month: Optional[str] = None,
-        metric: app_commands.Choice[str] | None = None,
-        post: bool = False
-    ):
+    async def me_plus(self, interaction: discord.Interaction, month: Optional[str] = None, post: bool = False):
         if not await _require_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
+        gid, uid = interaction.guild_id, interaction.user.id
+        month = month or _month_default()
+        if not MONTH_RE.match(month):
+            return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
+
+        # RPG
+        rpg = models.get_rpg_progress(gid, uid)
+        lvl, cur, need = models.xp_progress(rpg["xp"])
+
+        # Totals for derived metrics
+        def tot(metric: str) -> int:
+            with models.connect() as con:
+                cur_ = con.cursor()
+                row = cur_.execute("""
+                    SELECT count FROM member_metrics_total
+                    WHERE guild_id=? AND user_id=? AND metric=?
+                """, (gid, uid, metric)).fetchone()
+                return int(row[0]) if row else 0
+
+        messages = tot("messages")
+        words = tot("words")
+        mentions_recv = tot("mentions")
+        mentions_sent = tot("mentions_sent")
+        emoji_chat = tot("emoji_chat")
+        emoji_react = tot("emoji_react")
+        reacts_recv = tot("reactions_received")
+        voice_min = tot("voice_minutes")
+        stream_min = tot("voice_stream_minutes")
+        act_min = tot("activity_minutes")
+
+        # Deriveds (guard zero-div)
+        def _safe(a, b): return (a / b) if b > 0 else 0.0
+        engagement_ratio = _safe(reacts_recv, messages)
+        reply_density = 0.0
+        # replies: approximate from mentions_sent as proxy (or implement a replies metric later)
+        reply_density = _safe(mentions_sent, messages)
+        mention_depth = _safe(mentions_sent, messages)
+        media_ratio = 0.0  # add attachments metric later if needed
+        burstiness = 0.0   # requires per-hour stddev; can compute if you want using hour hist
+        response_latency = "N/A"  # non-trivial without a reply-tracker
+
+        # Prime hour & channel
         try:
-            metric_val = (metric.value if metric else "messages")
-            if metric_val == "words" and not _have_word_models():
-                return await interaction.followup.send(
-                    "Word-count tracking isn’t enabled in the backing storage.",
-                    ephemeral=not post,
-                )
-
-            if metric_val == "words":
-                total, rows = models.member_word_stats(interaction.guild_id, interaction.user.id)
-            else:
-                total, rows = models.member_stats(interaction.guild_id, interaction.user.id)
-
-            if not rows and total == 0:
-                return await interaction.followup.send(S("activity.none_yet"), ephemeral=not post)
-
-            month = month or _month_default()
-            if not MONTH_RE.match(month):
-                return await interaction.followup.send(S("activity.bad_month_format"), ephemeral=not post)
-
-            month_count = next((c for (m, c) in rows if m == month), 0)
-            join = "\n".join([f"• **{m}** — {c}" for (m, c) in rows[:12]])  # last 12 months
-
-            title = f"{S('activity.me.title', user=interaction.user)} ({metric_val})"
-            embed = discord.Embed(title=title, color=discord.Color.green())
-            embed.add_field(name=S("activity.me.month", month=month), value=str(month_count), inline=True)
-            embed.add_field(name=S("activity.me.total"), value=str(total), inline=True)
-            if join:
-                embed.add_field(name=S("activity.me.recent"), value=join, inline=False)
-
-            # Prime window (PT) using hour histogram
-            try:
-                if _have_periodic_models():
-                    hist = models.member_hour_histogram_total(
-                        interaction.guild_id, interaction.user.id, tz=PT_TZNAME
-                    )
-                    if isinstance(hist, (list, tuple)) and len(hist) == 24:
-                        s1, e1, _ = _prime_window_from_hist(list(hist), window=1)
-                        s2, e2, _ = _prime_window_from_hist(list(hist), window=2)
-                        embed.add_field(name="Prime hour", value=_fmt_hour_range_local(s1, e1, "PT"), inline=True)
-                        embed.add_field(name="Prime 2-hr", value=_fmt_hour_range_local(s2, e2, "PT"), inline=True)
-            except Exception:
-                log.exception("activity.me.prime_window_failed", extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id})
-
-            await interaction.followup.send(embed=embed, ephemeral=not post)
-
-            log.info(
-                "activity.me.used",
-                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "month": month, "metric": metric_val, "post": post},
-            )
+            hist = models.member_hour_histogram_total(gid, uid, tz="America/Los_Angeles")
+            s1, e1, _ = _prime_window_from_hist(list(hist), window=1)
+            prime_hour = _fmt_hour_range_local(s1, e1, "PT")
         except Exception:
-            log.exception(
-                "activity.me.failed",
-                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "month": month},
-            )
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
+            prime_hour = "N/A"
+        ch_id = models.prime_channel_total(gid, uid)
+        prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
-
-    @group.command(name="graph", description="Graph message frequency per day over a month.")
-    @app_commands.describe(
-        month="YYYY-MM",
-        member="Optional member to filter",
-        post="If true, post publicly in this channel"
-    )
-    @app_commands.autocomplete(month=_month_autocomplete)
-    async def graph(
-        self,
-        interaction: discord.Interaction,
-        month: Optional[str] = None,
-        member: Optional[discord.Member] = None,
-        post: bool = False,
-    ):
-        if not await _require_guild(interaction):
-            return
-        await interaction.response.defer(ephemeral=not post)
-        try:
-            month = month or _month_default()
-            if not MONTH_RE.match(month):
-                return await interaction.followup.send(S("activity.bad_month_format"), ephemeral=not post)
-            if not _have_periodic_models():
-                return await interaction.followup.send("Graphing not available (missing periodic models).", ephemeral=not post)
-
-            uid = member.id if member else None
-            rows = models.member_daily_counts_month(interaction.guild_id, user_id=uid, month=month)
-            y, m = map(int, month.split("-"))
-            days_in_month = monthrange(y, m)[1]
-            per_day = {d: 0 for d in range(1, days_in_month + 1)}
-            for dstr, cnt in rows:
-                try:
-                    d = int(dstr.split("-")[2])
-                    if 1 <= d <= days_in_month:
-                        per_day[d] = cnt
-                except Exception:
-                    continue
-
-            xs = list(range(1, days_in_month + 1))
-            ys = [per_day[d] for d in xs]
-
-            title_suffix = f" — {member.display_name}" if member else ""
-            if _HAS_MPL:
-                try:
-                    plt.figure(figsize=(8, 3))
-                    plt.plot(xs, ys, marker="o")
-                    plt.title(f"Messages per day — {month}{title_suffix}")
-                    plt.xlabel("Day")
-                    plt.ylabel("Messages")
-                    plt.tight_layout()
-                    buf = io.BytesIO()
-                    plt.savefig(buf, format="png", dpi=200)
-                    plt.close()
-                    buf.seek(0)
-                    filename = f"activity-graph-{interaction.guild_id}-{month}{'-'+str(uid) if uid else ''}.png"
-                    file = discord.File(fp=buf, filename=filename)
-                    await interaction.followup.send(file=file, ephemeral=not post)
-                except Exception:
-                    log.exception("activity.graph.image_failed", extra={"guild_id": interaction.guild_id})
-                    # Fallback to text chart
-                    graph_txt = _mini_text_graph(xs, ys, width=40, height=8)
-                    await interaction.followup.send(
-                        content=f"**Messages per day — {month}{title_suffix}**\n```\n{graph_txt}\n```",
-                        ephemeral=not post
-                    )
-            else:
-                # Text fallback
-                graph_txt = _mini_text_graph(xs, ys, width=40, height=8)
-                await interaction.followup.send(
-                    content=f"**Messages per day — {month}{title_suffix}**\n```\n{graph_txt}\n```",
-                    ephemeral=not post
-                )
-
-            log.info("activity.graph.used", extra={
-                "guild_id": interaction.guild_id, "user_id": interaction.user.id, "month": month, "member": uid
-            })
-        except Exception:
-            log.exception("activity.graph.failed", extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id})
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
-
-    @group.command(name="export", description="Export activity as CSV for any scope/metric.")
-    @app_commands.describe(
-        scope="day/week/month/all",
-        day="YYYY-MM-DD (for scope=day)",
-        week="YYYY-Www (ISO week, e.g. 2025-W41)",
-        month="YYYY-MM (for scope=month)",
-        metric="messages, words, mentions, emoji_chat, or emoji_react",
-        post="If true, post publicly in this channel"
-    )
-    @app_commands.choices(scope=[
-        app_commands.Choice(name="day", value="day"),
-        app_commands.Choice(name="week", value="week"),
-        app_commands.Choice(name="month", value="month"),
-        app_commands.Choice(name="all", value="all"),
-    ])
-    @app_commands.choices(metric=[
-        app_commands.Choice(name="messages", value="messages"),
-        app_commands.Choice(name="words", value="words"),
-        app_commands.Choice(name="mentions", value="mentions"),
-        app_commands.Choice(name="emoji_chat", value="emoji_chat"),
-        app_commands.Choice(name="emoji_react", value="emoji_react"),
-    ])
-    @app_commands.autocomplete(month=_month_autocomplete)
-    async def export(
-        self,
-        interaction: discord.Interaction,
-        scope: app_commands.Choice[str] | None = None,
-        day: Optional[str] = None,
-        week: Optional[str] = None,
-        month: Optional[str] = None,
-        metric: app_commands.Choice[str] | None = None,
-        post: bool = False
-    ):
-        if not await _require_guild(interaction):
-            return
-        await interaction.response.defer(ephemeral=not post)
-        try:
-            scope_val, key = _parse_scope_and_key(scope.value if scope else None, day, week, month)
-            metric_val = (metric.value if metric else "messages")
-
-            # Capability guards
-            if metric_val == "words" and not _have_word_models():
-                return await interaction.followup.send("Word-count tracking isn’t enabled in the backing storage.", ephemeral=not post)
-            if metric_val == "mentions" and not _have_mention_models():
-                return await interaction.followup.send("Mention tracking isn’t enabled.", ephemeral=not post)
-            if metric_val in {"emoji_chat", "emoji_react"} and not _have_emoji_models():
-                return await interaction.followup.send("Emoji tracking isn’t enabled.", ephemeral=not post)
-
-            buf = StringIO()
-            w = csv.writer(buf)
-
-            # Fetch rows by metric/scope
-            if scope_val == "all":
-                if metric_val == "words":
-                    rows = models.top_members_words_total(interaction.guild_id, limit=10_000)
-                    header = ["guild_id", "user_id", "words"]
-                elif metric_val == "mentions":
-                    rows = models.top_members_mentions_total(interaction.guild_id, limit=10_000)
-                    header = ["guild_id", "user_id", "mentions"]
-                elif metric_val == "emoji_chat":
-                    rows = models.top_members_emoji_chat_total(interaction.guild_id, limit=10_000)
-                    header = ["guild_id", "user_id", "emoji_chat"]
-                elif metric_val == "emoji_react":
-                    rows = models.top_members_emoji_react_total(interaction.guild_id, limit=10_000)
-                    header = ["guild_id", "user_id", "emoji_react"]
-                else:
-                    rows = models.top_members_total(interaction.guild_id, limit=10_000)
-                    header = ["guild_id", "user_id", "messages"]
-                w.writerow(header)
-                for uid, cnt in rows:
-                    w.writerow([interaction.guild_id, uid, cnt])
-                filename = f"activity-{interaction.guild_id}-all-{metric_val}.csv"
-            else:
-                if metric_val == "words":
-                    rows = models.top_members_words_period(interaction.guild_id, scope=scope_val, key=key, limit=10_000)
-                    header = ["guild_id", scope_val, "user_id", "words"]
-                elif metric_val == "mentions":
-                    rows = models.top_members_mentions_period(interaction.guild_id, scope=scope_val, key=key, limit=10_000)
-                    header = ["guild_id", scope_val, "user_id", "mentions"]
-                elif metric_val == "emoji_chat":
-                    rows = models.top_members_emoji_chat_period(interaction.guild_id, scope=scope_val, key=key, limit=10_000)
-                    header = ["guild_id", scope_val, "user_id", "emoji_chat"]
-                elif metric_val == "emoji_react":
-                    rows = models.top_members_emoji_react_period(interaction.guild_id, scope=scope_val, key=key, limit=10_000)
-                    header = ["guild_id", scope_val, "user_id", "emoji_react"]
-                else:
-                    rows = models.top_members_messages_period(interaction.guild_id, scope=scope_val, key=key, limit=10_000)
-                    header = ["guild_id", scope_val, "user_id", "messages"]
-                w.writerow(header)
-                for uid, cnt in rows:
-                    w.writerow([interaction.guild_id, key, uid, cnt])
-                filename = f"activity-{interaction.guild_id}-{scope_val}-{key}-{metric_val}.csv"
-
-            data = buf.getvalue().encode("utf-8")
-            file = discord.File(fp=BytesIO(data), filename=filename)
-            await interaction.followup.send(file=file, ephemeral=not post)
-
-            log.info(
-                "activity.export.used",
-                extra={
-                    "guild_id": interaction.guild_id,
-                    "user_id": interaction.user.id,
-                    "scope": scope_val,
-                    "key": key,
-                    "rows": len(rows),
-                    "metric": metric_val,
-                    "post": post,
-                },
-            )
-        except ValueError as ve:
-            key = str(ve)
-            if key == "bad_month_format":
-                msg = S("activity.bad_month_format")
-            elif key == "bad_day_format":
-                msg = "Use YYYY-MM-DD for day."
-            elif key == "bad_week_format":
-                msg = "Use YYYY-Www (e.g. 2025-W41) for week."
-            else:
-                msg = S("common.error_generic")
-            await interaction.followup.send(msg, ephemeral=not post)
-        except Exception:
-            log.exception(
-                "activity.export.failed",
-                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id},
-            )
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
-
-
-    @group.command(name="reset", description="ADMIN: reset activity stats for a scope/metric.")
-    @app_commands.describe(
-        scope="day/week/month/all",
-        day="YYYY-MM-DD (for scope=day)",
-        week="YYYY-Www",
-        month="YYYY-MM",
-        metric="messages, words, mentions, emoji_chat, or emoji_react",
-        post="If true, post publicly in this channel"
-    )
-    @app_commands.choices(scope=[
-        app_commands.Choice(name="day", value="day"),
-        app_commands.Choice(name="week", value="week"),
-        app_commands.Choice(name="month", value="month"),
-        app_commands.Choice(name="all", value="all"),
-    ])
-    @app_commands.choices(metric=[
-        app_commands.Choice(name="messages", value="messages"),
-        app_commands.Choice(name="words", value="words"),
-        app_commands.Choice(name="mentions", value="mentions"),
-        app_commands.Choice(name="emoji_chat", value="emoji_chat"),
-        app_commands.Choice(name="emoji_react", value="emoji_react"),
-    ])
-    @app_commands.default_permissions(manage_guild=True)
-    async def reset(
-        self,
-        interaction: discord.Interaction,
-        scope: app_commands.Choice[str],
-        day: Optional[str] = None,
-        week: Optional[str] = None,
-        month: Optional[str] = None,
-        metric: app_commands.Choice[str] | None = None,
-        post: bool = False
-    ):
-        if not await _require_guild(interaction):
-            return
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(S("common.need_manage_server"), ephemeral=True)
-
-        metric_val = (metric.value if metric else "messages")
-
-        try:
-            scope_val, key = _parse_scope_and_key(scope.value, day, week, month)
-        except ValueError as ve:
-            code = str(ve)
-            if code == "bad_month_format":
-                return await interaction.response.send_message(S("activity.bad_month_format"), ephemeral=not post)
-            if code == "bad_day_format":
-                return await interaction.response.send_message("Use YYYY-MM-DD for day.", ephemeral=not post)
-            if code == "bad_week_format":
-                return await interaction.response.send_message("Use YYYY-Www (e.g. 2025-W41) for week.", ephemeral=not post)
-            return await interaction.response.send_message(S("common.error_generic"), ephemeral=not post)
-
-        try:
-
-            if metric_val == "words":
-                if hasattr(models, "reset_member_words"):
-                    models.reset_member_words(interaction.guild_id, scope=scope_val, key=key)
-                else:
-                    raise NotImplementedError
-            elif metric_val == "mentions":
-                if hasattr(models, "reset_member_mentions"):
-                    models.reset_member_mentions(interaction.guild_id, scope=scope_val, key=key)
-                else:
-                    raise NotImplementedError
-            elif metric_val == "emoji_chat":
-                if hasattr(models, "reset_member_emoji_chat"):
-                    models.reset_member_emoji_chat(interaction.guild_id, scope=scope_val, key=key)
-                else:
-                    raise NotImplementedError
-            elif metric_val == "emoji_react":
-                if hasattr(models, "reset_member_emoji_react"):
-                    models.reset_member_emoji_react(interaction.guild_id, scope=scope_val, key=key)
-                else:
-                    raise NotImplementedError
-            else:
-                if hasattr(models, "reset_member_activity"):
-                    models.reset_member_activity(interaction.guild_id, scope=scope_val, key=key)
-                else:
-                    raise NotImplementedError
-
-            msg = f"Reset {metric_val} for {('all-time' if scope_val=='all' else f'{scope_val}={key}')}."
-            await interaction.response.send_message(msg, ephemeral=not post)
-            log.warning(
-                "activity.reset.done",
-                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "scope": scope_val, "key": key, "metric": metric_val, "post": post},
-            )
-        except NotImplementedError:
-            await interaction.response.send_message("Reset not supported for this metric in storage.", ephemeral=True)
-        except Exception:
-            log.exception(
-                "activity.reset.failed",
-                extra={"guild_id": interaction.guild_id, "user_id": interaction.user.id, "scope": scope_val, "key": key, "metric": metric_val},
-            )
-            await interaction.response.send_message(S("common.error_generic"), ephemeral=True)
-
-    @commands.Cog.listener()
-    async def on_app_command_completion(self, interaction: discord.Interaction, command: app_commands.Command):
-        try:
-            log.info(
-                "slash.completed",
-                extra={
-                    "guild_id": interaction.guild_id,
-                    "channel_id": getattr(interaction.channel, "id", None),
-                    "user_id": interaction.user.id,
-                    "command": command.qualified_name,
-                },
-            )
-        except Exception:
-            pass
-
-    @commands.Cog.listener()
-    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        log.exception(
-            "slash.error",
-            extra={
-                "guild_id": interaction.guild_id,
-                "channel_id": getattr(interaction.channel, "id", None),
-                "user_id": getattr(interaction.user, "id", None),
-                "error_type": type(error).__name__,
-                "command": getattr(interaction.command, "qualified_name", None),
-            },
+        # Embed
+        embed = discord.Embed(
+            title=S("activity.profile.title", user=interaction.user),
+            color=discord.Color.purple()
         )
-        if not interaction.response.is_done():
-            await interaction.response.send_message(S("common.error_generic"), ephemeral=True)
-        else:
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
+        # Level
+        pct = int(round((cur / need) * 100)) if need > 0 else 100
+        embed.add_field(name=S("activity.profile.level"), value=f"**Lv {lvl}** — {rpg['xp']} XP\nProgress: {cur}/{need} ({pct}%)", inline=False)
+        # Stats
+        stats = f"**STR** {rpg['str']}  **DEX** {rpg['dex']}  **INT** {rpg['int']}  **WIS** {rpg['wis']}  **CHA** {rpg['cha']}  **VIT** {rpg['vit']}"
+        embed.add_field(name=S("activity.profile.stats"), value=stats, inline=False)
+        # Derived
+        derived = (
+            f"Engagement ratio: **{engagement_ratio:.2f}**\n"
+            f"Reply density: **{reply_density:.2f}**\n"
+            f"Mention depth: **{mention_depth:.2f}**\n"
+            f"Media ratio: **{media_ratio:.2f}**\n"
+            f"Burstiness: **{burstiness:.2f}**\n"
+            f"Prime hour: **{prime_hour}**\n"
+            f"Prime channel: {prime_channel}"
+        )
+        embed.add_field(name=S("activity.profile.derived"), value=derived, inline=False)
+        # Voice / Activities
+        embed.add_field(name=S("activity.profile.voice"), value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min", inline=True)
+        embed.add_field(name=S("activity.profile.apps"), value=f"Activities: **{act_min}** min", inline=True)
 
+        await interaction.followup.send(embed=embed, ephemeral=not post)
 
-def _mini_text_graph(xs: List[int], ys: List[int], width: int = 40, height: int = 8) -> str:
-    """Renders a tiny ASCII chart where x is day (compressed) and y is count."""
-    if not ys:
-        return "(no data)"
-    max_y = max(ys) or 1
-    # downsample xs/ys to width
-    n = len(xs)
-    if n > width:
-        step = n / width
-        buckets = []
-        for i in range(width):
-            start = int(i * step)
-            end = int((i + 1) * step)
-            end = max(end, start + 1)
-            buckets.append(max(ys[start:end]))
-        ys_ds = buckets
-    else:
-        ys_ds = ys + [0] * (width - n)
+    # ------- Master export (everything) -------
+    @group.command(name="export_master", description="Export a master report: totals, RPG, derived.")
+    @app_commands.describe(post="Post publicly?")
+    async def export_master(self, interaction: discord.Interaction, post: bool = False):
+        import csv
+        from io import StringIO, BytesIO
 
-    # build grid (height rows, width cols)
-    grid = [[" " for _ in range(width)] for _ in range(height)]
-    for x, val in enumerate(ys_ds[:width]):
-        bar_h = int(round((val / max_y) * (height - 1)))
-        for y in range(bar_h + 1):
-            grid[height - 1 - y][x] = "▇"
+        if not await _require_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=not post)
 
-    lines = ["".join(row) for row in grid]
-    return "\n".join(lines)
+        gid = interaction.guild_id
+        # build union of users seen in RPG or totals
+        users: set[int] = set()
+        with models.connect() as con:
+            cur = con.cursor()
+            for row in cur.execute("SELECT DISTINCT user_id FROM member_metrics_total WHERE guild_id=?", (gid,)):
+                users.add(int(row[0]))
+            for row in cur.execute("SELECT DISTINCT user_id FROM member_rpg_progress WHERE guild_id=?", (gid,)):
+                users.add(int(row[0]))
 
+        head = [
+            "guild_id","user_id","level","xp",
+            "str","dex","int","wis","cha","vit",
+            "messages","words","mentions_recv","mentions_sent",
+            "emoji_chat","emoji_react","reactions_recv",
+            "voice_minutes","voice_stream_minutes","activity_minutes",
+            "prime_channel",
+        ]
+        buf = StringIO()
+        w = csv.writer(buf)
+        w.writerow(head)
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(ActivityCog(bot))
+        def _tot(uid: int, metric: str) -> int:
+            with models.connect() as con:
+                cur = con.cursor()
+                row = cur.execute("""
+                    SELECT count FROM member_metrics_total
+                    WHERE guild_id=? AND user_id=? AND metric=?
+                """, (gid, uid, metric)).fetchone()
+                return int(row[0]) if row else 0
+
+        for uid in sorted(users):
+            rpg = models.get_rpg_progress(gid, uid)
+            ch_id = models.prime_channel_total(gid, uid) or 0
+            w.writerow([
+                gid, uid, rpg["level"], rpg["xp"],
+                rpg["str"], rpg["dex"], rpg["int"], rpg["wis"], rpg["cha"], rpg["vit"],
+                _tot(uid,"messages"), _tot(uid,"words"), _tot(uid,"mentions"), _tot(uid,"mentions_sent"),
+                _tot(uid,"emoji_chat"), _tot(uid,"emoji_react"), _tot(uid,"reactions_received"),
+                _tot(uid,"voice_minutes"), _tot(uid,"voice_stream_minutes"), _tot(uid,"activity_minutes"),
+                ch_id,
+            ])
+
+        data = buf.getvalue().encode("utf-8")
+        file = discord.File(fp=BytesIO(data), filename=f"activity-master-{gid}.csv")
+        await interaction.followup.send(file=file, ephemeral=not post)
+
+    # (retain your prior /activity top, /activity graph, /activity export, /activity reset methods unchanged)
