@@ -1,24 +1,57 @@
 from __future__ import annotations
-import os, sqlite3
-from .config import DB_PATH
 
-def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str):
-    cur = con.cursor()  # FIX: call cursor()
+import os
+import sqlite3
+from typing import Optional
+
+# Point to your desired DB location. Override via ENV if needed.
+DB_PATH = os.environ.get("BOT_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "bot.sqlite3"))
+
+
+# ----------------------------
+# Internal helpers (schema)
+# ----------------------------
+def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cur = con.cursor()
     cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})")]
     if column not in cols:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
-def _table_sql(con: sqlite3.Connection, table: str) -> str | None:
+def _table_sql(con: sqlite3.Connection, table: str) -> Optional[str]:
     cur = con.cursor()
-    row = cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    row = cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
     return row[0] if row else None
 
-def ensure_db():
+
+# ----------------------------
+# Public: connect() and ensure_db()
+# ----------------------------
+def connect() -> sqlite3.Connection:
+    """
+    Open a connection with consistent pragmas.
+    Call ensure_db() once at startup to guarantee schema exists.
+    """
+    con = sqlite3.connect(DB_PATH, timeout=5)
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA busy_timeout=3000")
+    return con
+
+
+def ensure_db() -> None:
+    """
+    Idempotently create/upgrade all tables, views, and indexes used by the bot.
+    Safe to call multiple times (e.g., on startup).
+    """
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH, timeout=5) as con:
         cur = con.cursor()
 
-        # Pragmas: better concurrency + durability
+        # Pragmas (persist for this connection)
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
@@ -180,7 +213,7 @@ def ensure_db():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mod_actions_lookup ON mod_actions (guild_id, target_user_id, id DESC)")
 
-        # --- Emoji / Sticker monthly usage ---
+        # --- Emoji / Sticker / GIF monthly usage ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS emoji_usage_monthly (
             guild_id INTEGER NOT NULL,
@@ -203,7 +236,18 @@ def ensure_db():
             PRIMARY KEY (guild_id, month, sticker_id)
         )""")
 
-        # --- Member message activity (monthly + total) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS gif_usage_monthly (
+            guild_id INTEGER NOT NULL,
+            month    TEXT    NOT NULL,   -- YYYY-MM
+            gif_key  TEXT    NOT NULL,   -- canonical URL or provider id
+            source   TEXT    NOT NULL,   -- tenor/giphy/discord/etc
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, month, gif_key)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gif_usage_lookup ON gif_usage_monthly (guild_id, month, count DESC)")
+
+        # --- Member message activity (monthly + total) (legacy mirrors) ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_activity_monthly (
             guild_id INTEGER NOT NULL,
@@ -246,7 +290,8 @@ def ensure_db():
         )""")
 
         # --- Unified member metrics (daily + totals by metric) ---
-        # metric ∈ {'messages','words','mentions','emoji_chat','emoji_react'}
+        # metric ∈ {'messages','words','mentions','mentions_sent','emoji_chat','emoji_react',
+        #           'reactions_received','voice_minutes','voice_stream_minutes','activity_minutes','gifs'}
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_metrics_daily (
             guild_id INTEGER NOT NULL,
@@ -272,7 +317,7 @@ def ensure_db():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_total_gm ON member_metrics_total (guild_id, metric, count DESC)")
 
-        # Hour histogram (UTC buckets; we rotate to PT on read)
+        # Hour histogram (UTC buckets; rotated to target tz on read)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_hour_hist (
             guild_id INTEGER NOT NULL,
@@ -292,7 +337,7 @@ def ensure_db():
         SELECT DISTINCT month FROM member_activity_monthly
         """)
 
-        # --- MangaUpdates: series, releases, per-thread posting state ---
+        # --- MangaUpdates ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS mu_series (
             series_id TEXT PRIMARY KEY,         -- MU id (string)
@@ -318,10 +363,9 @@ def ensure_db():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_releases_series_ts ON mu_releases (series_id, release_ts DESC)")
 
-        # MIGRATION: ensure composite PK exists even if an older table was created without it
+        # Migration: ensure composite PK (legacy installs)
         sql = _table_sql(con, "mu_releases")
         if sql and "PRIMARY KEY" not in sql.upper():
-            # Rebuild with proper PK
             cur.execute("ALTER TABLE mu_releases RENAME TO mu_releases_old")
             cur.execute("""
             CREATE TABLE mu_releases (
@@ -368,9 +412,6 @@ def ensure_db():
             PRIMARY KEY (guild_id, thread_id, release_id)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_series ON mu_thread_posts (series_id)")
-        # --- Voice & Activity minutes (new metrics use existing member_metrics_* tables) ---
-        # We will store minutes in member_metrics_daily/total using metric keys:
-        # 'voice_minutes', 'voice_stream_minutes', 'activity_minutes'
 
         # --- RPG progression (per member) ---
         cur.execute("""
@@ -379,7 +420,7 @@ def ensure_db():
             user_id  INTEGER NOT NULL,
             xp       INTEGER NOT NULL DEFAULT 0,
             level    INTEGER NOT NULL DEFAULT 1,
-            # base stats; recomputed or incremented on level up
+            -- base stats; recomputed or incremented on level up
             str      INTEGER NOT NULL DEFAULT 5,
             int      INTEGER NOT NULL DEFAULT 5,
             cha      INTEGER NOT NULL DEFAULT 5,
@@ -401,7 +442,7 @@ def ensure_db():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_member_channel_totals ON member_channel_totals (guild_id, user_id, messages DESC)")
 
-        # Optional: cache “activity app usage” counts per day (we’ll also track minutes)
+        # --- Member app usage per day (aux to activity_minutes) ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_activity_apps_daily (
             guild_id INTEGER NOT NULL,
@@ -414,12 +455,3 @@ def ensure_db():
         )""")
 
         con.commit()
-
-def connect():
-    # Centralize consistent pragmas for all connections
-    con = sqlite3.connect(DB_PATH, timeout=5)
-    con.execute("PRAGMA foreign_keys=ON")
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA busy_timeout=3000")
-    return con
