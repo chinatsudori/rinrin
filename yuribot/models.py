@@ -1594,3 +1594,47 @@ def mu_mark_posted(guild_id: int, thread_id: int, series_id: str, release_id: in
             ON CONFLICT(guild_id, thread_id, release_id) DO NOTHING
         """, (guild_id, thread_id, str(series_id), int(release_id), when_iso or _now_iso_utc()))
         con.commit()
+
+def bump_member_gifs(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
+    day, week_key, month, _ = _iso_parts(when_iso)
+    with connect() as con:
+        _upsert_metric_daily_and_total(con, guild_id, user_id, "gifs", day, week_key, month, inc)
+        con.commit()
+def bump_gif_usage(guild_id: int, when_iso: str, gif_key: str, source: str, inc: int = 1) -> None:
+    """
+    gif_key: stable key for the GIF (prefer the direct media URL if available; else the provider page URL)
+    source: short provider token like 'tenor', 'giphy', 'imgur', 'discord', 'other'
+    """
+    month = when_iso[:7]
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gif_usage_monthly (
+                guild_id INTEGER NOT NULL,
+                month    TEXT    NOT NULL,   -- YYYY-MM
+                gif_key  TEXT    NOT NULL,   -- canonical URL or provider id
+                source   TEXT    NOT NULL,   -- tenor/giphy/discord/etc
+                count    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, month, gif_key)
+            )
+        """)
+        cur.execute("""
+            INSERT INTO gif_usage_monthly (guild_id, month, gif_key, source, count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, month, gif_key)
+            DO UPDATE SET count = count + excluded.count
+        """, (guild_id, month, gif_key[:512], source[:32], inc))
+        con.commit()
+
+def top_gifs(guild_id: int, month: str, limit: int = 20) -> List[Tuple[str, str, int]]:
+    """Returns [(gif_key, source, count)] for the month, desc."""
+    with connect() as con:
+        cur = con.cursor()
+        return cur.execute("""
+            SELECT gif_key, source, count
+            FROM gif_usage_monthly
+            WHERE guild_id=? AND month=?
+            ORDER BY count DESC
+            LIMIT ?
+        """, (guild_id, month, limit)).fetchall()
+
