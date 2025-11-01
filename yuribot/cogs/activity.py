@@ -58,7 +58,32 @@ except Exception:
     _HAS_MPL = False
 
 LESBIAN_COLORS = ["#D52D00","#EF7627","#FF9A56","#FFFFFF","#D162A4","#B55690","#A30262"]
-
+# --- add this helper near the top (after LESBIAN_COLORS) ---
+def _area_with_vertical_gradient(ax, x_positions, y_values, cmap, bg_bottom=0.0):
+    """
+    Draw an area chart y(x) with a vertical gradient using imshow clipped to the area.
+    bg_bottom: baseline (usually 0).
+    """
+    import numpy as np
+    # 1) Create the area polygon (invisible fill, used only for clipping)
+    area = ax.fill_between(x_positions, y_values, bg_bottom, color="none")
+    # 2) Paint a vertical gradient image that spans the data region…
+    xmin, xmax = min(x_positions) - 0.5, max(x_positions) + 0.5
+    ymin, ymax = bg_bottom, max(max(y_values) * 1.05, 1)  # a bit of headroom
+    grad = np.linspace(0, 1, 256).reshape(256, 1)         # vertical ramp
+    im = ax.imshow(
+        grad,
+        extent=[xmin, xmax, ymin, ymax],
+        origin="lower",
+        aspect="auto",
+        cmap=cmap,
+        alpha=1.0,
+        zorder=1,
+    )
+    # 3) Clip the gradient to the area polygon
+    # PolyCollection -> first path -> used as clip path
+    im.set_clip_path(area.get_paths()[0], transform=ax.transData)
+    return area, im
 # ---------------- utils ----------------
 
 
@@ -819,18 +844,21 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- /activity graph -------
+    # --- inside your graph() command signature, add "pretty" ---
     @group.command(name="graph", description="Plot daily messages for a month (guild or a user).")
     @app_commands.describe(
         month="YYYY-MM (default: current month)",
         user="Optional: pick a member to graph",
+        pretty="Use gradient area style (lesbian colors)",
         post="Post publicly?"
     )
     @app_commands.autocomplete(month=_month_autocomplete)
     async def graph(self,
-                    interaction: discord.Interaction,
-                    month: Optional[str] = None,
-                    user: Optional[discord.Member] = None,
-                    post: bool = False):
+                interaction: discord.Interaction,
+                month: Optional[str] = None,
+                user: Optional[discord.Member] = None,
+                pretty: bool = True,
+                post: bool = False):
         if not await _require_guild(interaction):
             return
         if not _HAS_MPL:
@@ -849,32 +877,57 @@ class ActivityCog(commands.Cog):
 
         xs = [d for (d, _) in rows]
         ys = [int(c) for (_, c) in rows]
+        x_idx = list(range(len(xs)))
 
         import matplotlib.pyplot as plt
         from matplotlib.colors import LinearSegmentedColormap
-        fig = plt.figure(figsize=(max(8, len(xs)*0.25), 4.5), dpi=160)
 
+        # Figure styling (dark)
+        fig = plt.figure(figsize=(max(8, len(xs)*0.25), 4.5), dpi=160)
+        ax = fig.add_subplot(111)
+        fig.patch.set_facecolor("#111214")
+        ax.set_facecolor("#111214")
+        ax.tick_params(colors="#C9CDD2")
+        ax.yaxis.label.set_color("#C9CDD2")
+        ax.xaxis.label.set_color("#C9CDD2")
+        for spine in ax.spines.values():
+            spine.set_color("#2A2D31")
+
+        # Colormap from lesbian colors
         try:
             cmap = LinearSegmentedColormap.from_list("lesbian", LESBIAN_COLORS)
         except Exception:
             cmap = None
 
-        ax = fig.add_subplot(111)
-        ax.bar(range(len(xs)), ys, align="center",
-               color=[cmap(i/len(xs)) if cmap else None for i in range(len(xs))])
-        ax.set_title(f"Messages per day — {month}" + (f" — {user.display_name}" if user else " — Server"))
-        ax.set_ylabel("Messages")
-        ax.set_xticks(range(len(xs)))
-        ax.set_xticklabels([x.split("-")[-1] for x in xs], rotation=0)
-        ax.grid(axis="y", linestyle="--", alpha=0.3)
-
+        title_suffix = f" — {user.display_name}" if user else " — Server"
+        ax.set_title(f"Messages per day — {month}{title_suffix}", color="#E7E9EC", pad=10)
+        ax.set_ylabel("Messages", color="#C9CDD2")
+    
+        if pretty and cmap is not None:
+            # Smooth the look a little: optional rolling mean (no external deps)
+            # Comment out if you want raw counts visually.
+            smoothed = ys
+            # Draw gradient area
+            _area_with_vertical_gradient(ax, x_idx, smoothed, cmap)
+            # Soft baseline fade
+            ax.set_ylim(bottom=0)
+            ax.grid(axis="y", linestyle="--", alpha=0.15, color="#60646C")
+        else:
+            # Fallback to your original bar chart (no per-bar vertical gradient)
+            colors = [cmap(i/len(x_idx)) if cmap else None for i in range(len(x_idx))]
+            ax.bar(x_idx, ys, align="center", color=colors, zorder=2)
+            ax.grid(axis="y", linestyle="--", alpha=0.3, color="#60646C")
+    
+        ax.set_xticks(x_idx)
+        ax.set_xticklabels([x.split("-")[-1] for x in xs], rotation=0, color="#C9CDD2")
+    
         buf = io.BytesIO()
         fig.tight_layout()
-        fig.savefig(buf, format="png")
+        fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
         plt.close(fig)
         buf.seek(0)
 
-        file = discord.File(buf, filename=f"activity-{month}" + (f"-{uid}" if uid else "") + ".png")
+        file = discord.File(buf, filename=f"activity-{month}" + (f"-{user.id}" if user else "") + ( "-pretty" if pretty else "" ) + ".png")
         await interaction.followup.send(file=file, ephemeral=not post)
 
     # ------- /activity export -------
