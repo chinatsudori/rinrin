@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from .db import ensure_db
 from .strings import _STRINGS  # noqa: F401  (force-load strings at startup)
-
+#MAKING A COMMIT
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
