@@ -1411,16 +1411,40 @@ XP_RULES: Dict[str, float] = {
 }
 
 
-# ---- 7-day rolling activity → stat signals ----------------------------------
+# ---- Tunables ---------------------------------------------------------------
+# STR target: ~50 @ 500 msgs over a week; ~45 @ 800 msgs in 1 burst day.
+K_STR_BASE = 2.24        # base scale for sqrt(messages_7d)
+STR_DAYS_EXP = 0.15      # dampen bursts: (active_days/7)^B
+K_STR_ECHAT = 0.02       # small expressive bonus from emoji in text
+
+# INT: words depth (kept simple/cheap)
+WORDS_PER_INT_POINT = 30  # floor(words/30)
+
+# CHA: tone down and make sublinear
+K_CHA_RECV = 6.0          # weight on sqrt(mentions received)
+K_CHA_REACT = 5.0         # weight on sqrt(reactions received)
+K_CHA_SENT = 2.0          # small bump for sqrt(mentions sent)
+
+# WIS: joins + consistency + thoughtfulness
+K_WIS_JOIN = 6.0          # each app "join" (presence tick) is meaningful
+K_WIS_WEEKS = 3.0         # active ISO-weeks in window
+K_WIS_DAYS = 0.5          # active days in window
+K_WIS_WPM = 0.5           # bounded WPM contribution (<=40)
+WPM_CAP = 40.0
+
 def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, float]:
     """
-    7-day rolling window. STR tuned to ~50 @ 500 msgs; WIS emphasizes joins+consistency+thoughtfulness.
+    Adaptive 7-day window with consistency dampening.
+    - STR ≈ 50 for ~500 msgs over 7d; ≈ 45 for 800 msgs in a 1-day burst.
+    - CHA toned down via sqrt scaling and smaller weights.
+    - WIS leans on activity joins + consistency + thoughtfulness (WPM).
     """
     cur = con.cursor()
 
-    # Aggregate totals for the last 7 days (today + previous 6)
+    # --- 7d aggregates from unified daily table ---
     rows = cur.execute("""
-        SELECT metric, SUM(count) FROM member_metrics_daily
+        SELECT metric, SUM(count)
+        FROM member_metrics_daily
         WHERE guild_id=? AND user_id=? AND day >= date('now','-6 day')
         GROUP BY metric
     """, (guild_id, user_id)).fetchall()
@@ -1435,10 +1459,17 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
     reacts_recv     = t.get("reactions_received", 0)
     voice_min       = t.get("voice_minutes", 0)
     stream_min      = t.get("voice_stream_minutes", 0)
-    activity_joins  = t.get("activity_joins", 0)   # NEW metric
     emoji_only_msgs = t.get("emoji_only", 0)
 
-    # Consistency over same 7d window
+    # --- 7d "joins" from per-app activity table (any Discord app counts) ---
+    row = cur.execute("""
+        SELECT COALESCE(SUM(launches), 0)
+        FROM member_activity_apps_daily
+        WHERE guild_id=? AND user_id=? AND day >= date('now','-6 day')
+    """, (guild_id, user_id)).fetchone()
+    activity_joins = int(row[0] or 0)
+
+    # --- Consistency (days & weeks active with any messages) ---
     row = cur.execute("""
         SELECT
           COUNT(DISTINCT CASE WHEN metric='messages' AND count>0 THEN day  END),
@@ -1448,28 +1479,47 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
     """, (guild_id, user_id)).fetchone() or (0, 0)
     active_days, active_weeks = int(row[0] or 0), int(row[1] or 0)
 
-    # Thoughtfulness (bounded so a single essay doesn't dominate)
+    # --- Thoughtfulness (bounded WPM so essays don't dominate) ---
     wpm = words / max(messages, 1)
-    wpm_score = min(wpm, 40)
+    wpm_score = min(float(wpm), WPM_CAP)
 
-    # Rebalanced STR with diminishing returns
-    str_score = K_STR_SQRT * (messages ** 0.5) + K_STR_ECHAT * emoji_chat
+    # --- STR: sublinear + consistency dampener ---
+    # For a pure 1-day burst (active_days=1), (1/7)^0.15 ≈ 0.722 → pulls 800 toward ~45.
+    days_factor = (active_days / 7.0) ** STR_DAYS_EXP if active_days > 0 else 0.0
+    str_score = (K_STR_BASE * sqrt(float(messages)) * days_factor) + (K_STR_ECHAT * float(emoji_chat))
+
+    # --- INT: simple depth from words ---
+    int_score = float(words) // WORDS_PER_INT_POINT
+
+    # --- CHA: reduce magnitude via sqrt + smaller weights ---
+    cha_score = (
+        K_CHA_RECV  * sqrt(float(mentions_recv)) +
+        K_CHA_REACT * sqrt(float(reacts_recv))  +
+        K_CHA_SENT  * sqrt(float(mentions_sent))
+    )
+
+    # --- VIT: presence (voice + stream) ---
+    vit_score = float(voice_min + stream_min)
+
+    # --- DEX: finesse signals ---
+    dex_score = float(emoji_react + mentions_sent + emoji_only_msgs)
+
+    # --- WIS: show up (joins) + consistency + thoughtfulness ---
+    wis_score = (
+        K_WIS_JOIN  * float(activity_joins) +
+        K_WIS_WEEKS * float(active_weeks)   +
+        K_WIS_DAYS  * float(active_days)    +
+        K_WIS_WPM   * float(wpm_score)
+    )
 
     return {
-        "str": str_score,                                                # throughput+slight expressive bonus
-        "int": float(words) // 30,                                       # depth
-        "cha": mentions_recv + reacts_recv,                              # recognition
-        "vit": voice_min + stream_min,                                   # presence
-        "dex": emoji_react + mentions_sent + emoji_only_msgs,            # finesse
-        "wis": (K_WIS_JOIN * activity_joins                              # showing up
-                + K_WIS_WEEKS * active_weeks                             # consistency (weeks)
-                + K_WIS_DAYS * active_days                               # consistency (days)
-                + K_WIS_WPM * wpm_score),                                # thoughtfulness
+        "str": float(str_score),
+        "int": float(int_score),
+        "cha": float(cha_score),
+        "vit": float(vit_score),
+        "dex": float(dex_score),
+        "wis": float(wis_score),
     }
-
-
-_LEVELUP_DISTR = [4, 3, 2, 1, 1, 0]  # highest -> lowest activity types
-
 
 def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -> None:
     """
