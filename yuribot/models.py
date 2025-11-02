@@ -1418,14 +1418,28 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
     stream_min      = int(totals.get("voice_stream_minutes", 0))
     activity_min    = int(totals.get("activity_minutes", 0))
     emoji_only_msgs = int(totals.get("emoji_only", 0))
+ # Consistency signals: active days & weeks with any messages
+    row = cur.execute("""
+        SELECT
+          COUNT(DISTINCT CASE WHEN metric='messages' AND count>0 THEN day  END),
+          COUNT(DISTINCT CASE WHEN metric='messages' AND count>0 THEN week END)
+        FROM member_metrics_daily
+        WHERE guild_id=? AND user_id=?
+    """, (guild_id, user_id)).fetchone() or (0, 0)
+    active_days, active_weeks = int(row[0] or 0), int(row[1] or 0)
 
+    # Thoughtfulness: words per message (bounded so a single essay doesn't dominate)
+    wpm = words / max(messages, 1)
+    wpm_score = min(wpm, 40)  # cap to keep it sane
+
+ 
     return {
-        "str": messages + emoji_chat,                     # throughput + expressive chat
+        "str": 0.6 * messages + 0.4 * emoji_chat,                     # throughput + expressive chat
         "int": max(0, float(words) // 30),                        # depth
         "cha": mentions_recv + reacts_recv,               # recognition
         "vit": voice_min + stream_min,                    # presence
         "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse
-        "wis": activity_min,                              # focused sessions
+        "wis": activity_min + 2.0 * active_weeks + 0.5 * active_days + 0.5 * wpm_score,
     }
 
 
