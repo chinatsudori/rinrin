@@ -7,15 +7,6 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from .. import modelsfrom __future__ import annotations
-import logging
-import os
-from typing import Optional
-
-import discord
-from discord.ext import commands
-from discord import app_commands
-
 from .. import models
 from ..strings import S
 
