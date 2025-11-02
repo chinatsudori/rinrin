@@ -25,7 +25,7 @@ MULTIPLIER_DEFAULT = 1.0
 
 # Role multipliers (max applied across user's roles)
 ROLE_XP_MULTIPLIERS: Dict[int, float] = {
-    1418285755339374785: 2.0,  # Server Boosters 
+    1418285755339374785: 2.0,  # Server Boosters
 }
 # Pinned message bonus
 PIN_MULTIPLIER: float = 2.0     # total multiplier relative to original message XP
@@ -58,37 +58,25 @@ except Exception:
     _HAS_MPL = False
 
 LESBIAN_COLORS = ["#D52D00","#EF7627","#FF9A56","#FFFFFF","#D162A4","#B55690","#A30262"]
-# --- add this helper near the top (after LESBIAN_COLORS) ---
+
+# --- gradient helper (used by graph) ---
 def _area_with_vertical_gradient(ax, x_positions, y_values, cmap, bg_bottom=0.0):
     """
     Draw an area chart y(x) with a vertical gradient using imshow clipped to the area.
     bg_bottom: baseline (usually 0).
     """
     import numpy as np
-    # 1) Create the area polygon (invisible fill, used only for clipping)
     area = ax.fill_between(x_positions, y_values, bg_bottom, color="none")
-    # 2) Paint a vertical gradient image that spans the data region…
     xmin, xmax = min(x_positions) - 0.5, max(x_positions) + 0.5
-    ymin, ymax = bg_bottom, max(max(y_values) * 1.05, 1)  # a bit of headroom
-    grad = np.linspace(0, 1, 256).reshape(256, 1)         # vertical ramp
-    im = ax.imshow(
-        grad,
-        extent=[xmin, xmax, ymin, ymax],
-        origin="lower",
-        aspect="auto",
-        cmap=cmap,
-        alpha=1.0,
-        zorder=1,
-    )
-    # 3) Clip the gradient to the area polygon
-    # PolyCollection -> first path -> used as clip path
+    ymin, ymax = bg_bottom, max(max(y_values) * 1.05, 1)
+    grad = np.linspace(0, 1, 256).reshape(256, 1)
+    im = ax.imshow(grad, extent=[xmin, xmax, ymin, ymax], origin="lower", aspect="auto", cmap=cmap, alpha=1.0, zorder=1)
     im.set_clip_path(area.get_paths()[0], transform=ax.transData)
     return area, im
+
 # ---------------- utils ----------------
 
-
 def _strip_custom_emojis(text: str) -> str:
-    # remove <a?:name:1234567890>
     return CUSTOM_EMOJI_RE.sub("", text or "")
 
 def _strip_unicode_emojis(text: str) -> str:
@@ -224,10 +212,29 @@ class ActivityCog(commands.Cog):
         self._msg_xp: Dict[tuple[int, int], int] = {}          # (guild_id, message_id) -> xp_awarded_for_that_message
         self._pin_awarded: Set[tuple[int, int]] = set()        # ensure bonus is applied once
 
+        # Joins de-dup: (guild_id, user_id, app_name, YYYY-MM-DD)
+        self._join_seen: Set[tuple[int, int, str, str]] = set()
+
         self._poll_presence.start()
 
     def cog_unload(self):
         self._poll_presence.cancel()
+
+    # ---------- internals ----------
+    def _day_key(self, dt: Optional[datetime] = None) -> str:
+        return (dt or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+
+    def _maybe_count_join(self, guild_id: int, user_id: int, app_name: str, when_dt: Optional[datetime] = None) -> None:
+        """Count one 'activity_joins' per user/app/day. Idempotent per day."""
+        day = self._day_key(when_dt)
+        key = (int(guild_id), int(user_id), str(app_name)[:80], day)
+        if key in self._join_seen:
+            return
+        self._join_seen.add(key)
+        try:
+            models.bump_activity_join(guild_id, user_id, when_iso=_now_iso(), app_name=app_name, joins=1)
+        except Exception:
+            log.exception("bump.activity_join_failed", extra={"guild_id": guild_id, "user_id": user_id, "app": app_name})
 
     # ---------- Events ----------
     @commands.Cog.listener()
@@ -368,7 +375,7 @@ class ActivityCog(commands.Cog):
         except Exception:
             pass
 
-    @commands.Cog.listener()
+    @commands.Cog.listener())
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.guild_id is None or payload.user_id is None:
             return
@@ -403,7 +410,6 @@ class ActivityCog(commands.Cog):
                     recv_mult = _xp_mult(author_member, ch)
                     models.award_xp_for_event(gid, msg.author.id, models.XP_RULES["reactions_received"], recv_mult)
         except Exception:
-            # ignore fetch failures (rate limits or perms)
             pass
 
         # monthly emoji catalog (no XP)
@@ -430,6 +436,8 @@ class ActivityCog(commands.Cog):
         # join session
         if before.channel is None and after.channel is not None:
             self._vc_sessions[key] = {"joined": now, "ch_id": after.channel.id, "stream_on": bool(after.self_stream)}
+            # Count a **join** once (used by WIS). App name "Voice".
+            self._maybe_count_join(gid, uid, app_name="Voice", when_dt=now)
             return
 
         # update streaming flag
@@ -444,7 +452,6 @@ class ActivityCog(commands.Cog):
                 stream_minutes = minutes if info.get("stream_on") else 0
                 when = _now_iso()
                 models.bump_voice_minutes(gid, uid, when, minutes, stream_minutes)
-                # XP with channel + role multiplier of the channel they were in
                 voice_mult = max(MULTIPLIER_DEFAULT, float(XP_MULTIPLIERS.get(info["ch_id"], MULTIPLIER_DEFAULT)))
                 voice_mult *= _role_mult(member)
                 if minutes:
@@ -452,27 +459,29 @@ class ActivityCog(commands.Cog):
                 if stream_minutes:
                     models.award_xp_for_event(gid, uid, models.XP_RULES["voice_stream_minutes"] * stream_minutes, voice_mult)
 
-    # ---- Presence poll: approximate “Activities” minutes ----
+    # ---- Presence poll: approximate “Activities” minutes + joins ----
     @tasks.loop(minutes=5)
     async def _poll_presence(self):
         # lightweight: walk guilds; for each member’s current activities, if any app-like, add +5 minutes
-        now_iso = _now_iso()
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat(timespec="seconds")
         for guild in list(self.bot.guilds):
             try:
                 for m in list(guild.members):
                     if m.bot:
                         continue
-                    apps = [a for a in m.activities or [] if getattr(a, "name", None)]
+                    apps = [a for a in (m.activities or []) if getattr(a, "name", None)]
                     if not apps:
                         continue
-                    # credit each distinct app 5 minutes
+                    # credit each distinct app 5 minutes, and count **one join per app per day**
                     names = {str(getattr(a, "name", "")[:64]) for a in apps if a}
                     for nm in names:
+                        # minutes
                         models.bump_activity_minutes(guild.id, m.id, now_iso, nm, minutes=5, launches=0)
-                        # XP (no channel context; apply role multiplier only)
                         models.award_xp_for_event(guild.id, m.id, models.XP_RULES["activity_minutes"] * 5, _role_mult(m))
+                        # join (once/day/app)
+                        self._maybe_count_join(guild.id, m.id, app_name=nm, when_dt=now_dt)
             except Exception:
-                # never bring the bot down
                 continue
 
     @_poll_presence.before_loop
@@ -491,7 +500,7 @@ class ActivityCog(commands.Cog):
             if not payload.guild_id or not isinstance(payload.data, dict):
                 return
             data = payload.data
-            if not data.get("pinned"):  # act only when now pinned
+            if not data.get("pinned"):
                 return
 
             gid = int(payload.guild_id)
@@ -500,7 +509,7 @@ class ActivityCog(commands.Cog):
                 return
             key = (gid, mid)
             if key in self._pin_awarded:
-                return  # already processed
+                return
 
             guild = self.bot.get_guild(gid)
             if not guild:
@@ -516,16 +525,14 @@ class ActivityCog(commands.Cog):
                 except Exception:
                     msg = None
 
-            # Use recorded per-message XP if available
             base_recorded = self._msg_xp.pop(key, None)
             if base_recorded is not None:
                 bonus = int((max(PIN_MULTIPLIER, 1.0) - 1.0) * base_recorded)
                 if msg and msg.author and not msg.author.bot and bonus > 0:
-                    models.award_xp_for_event(gid, msg.author.id, bonus, 1.0)  # original multipliers already applied
+                    models.award_xp_for_event(gid, msg.author.id, bonus, 1.0)
                 self._pin_awarded.add(key)
                 return
 
-            # Fallback path: apply flat XP with current multipliers
             if msg and msg.author and not msg.author.bot:
                 mult = _xp_mult(msg.author if isinstance(msg.author, discord.Member) else guild.get_member(msg.author.id), ch)
                 models.award_xp_for_event(gid, msg.author.id, PIN_FALLBACK_XP, mult)
@@ -599,17 +606,17 @@ class ActivityCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=not post)
 
-        target: discord.Member = user or interaction.user  # inspect others if provided
+        target: discord.Member = user or interaction.user
         gid, uid = interaction.guild_id, target.id
         month = month or _month_default()
         if not MONTH_RE.match(month):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
-    # RPG
+        # RPG
         rpg = models.get_rpg_progress(gid, uid)
         lvl, cur, need = models.xp_progress(rpg["xp"])
 
-    # Totals helper
+        # Totals helper
         def tot(metric: str) -> int:
             with models.connect() as con:
                 cur_ = con.cursor()
@@ -629,16 +636,17 @@ class ActivityCog(commands.Cog):
         voice_min       = tot("voice_minutes")
         stream_min      = tot("voice_stream_minutes")
         act_min         = tot("activity_minutes")
-    
-    # Deriveds (guard zero-div)
-        _safe = lambda a, b: (a / b) if b > 0 else 0.0
-        engagement_ratio = _safe(reacts_recv, messages)      # reactions received per message
-        reply_density    = _safe(mentions_sent, messages)    # mentions sent per message
-        mention_depth    = _safe(mentions_recv, messages)    # mentions received per message
-        media_ratio      = 0.0                               # reserved
-        burstiness       = 0.0                               # reserved
+        act_joins       = tot("activity_joins")
 
-    # Prime hour & channel
+        # Deriveds
+        _safe = lambda a, b: (a / b) if b > 0 else 0.0
+        engagement_ratio = _safe(reacts_recv, messages)
+        reply_density    = _safe(mentions_sent, messages)
+        mention_depth    = _safe(mentions_recv, messages)
+        media_ratio      = 0.0
+        burstiness       = 0.0
+
+        # Prime hour & channel
         try:
             hist = models.member_hour_histogram_total(gid, uid, tz="America/Los_Angeles")
             s1, e1, _ = _prime_window_from_hist(list(hist), window=1)
@@ -648,14 +656,13 @@ class ActivityCog(commands.Cog):
         ch_id = models.prime_channel_total(gid, uid)
         prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
-    # Build embed
+        # Build embed
         who = target.display_name
         embed = discord.Embed(
             title=S("activity.profile.title", user=who),
             color=discord.Color.purple()
         )
 
-    # Single combined Level/XP field with progress bar
         steps = 20
         filled = steps if need == 0 else max(0, min(steps, int(round(steps * (cur / need)))))
         pct = int(round((cur / need) * 100)) if need > 0 else 100
@@ -682,7 +689,7 @@ class ActivityCog(commands.Cog):
             f"Prime channel: {prime_channel}"
         )
         embed.add_field(name=S("activity.profile.derived"), value=derived, inline=False)
-    
+
         embed.add_field(
             name=S("activity.profile.voice"),
             value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min",
@@ -690,12 +697,11 @@ class ActivityCog(commands.Cog):
         )
         embed.add_field(
             name=S("activity.profile.apps"),
-            value=f"Activities: **{act_min}** min",
+            value=f"Activities: **{act_min}** min · Joins: **{act_joins}**",
             inline=True
         )
 
         await interaction.followup.send(embed=embed, ephemeral=not post)
-
 
     # ------- Master export (everything) -------
     @group.command(name="export_master", description="Export a master report: totals, RPG, derived.")
@@ -722,7 +728,7 @@ class ActivityCog(commands.Cog):
             "str","dex","int","wis","cha","vit",
             "messages","words","mentions_recv","mentions_sent",
             "emoji_chat","emoji_react","reactions_recv",
-            "voice_minutes","voice_stream_minutes","activity_minutes",
+            "voice_minutes","voice_stream_minutes","activity_minutes","activity_joins",
             "prime_channel",
         ]
         buf = StringIO()
@@ -746,7 +752,7 @@ class ActivityCog(commands.Cog):
                 rpg["str"], rpg["dex"], rpg["int"], rpg["wis"], rpg["cha"], rpg["vit"],
                 _tot(uid,"messages"), _tot(uid,"words"), _tot(uid,"mentions"), _tot(uid,"mentions_sent"),
                 _tot(uid,"emoji_chat"), _tot(uid,"emoji_react"), _tot(uid,"reactions_received"),
-                _tot(uid,"voice_minutes"), _tot(uid,"voice_stream_minutes"), _tot(uid,"activity_minutes"),
+                _tot(uid,"voice_minutes"), _tot(uid,"voice_stream_minutes"), _tot(uid,"activity_minutes"), _tot(uid,"activity_joins"),
                 ch_id,
             ])
 
@@ -776,6 +782,7 @@ class ActivityCog(commands.Cog):
         app_commands.Choice(name="voice_minutes", value="voice_minutes"),
         app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
         app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+        app_commands.Choice(name="activity_joins", value="activity_joins"),
         app_commands.Choice(name="gifs", value="gifs"),
     ])
     async def top(self,
@@ -844,7 +851,6 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- /activity graph -------
-    # --- inside your graph() command signature, add "pretty" ---
     @group.command(name="graph", description="Plot daily messages for a month (guild or a user).")
     @app_commands.describe(
         month="YYYY-MM (default: current month)",
@@ -882,7 +888,6 @@ class ActivityCog(commands.Cog):
         import matplotlib.pyplot as plt
         from matplotlib.colors import LinearSegmentedColormap
 
-        # Figure styling (dark)
         fig = plt.figure(figsize=(max(8, len(xs)*0.25), 4.5), dpi=160)
         ax = fig.add_subplot(111)
         fig.patch.set_facecolor("#111214")
@@ -893,7 +898,6 @@ class ActivityCog(commands.Cog):
         for spine in ax.spines.values():
             spine.set_color("#2A2D31")
 
-        # Colormap from lesbian colors
         try:
             cmap = LinearSegmentedColormap.from_list("lesbian", LESBIAN_COLORS)
         except Exception:
@@ -902,25 +906,20 @@ class ActivityCog(commands.Cog):
         title_suffix = f" — {user.display_name}" if user else " — Server"
         ax.set_title(f"Messages per day — {month}{title_suffix}", color="#E7E9EC", pad=10)
         ax.set_ylabel("Messages", color="#C9CDD2")
-    
+
         if pretty and cmap is not None:
-            # Smooth the look a little: optional rolling mean (no external deps)
-            # Comment out if you want raw counts visually.
             smoothed = ys
-            # Draw gradient area
             _area_with_vertical_gradient(ax, x_idx, smoothed, cmap)
-            # Soft baseline fade
             ax.set_ylim(bottom=0)
             ax.grid(axis="y", linestyle="--", alpha=0.15, color="#60646C")
         else:
-            # Fallback to your original bar chart (no per-bar vertical gradient)
             colors = [cmap(i/len(x_idx)) if cmap else None for i in range(len(x_idx))]
             ax.bar(x_idx, ys, align="center", color=colors, zorder=2)
             ax.grid(axis="y", linestyle="--", alpha=0.3, color="#60646C")
-    
+
         ax.set_xticks(x_idx)
         ax.set_xticklabels([x.split("-")[-1] for x in xs], rotation=0, color="#C9CDD2")
-    
+
         buf = io.BytesIO()
         fig.tight_layout()
         fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
@@ -948,6 +947,7 @@ class ActivityCog(commands.Cog):
         app_commands.Choice(name="voice_minutes", value="voice_minutes"),
         app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
         app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+        app_commands.Choice(name="activity_joins", value="activity_joins"),
         app_commands.Choice(name="gifs", value="gifs"),
     ])
     async def export(self,
@@ -1004,6 +1004,7 @@ class ActivityCog(commands.Cog):
         app_commands.Choice(name="voice_minutes", value="voice_minutes"),
         app_commands.Choice(name="voice_stream_minutes", value="voice_stream_minutes"),
         app_commands.Choice(name="activity_minutes", value="activity_minutes"),
+        app_commands.Choice(name="activity_joins", value="activity_joins"),
         app_commands.Choice(name="gifs", value="gifs"),
     ])
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1035,7 +1036,6 @@ class ActivityCog(commands.Cog):
         except ValueError as e:
             return await interaction.followup.send(str(e), ephemeral=not post)
 
-        # For messages, use special extended routine to keep legacy mirrors in sync
         try:
             if m == "messages":
                 models.reset_member_activity(gid, scope=s, key=k)
@@ -1047,7 +1047,6 @@ class ActivityCog(commands.Cog):
 
         await interaction.followup.send(f"Reset **{m}** for **{s}{f'={k}' if k else ''}**.", ephemeral=not post)
 
-    # ---- permissions failure for reset ----
     @reset.error
     async def _reset_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.errors.MissingPermissions):
