@@ -1956,3 +1956,76 @@ def mu_list_links_for_guild(guild_id: int) -> list[tuple[int, str, str]]:
             (guild_id,),
         ).fetchall()
         return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+def respec_stats_to_formula(guild_id: int, user_id: int | None = None) -> int:
+    """
+    Option B: Rebuild stat allocations for one member or all members in a guild
+    using the *current* activity score ordering.
+
+    - Keeps XP and level unchanged.
+    - Resets str/int/cha/vit/dex/wis to 5 (base) and then allocates points according to
+      the ranked activity scores using the +4,+3,+2,+1,+1,0 distribution for each level beyond 1.
+    - Ties are broken by the stable order: ["str","dex","int","wis","cha","vit"].
+
+    Returns number of members processed.
+    """
+    processed = 0
+    base_stats = {"str": 5, "int": 5, "cha": 5, "vit": 5, "dex": 5, "wis": 5}
+    tiebreak_order = ["str", "dex", "int", "wis", "cha", "vit"]
+
+    with connect() as con:
+        cur = con.cursor()
+
+        if user_id is None:
+            rows = cur.execute("""
+                SELECT user_id, level
+                FROM member_rpg_progress
+                WHERE guild_id=?
+            """, (guild_id,)).fetchall()
+        else:
+            rows = cur.execute("""
+                SELECT user_id, level
+                FROM member_rpg_progress
+                WHERE guild_id=? AND user_id=?
+            """, (guild_id, user_id)).fetchall()
+
+        if not rows:
+            return 0
+
+        for uid, level in rows:
+            lvl = int(level) if level is not None else 1
+            levels_to_allocate = max(0, lvl - 1)
+
+            # Compute activity ordering *now*
+            scores = _stat_activity_scores(con, guild_id, int(uid))
+            ranked = sorted(
+                tiebreak_order,
+                key=lambda k: (-float(scores.get(k, 0)), tiebreak_order.index(k))
+            )
+
+            # Aggregate gains once (distribution * levels_to_allocate)
+            gains = {k: 0 for k in tiebreak_order}
+            for stat, add in zip(ranked, _LEVELUP_DISTR):
+                if add > 0 and levels_to_allocate > 0:
+                    gains[stat] += add * levels_to_allocate
+
+            # Build final values
+            new_vals = {k: base_stats[k] + gains[k] for k in base_stats.keys()}
+
+            # Write back (preserve xp, level, last_level_up)
+            cur.execute("""
+                UPDATE member_rpg_progress
+                   SET str=?, int=?, cha=?, vit=?, dex=?, wis=?
+                 WHERE guild_id=? AND user_id=?
+            """, (
+                int(new_vals["str"]), int(new_vals["int"]), int(new_vals["cha"]),
+                int(new_vals["vit"]), int(new_vals["dex"]), int(new_vals["wis"]),
+                guild_id, int(uid)
+            ))
+            processed += 1
+
+        con.commit()
+
+    log.info("rpg.respec",
+             extra={"guild_id": guild_id, "user_id": user_id, "processed": processed})
+    return processed
