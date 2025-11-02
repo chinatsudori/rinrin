@@ -17,7 +17,7 @@ from ..strings import S
 # Storage / constants
 # =========================
 
-DATA_FILE = Path("./data/user_autoresponder.json")
+# DATA_FILE = Path("./data/user_autoresponder.json")
 
 # Personalized (per-user) auto-replies are once per day
 PERSONAL_COOLDOWN = 24 * 60 * 60  # 24h
