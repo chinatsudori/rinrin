@@ -375,7 +375,7 @@ class ActivityCog(commands.Cog):
         except Exception:
             pass
 
-    @commands.Cog.listener())
+    @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.guild_id is None or payload.user_id is None:
             return
