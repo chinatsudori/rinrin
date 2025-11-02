@@ -1343,11 +1343,26 @@ def cleanup_activity(guild_id: int | None = None) -> int:
         con.commit()
     return total_deleted
 
-
 # =============================================================================
 # RPG progression & XP
 # =============================================================================
 
+from typing import Dict
+import sqlite3
+
+# ---- Tunables ---------------------------------------------------------------
+# STR target: ~50 at 500 messages, diminishing returns via sqrt
+# sqrt(500) ≈ 22.36 → 2.24 * 22.36 ≈ 50
+K_STR_SQRT   = 2.24     # primary weight on message volume
+K_STR_ECHAT  = 0.05     # tiny expressive bonus; DEX owns emoji signals
+
+# WIS weights — give real credit to showing up (joins) + consistency + thoughtfulness
+K_WIS_JOIN   = 3.5      # per activity joined (events/apps)
+K_WIS_WEEKS  = 2.0      # distinct active ISO weeks in window
+K_WIS_DAYS   = 0.5      # distinct active days in window
+K_WIS_WPM    = 0.5      # bounded thoughtfulness score (words per message)
+
+# ---- XP curve ---------------------------------------------------------------
 def _xp_for_level(level: int) -> int:
     """Total XP required to reach `level`. L1→0, L2→100, L3→282, L10≈5.7k, L20≈36k."""
     if level <= 1:
@@ -1375,7 +1390,7 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
     return (lvl, cur, nxt)
 
 
-# Base XP rules (before per-channel multipliers in the cog)
+# ---- Base XP rules (before per-channel multipliers in the cog) --------------
 XP_RULES: Dict[str, float] = {
     "messages": 5,               # per message
     "words_per_20": 2,           # +2 per 20 words (floor)
@@ -1387,59 +1402,69 @@ XP_RULES: Dict[str, float] = {
     "sticker_use": 2,
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
-    "activity_minutes": 1,
+    # activity:
+    "activity_minutes": 1,       # keep for compatibility; not used in WIS scoring
+    "activity_joins": 5,         # NEW: XP credit for joining events/apps
     # keep both for compatibility with older code:
     "gifs": 1,
     "gif_use": 1,
 }
 
 
-def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, int | float]:
+# ---- 7-day rolling activity → stat signals ----------------------------------
+def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, float]:
     """
-    Build per-stat 'activity score' using unified totals.
-    Emoji-only messages increase DEX signal.
+    7-day rolling window. STR tuned to ~50 @ 500 msgs; WIS emphasizes joins+consistency+thoughtfulness.
     """
     cur = con.cursor()
-    totals = dict(
-        cur.execute(
-            "SELECT metric, count FROM member_metrics_total WHERE guild_id=? AND user_id=?",
-            (guild_id, user_id),
-        ).fetchall()
-    )
 
-    messages        = int(totals.get("messages", 0))
-    words           = int(totals.get("words", 0))
-    mentions_recv   = int(totals.get("mentions", 0))
-    mentions_sent   = int(totals.get("mentions_sent", 0))
-    emoji_chat      = int(totals.get("emoji_chat", 0))
-    emoji_react     = int(totals.get("emoji_react", 0))
-    reacts_recv     = int(totals.get("reactions_received", 0))
-    voice_min       = int(totals.get("voice_minutes", 0))
-    stream_min      = int(totals.get("voice_stream_minutes", 0))
-    activity_min    = int(totals.get("activity_minutes", 0))
-    emoji_only_msgs = int(totals.get("emoji_only", 0))
- # Consistency signals: active days & weeks with any messages
+    # Aggregate totals for the last 7 days (today + previous 6)
+    rows = cur.execute("""
+        SELECT metric, SUM(count) FROM member_metrics_daily
+        WHERE guild_id=? AND user_id=? AND day >= date('now','-6 day')
+        GROUP BY metric
+    """, (guild_id, user_id)).fetchall()
+    t = {m: int(c) for (m, c) in rows}
+
+    messages        = t.get("messages", 0)
+    words           = t.get("words", 0)
+    mentions_recv   = t.get("mentions", 0)
+    mentions_sent   = t.get("mentions_sent", 0)
+    emoji_chat      = t.get("emoji_chat", 0)
+    emoji_react     = t.get("emoji_react", 0)
+    reacts_recv     = t.get("reactions_received", 0)
+    voice_min       = t.get("voice_minutes", 0)
+    stream_min      = t.get("voice_stream_minutes", 0)
+    activity_joins  = t.get("activity_joins", 0)   # NEW metric
+    emoji_only_msgs = t.get("emoji_only", 0)
+
+    # Consistency over same 7d window
     row = cur.execute("""
         SELECT
           COUNT(DISTINCT CASE WHEN metric='messages' AND count>0 THEN day  END),
           COUNT(DISTINCT CASE WHEN metric='messages' AND count>0 THEN week END)
         FROM member_metrics_daily
-        WHERE guild_id=? AND user_id=?
+        WHERE guild_id=? AND user_id=? AND day >= date('now','-6 day')
     """, (guild_id, user_id)).fetchone() or (0, 0)
     active_days, active_weeks = int(row[0] or 0), int(row[1] or 0)
 
-    # Thoughtfulness: words per message (bounded so a single essay doesn't dominate)
+    # Thoughtfulness (bounded so a single essay doesn't dominate)
     wpm = words / max(messages, 1)
-    wpm_score = min(wpm, 40)  # cap to keep it sane
+    wpm_score = min(wpm, 40)
 
- 
+    # Rebalanced STR with diminishing returns
+    str_score = K_STR_SQRT * (messages ** 0.5) + K_STR_ECHAT * emoji_chat
+
     return {
-        "str": 0.6 * messages + 0.4 * emoji_chat,                     # throughput + expressive chat
-        "int": max(0, float(words) // 30),                        # depth
-        "cha": mentions_recv + reacts_recv,               # recognition
-        "vit": voice_min + stream_min,                    # presence
-        "dex": emoji_react + mentions_sent + emoji_only_msgs,  # finesse
-        "wis": activity_min + 2.0 * active_weeks + 0.5 * active_days + 0.5 * wpm_score,
+        "str": str_score,                                                # throughput+slight expressive bonus
+        "int": float(words) // 30,                                       # depth
+        "cha": mentions_recv + reacts_recv,                              # recognition
+        "vit": voice_min + stream_min,                                   # presence
+        "dex": emoji_react + mentions_sent + emoji_only_msgs,            # finesse
+        "wis": (K_WIS_JOIN * activity_joins                              # showing up
+                + K_WIS_WEEKS * active_weeks                             # consistency (weeks)
+                + K_WIS_DAYS * active_days                               # consistency (days)
+                + K_WIS_WPM * wpm_score),                                # thoughtfulness
     }
 
 
@@ -1448,7 +1473,7 @@ _LEVELUP_DISTR = [4, 3, 2, 1, 1, 0]  # highest -> lowest activity types
 
 def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -> None:
     """
-    Apply stat gains based on current activity score ordering:
+    Apply stat gains based on current 7-day activity ordering:
     +4, +3, +2, +1, +1, 0 to the 6 stats in rank order.
     Ties are stable by the order below.
     """
@@ -1505,6 +1530,7 @@ def _apply_xp(con: sqlite3.Connection, guild_id: int, user_id: int, add_xp: int)
 def award_xp_for_event(guild_id: int, user_id: int, base_xp: float, channel_multiplier: float = 1.0) -> tuple[int, int]:
     """Round after multiplier; returns (new_level, total_xp)."""
     add = int(round(max(0.0, base_xp) * max(0.0, channel_multiplier)))
+    from .db import connect  # ensure local import where this snippet lives
     with connect() as con:
         lvl, xp = _apply_xp(con, guild_id, user_id, add)
         con.commit()
@@ -1512,6 +1538,7 @@ def award_xp_for_event(guild_id: int, user_id: int, base_xp: float, channel_mult
 
 
 def get_rpg_progress(guild_id: int, user_id: int) -> dict:
+    from .db import connect
     with connect() as con:
         cur = con.cursor()
         row = cur.execute(
@@ -1536,9 +1563,37 @@ def get_rpg_progress(guild_id: int, user_id: int) -> dict:
             "last_level_up": row[8],
         }
 
-
+def bump_activity_join(
+    guild_id: int,
+    user_id: int,
+    when_iso: str,
+    app_name: str | None = None,
+    joins: int = 1,
+) -> None:
+    """
+    Count a *join* event (scheduled event join, voice watch-party, Discord app, etc).
+    - Increments unified metric 'activity_joins' (used by WIS).
+    - Also records a 'launch' in member_activity_apps_daily for the given app_name.
+    """
+    day, week_key, month, _ = _iso_parts(when_iso)
+    with connect() as con:
+        # unified metric used by scoring
+        _upsert_metric_daily_and_total(
+            con, guild_id, user_id, "activity_joins", day, week_key, month, int(joins)
+        )
+        # per-app rollup (joins -> launches)
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO member_activity_apps_daily (guild_id, user_id, app_name, day, minutes, launches)
+            VALUES (?, ?, ?, ?, 0, ?)
+            ON CONFLICT(guild_id, user_id, app_name, day) DO UPDATE SET
+              launches = launches + excluded.launches
+        """, (guild_id, user_id, (app_name or "(unknown)")[:80], day, int(joins)))
+        con.commit()
+        
 def top_levels(guild_id: int, limit: int = 20) -> list[tuple[int, int, int]]:
     """[(user_id, level, xp)] sorted by level desc, xp desc."""
+    from .db import connect
     with connect() as con:
         cur = con.cursor()
         return cur.execute(
@@ -1551,8 +1606,7 @@ def top_levels(guild_id: int, limit: int = 20) -> list[tuple[int, int, int]]:
             """,
             (guild_id, limit),
         ).fetchall()
-
-
+        
 # =============================================================================
 # Mod actions (discipline)
 # =============================================================================
