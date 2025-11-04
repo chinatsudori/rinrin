@@ -1,18 +1,42 @@
 version: "3.9"
+
 services:
   bot:
     image: yuribot:latest
     build: .
+    container_name: yuribot
+    restart: unless-stopped
+
     env_file:
       - ./.env
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       TZ: America/Los_Angeles
       BOT_DB_PATH: /app/data/bot.sqlite3
+
     volumes:
-      - botdata:/app/data:rw            # this is the persistent mount
-    restart: unless-stopped
-    user: "10001:10001"
+      - botdata:/app/data:rw
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import importlib; importlib.import_module('yuribot')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     networks:
       - npm_default
 
