@@ -438,12 +438,11 @@ class ActivityCog(commands.Cog):
         if not rows:
             return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
 
-        title_scope = s if s == "all" else f"{s}:{key}"
         embed = _build_metric_leaderboard_embed(
             guild=interaction.guild,
-            metric_name=metric_name,
-            scope_label=title_scope,
-            rows=[(int(uid), int(cnt)) for uid, cnt in rows],
+            metric_name="Levels",
+            scope_label="all time",
+            rows=[(int(uid), int(level)) for uid, level, _ in rows],
         )
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
