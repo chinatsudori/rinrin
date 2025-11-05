@@ -5,7 +5,7 @@ import sqlite3
 from typing import Optional, List, Tuple, Dict, Iterable
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from math import sqrt
+from math import sqrt, log1p
 
 from .db import connect
 
@@ -1413,17 +1413,25 @@ XP_RULES: Dict[str, float] = {
 
 # ---- Tunables ---------------------------------------------------------------
 # STR target: ~50 @ 500 msgs over a week; ~45 @ 800 msgs in 1 burst day.
-K_STR_BASE = 2.24        # base scale for sqrt(messages_7d)
+K_STR_BASE = 3.0         # base scale for sqrt(messages_7d)
 STR_DAYS_EXP = 0.15      # dampen bursts: (active_days/7)^B
-K_STR_ECHAT = 0.02       # small expressive bonus from emoji in text
+STR_MIN_ACTIVITY_FACTOR = 0.65  # ensure bursts still feel rewarding
+K_STR_ECHAT = 0.03       # small expressive bonus from emoji in text
 
 # INT: words depth (kept simple/cheap)
 WORDS_PER_INT_POINT = 30  # floor(words/30)
 
-# CHA: tone down and make sublinear
-K_CHA_RECV = 6.0          # weight on sqrt(mentions received)
-K_CHA_REACT = 5.0         # weight on sqrt(reactions received)
-K_CHA_SENT = 2.0          # small bump for sqrt(mentions sent)
+# DEX: finesse signals benefit from presence but get softly capped
+K_DEX_REACT = 3.0
+K_DEX_MENTIONS = 2.5
+K_DEX_EMOJI_ONLY = 1.5
+DEX_LOG_SCALE = 8.0
+
+# CHA: tone down and make sublinear with an explicit soft cap
+K_CHA_RECV = 3.5          # weight on sqrt(mentions received)
+K_CHA_REACT = 3.0         # weight on sqrt(reactions received)
+K_CHA_SENT = 1.5          # small bump for sqrt(mentions sent)
+CHA_LOG_SCALE = 12.0
 
 # WIS: joins + consistency + thoughtfulness
 K_WIS_JOIN = 6.0          # each app "join" (presence tick) is meaningful
@@ -1431,6 +1439,13 @@ K_WIS_WEEKS = 3.0         # active ISO-weeks in window
 K_WIS_DAYS = 0.5          # active days in window
 K_WIS_WPM = 0.5           # bounded WPM contribution (<=40)
 WPM_CAP = 40.0
+
+
+def _log_squash(value: float, scale: float) -> float:
+    """Gently cap ``value`` using log1p while keeping small numbers unchanged."""
+    if value <= 0:
+        return 0.0
+    return scale * log1p(value / scale)
 
 def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) -> Dict[str, float]:
     """
@@ -1485,24 +1500,34 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
 
     # --- STR: sublinear + consistency dampener ---
     # For a pure 1-day burst (active_days=1), (1/7)^0.15 ≈ 0.722 → pulls 800 toward ~45.
-    days_factor = (active_days / 7.0) ** STR_DAYS_EXP if active_days > 0 else 0.0
+    if active_days > 0:
+        days_factor = (active_days / 7.0) ** STR_DAYS_EXP
+        days_factor = max(STR_MIN_ACTIVITY_FACTOR, days_factor)
+    else:
+        days_factor = 0.0
     str_score = (K_STR_BASE * sqrt(float(messages)) * days_factor) + (K_STR_ECHAT * float(emoji_chat))
 
     # --- INT: simple depth from words ---
     int_score = float(words) // WORDS_PER_INT_POINT
 
     # --- CHA: reduce magnitude via sqrt + smaller weights ---
-    cha_score = (
+    cha_linear = (
         K_CHA_RECV  * sqrt(float(mentions_recv)) +
         K_CHA_REACT * sqrt(float(reacts_recv))  +
         K_CHA_SENT  * sqrt(float(mentions_sent))
     )
+    cha_score = _log_squash(cha_linear, CHA_LOG_SCALE)
 
     # --- VIT: presence (voice + stream) ---
     vit_score = float(voice_min + stream_min)
 
-    # --- DEX: finesse signals ---
-    dex_score = float(emoji_react + mentions_sent + emoji_only_msgs)
+    # --- DEX: finesse signals (reactions + emoji messaging)
+    dex_linear = (
+        K_DEX_REACT * log1p(float(emoji_react)) +
+        K_DEX_MENTIONS * log1p(float(mentions_sent)) +
+        K_DEX_EMOJI_ONLY * log1p(float(emoji_only_msgs))
+    )
+    dex_score = _log_squash(dex_linear, DEX_LOG_SCALE)
 
     # --- WIS: show up (joins) + consistency + thoughtfulness ---
     wis_score = (
