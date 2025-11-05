@@ -6,6 +6,7 @@ import re
 from calendar import monthrange
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple, Dict, Set
+import os
 
 import discord
 from discord import app_commands
@@ -13,6 +14,7 @@ from discord.ext import commands, tasks
 
 from .. import models
 from ..strings import S
+from ..utils.storage import resolve_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,9 @@ GIF_DOMAINS = (
     "imgur.com", "i.imgur.com",
     "discordapp.com", "cdn.discordapp.com"
 )
+
+if "MPLCONFIGDIR" not in os.environ:
+    os.environ["MPLCONFIGDIR"] = str(resolve_data_dir("matplotlib"))
 
 try:
     import matplotlib.pyplot as plt

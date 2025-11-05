@@ -66,6 +66,45 @@ def _first_writable_dir(candidates: list[Path]) -> Path | None:
     return None
 
 
+def _ensure_file_writable(path: Path) -> bool:
+    """
+    Try to open the path for append to confirm we can write. Returns True on success.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def resolve_data_dir(*parts: str, force_temp: bool = False) -> Path:
+    """
+    Return a writable directory for Yuribot data. Optional *parts allow
+    callers to request a named subdirectory.
+    """
+    if force_temp:
+        writable_dir = Path(tempfile.gettempdir()) / "yuribot"
+        try:
+            writable_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("Failed to ensure temp data directory %s: %s", writable_dir, exc)
+    else:
+        candidates = _candidate_dirs()
+        writable_dir = _first_writable_dir(candidates)
+        if writable_dir is None:
+            log.warning("No persistent data directory writable; falling back to temp directory")
+            return resolve_data_dir(*parts, force_temp=True)
+
+    target = writable_dir.joinpath(*parts) if parts else writable_dir
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning("Failed to ensure data directory %s: %s", target, exc)
+    return target
+
+
 def resolve_data_file(filename: str) -> Path:
     """
     Determine a writable location for a persistent data file.
@@ -91,17 +130,7 @@ def resolve_data_file(filename: str) -> Path:
             source_path = cand
             break
 
-    writable_dir = _first_writable_dir(candidates)
-    if writable_dir is None:
-        writable_dir = Path(tempfile.mkdtemp(prefix="yuribot-"))
-        log.warning("No persistent data directory writable; using temporary dir %s", writable_dir)
-
-    target = writable_dir / rel
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # Best-effort; writes may still fail later but we tried.
-        pass
+    target = resolve_data_dir() / rel
 
     if source_path and source_path != target and not target.exists():
         try:
@@ -110,4 +139,19 @@ def resolve_data_file(filename: str) -> Path:
         except OSError as exc:
             log.warning("Failed to copy data file from %s to %s: %s", source_path, target, exc)
 
-    return target
+    if _ensure_file_writable(target):
+        return target
+
+    # Fall back to temp directory
+    temp_target = resolve_data_dir(force_temp=True) / rel
+    if source_path and source_path.exists() and source_path != temp_target and not temp_target.exists():
+        try:
+            temp_target.write_bytes(source_path.read_bytes())
+            log.info("Copied data file to temp location %s", temp_target)
+        except OSError as exc:
+            log.warning("Failed to copy data file to temp location %s: %s", temp_target, exc)
+
+    if not _ensure_file_writable(temp_target):
+        log.error("Unable to secure writable location for data file %s; using %s but writes may fail", rel, temp_target)
+
+    return temp_target
