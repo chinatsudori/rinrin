@@ -1521,6 +1521,9 @@ def _stat_activity_scores(con: sqlite3.Connection, guild_id: int, user_id: int) 
         "wis": float(wis_score),
     }
 
+_LEVELUP_DISTR: tuple[int, ...] = (4, 3, 2, 1, 1, 0)
+
+
 def _apply_levelup_stats(con: sqlite3.Connection, guild_id: int, user_id: int) -> None:
     """
     Apply stat gains based on current 7-day activity ordering:
