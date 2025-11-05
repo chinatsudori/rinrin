@@ -8,7 +8,6 @@ import re
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 
 import aiohttp
@@ -18,9 +17,10 @@ from discord import app_commands
 
 from .. import models
 from ..strings import S
+from ..utils.storage import resolve_data_file
 
 API_BASE = "https://api.mangaupdates.com/v1"
-DATA_FILE = Path("./data/mu_watch.json")
+DATA_FILE = resolve_data_file("mu_watch.json")
 POLL_SECONDS = 4 * 60 * 60  # 4 hours
 
 # --- Behavior toggles ---------------------------------------------------------

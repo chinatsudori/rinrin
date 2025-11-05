@@ -4,20 +4,20 @@ import json
 import random
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Dict, List, Optional
 
 import discord
 from discord.ext import commands
 
 from ..strings import S
+from ..utils.storage import resolve_data_file
 
 
 # =========================
 # Storage / constants
 # =========================
 
-# DATA_FILE = Path("./data/user_autoresponder.json")
+DATA_FILE = resolve_data_file("user_autoresponder.json")
 
 # Personalized (per-user) auto-replies are once per day
 PERSONAL_COOLDOWN = 24 * 60 * 60  # 24h
