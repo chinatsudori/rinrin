@@ -1,22 +1,20 @@
 from __future__ import annotations
-import re
+
+import logging
 from datetime import timedelta
 from typing import Optional
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from .. import models
-from ..utils.time import now_local, to_iso
 from ..strings import S
+from ..ui.collection import build_collection_list_embed
+from ..utils.collection import first_url, normalized_club
+from ..utils.time import now_local, to_iso
 
-URL_RE = re.compile(r'(https?://\S+)', re.IGNORECASE)
-
-
-def _first_url(text: str) -> str:
-    m = URL_RE.search(text or "")
-    return m.group(1) if m else ""
+log = logging.getLogger(__name__)
 
 
 class CollectionCog(commands.Cog):
@@ -36,8 +34,8 @@ class CollectionCog(commands.Cog):
     ):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
+        club = normalized_club(club)
 
-        club = (club or "").strip() or "manga"
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
@@ -46,24 +44,29 @@ class CollectionCog(commands.Cog):
 
         opens = now_local()
         closes = opens + timedelta(days=days)
-        cid = models.open_collection(interaction.guild_id, cfg["club_id"], to_iso(opens), to_iso(closes))
+        collection_id = models.open_collection(
+            interaction.guild_id,
+            cfg["club_id"],
+            to_iso(opens),
+            to_iso(closes),
+        )
 
-        ann = interaction.guild.get_channel(cfg["announcements_channel_id"])
-        pf = interaction.guild.get_channel(cfg["planning_forum_id"])
-        pfname = pf.name if isinstance(pf, discord.ForumChannel) else "planning"
+        announcements = interaction.guild.get_channel(cfg["announcements_channel_id"])
+        planning_forum = interaction.guild.get_channel(cfg["planning_forum_id"])
+        planning_name = planning_forum.name if isinstance(planning_forum, discord.ForumChannel) else "planning"
 
-        if isinstance(ann, discord.TextChannel):
-            await ann.send(
+        if isinstance(announcements, discord.TextChannel):
+            await announcements.send(
                 S(
                     "collection.announce.open",
                     club=club,
                     closes_unix=int(closes.timestamp()),
-                    planning_name=pfname,
+                    planning_name=planning_name,
                 )
             )
 
         await interaction.response.send_message(
-            S("collection.reply.opened", club=club, id=cid), ephemeral=True
+            S("collection.reply.opened", club=club, id=collection_id), ephemeral=True
         )
 
     @app_commands.command(name="close_collection", description="Manually close the current collection window")
@@ -72,18 +75,20 @@ class CollectionCog(commands.Cog):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
                 S("collection.error.no_cfg", club=club), ephemeral=True
             )
-        cw = models.latest_collection(interaction.guild_id, cfg["club_id"])
-        if not cw or cw[3] != "open":
+        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        if not collection or collection[3] != "open":
             return await interaction.response.send_message(S("collection.error.no_open"), ephemeral=True)
 
-        models.close_collection_by_id(cw[0])
-        await interaction.response.send_message(S("collection.reply.closed", club=club, id=cw[0]), ephemeral=True)
+        models.close_collection_by_id(collection[0])
+        await interaction.response.send_message(
+            S("collection.reply.closed", club=club, id=collection[0]), ephemeral=True
+        )
 
     @app_commands.command(
         name="list_current_submissions",
@@ -94,39 +99,31 @@ class CollectionCog(commands.Cog):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
                 S("collection.error.no_cfg", club=club), ephemeral=True
             )
 
-        cw = models.latest_collection(interaction.guild_id, cfg["club_id"])
-        if not cw:
+        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        if not collection:
             return await interaction.response.send_message(S("collection.error.no_windows"), ephemeral=True)
 
-        subs = models.list_submissions_for_collection(cw[0])
-        if not subs:
+        submissions = models.list_submissions_for_collection(collection[0])
+        if not submissions:
             return await interaction.response.send_message(S("collection.error.no_submissions"), ephemeral=True)
 
-        title = S("collection.embed.title", club=club, id=cw[0], status=cw[3])
-        embed = discord.Embed(title=title, color=discord.Color.pink())
-
-        for i, (sid, title_text, link, author_id, thread_id, created_at) in enumerate(subs, start=1):
-            field_name = S("collection.embed.item_name", i=i, title=title_text)
-            field_value = S(
-                "collection.embed.item_value",
-                link=(link or S("collection.common.no_link")),
-                author_id=author_id,
-                thread_id=thread_id,
-            )
-            embed.add_field(name=field_name, value=field_value, inline=False)
-
+        embed = build_collection_list_embed(
+            club=club,
+            collection_id=collection[0],
+            status=collection[3],
+            submissions=[(sid, title, link, author_id, thread_id) for sid, title, link, author_id, thread_id, _ in submissions],
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
-        # Auto-scrape new planning forum posts during an open collection, per club
         if thread.guild is None:
             return
         hit = models.get_club_by_planning_forum(thread.guild.id, thread.parent_id)
@@ -134,25 +131,25 @@ class CollectionCog(commands.Cog):
             return
 
         club_id, club_type = hit
-        cw = models.latest_collection(thread.guild.id, club_id)
-        if not cw or cw[3] != "open":
+        collection = models.latest_collection(thread.guild.id, club_id)
+        if not collection or collection[3] != "open":
             return
 
         starter = None
         try:
-            async for m in thread.history(limit=1, oldest_first=True):
-                starter = m
+            async for message in thread.history(limit=1, oldest_first=True):
+                starter = message
                 break
         except Exception:
             starter = None
 
-        link = _first_url(starter.content) if starter else ""
+        link = first_url(starter.content) if starter else ""
         title = thread.name or (starter.content[:80] if starter else "Untitled Submission")
 
         models.add_submission(
             thread.guild.id,
             club_id,
-            cw[0],
+            collection[0],
             thread.owner_id or 0,
             title.strip(),
             link.strip(),
@@ -161,9 +158,7 @@ class CollectionCog(commands.Cog):
         )
 
         try:
-            await thread.send(
-                S("collection.thread.registered", club_upper=(club_type or "").upper())
-            )
+            await thread.send(S("collection.thread.registered", club_upper=(club_type or "").upper()))
         except Exception:
             pass
 

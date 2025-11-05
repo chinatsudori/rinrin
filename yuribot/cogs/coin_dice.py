@@ -1,49 +1,24 @@
 from __future__ import annotations
-import re
-import random
+
 import logging
-from typing import List, Tuple
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
-from ..strings import S  # uses your S(key, **kwargs) helper
+from ..strings import S
+from ..ui.coin_dice import build_coin_embed, build_dice_embed
+from ..utils.coin_dice import (
+    MAX_COINS,
+    MAX_DICE_TOTAL,
+    DiceSpecError,
+    flip_coins,
+    parse_specs,
+    roll_dice,
+)
 
 log = logging.getLogger(__name__)
 
-MAX_COINS = 20
-MAX_DICE_TOTAL = 50  # across all specs in one /roll
-
-DICE_SPEC_RE = re.compile(
-    r"""
-    ^\s*
-    (?:(\d*)d)?       # optional N before 'd' ('' or digits) - default 1
-    (\d+)             # sides M (required)
-    ([+-]\d+)?        # optional modifier like +2 or -1
-    \s*$
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-def _parse_specs(text: str) -> List[Tuple[int, int, int, str]]:
-    if not text:
-        raise ValueError("empty")
-    tokens = [t.strip() for t in re.split(r"[, \u3000]+", text) if t.strip()]
-    out: List[Tuple[int, int, int, str]] = []
-    for tok in tokens:
-        m = DICE_SPEC_RE.match(tok)
-        if not m:
-            raise ValueError(tok)
-        n_str, sides_str, mod_str = m.groups()
-        n = int(n_str) if n_str else 1
-        sides = int(sides_str)
-        mod = int(mod_str) if mod_str else 0
-        if n <= 0 or sides <= 0:
-            raise ValueError(tok)
-        spec = f"{n}d{sides}{'+'+str(mod) if mod>0 else str(mod) if mod<0 else ''}"
-        out.append((n, sides, mod, spec))
-    return out
 
 class CoinDiceCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -51,7 +26,7 @@ class CoinDiceCog(commands.Cog):
 
     @app_commands.command(name="coin", description="Flip one or more coins.")
     @app_commands.describe(
-        count=f"How many coins to flip (1–{MAX_COINS})",
+        count=f"How many coins to flip (1-{MAX_COINS})",
         post="If true, post publicly in this channel",
     )
     async def coin(
@@ -62,27 +37,9 @@ class CoinDiceCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=not post)
         try:
-            if count < 1 or count > MAX_COINS:
-                return await interaction.followup.send(
-                    S("fun.coin.limit", max=MAX_COINS), ephemeral=not post
-                )
-
-            results = [random.choice(("Heads", "Tails")) for _ in range(count)]
-            heads = sum(1 for r in results if r == "Heads")
-            tails = count - heads
-
-            emap = {"Heads": "H", "Tails": "T"}
-            seq = " ".join(emap[r] for r in results)
-
-            embed = discord.Embed(
-                title=S("fun.coin.title"),
-                color=discord.Color.gold()
-            )
-            embed.add_field(
-                name=S("fun.coin.results", heads=heads, tails=tails),
-                value=S("fun.coin.sequence", seq=seq),
-                inline=False,
-            )
+            results, heads, tails = flip_coins(int(count))
+            sequence = " ".join("H" if r == "Heads" else "T" for r in results)
+            embed = build_coin_embed(heads=heads, tails=tails, sequence=sequence)
             await interaction.followup.send(embed=embed, ephemeral=not post)
 
             log.info(
@@ -120,71 +77,44 @@ class CoinDiceCog(commands.Cog):
     async def roll(self, interaction: discord.Interaction, specs: str, post: bool = False):
         await interaction.response.defer(ephemeral=not post)
         try:
-            try:
-                parsed = _parse_specs(specs)
-            except ValueError as e:
-                bad = str(e)
-                return await interaction.followup.send(
-                    S("fun.dice.invalid_spec", text=bad if bad != "empty" else specs or "…"),
-                    ephemeral=not post,
-                )
-
-            total_dice_requested = sum(n for n, _s, _m, _spec in parsed)
-            if total_dice_requested > MAX_DICE_TOTAL:
-                return await interaction.followup.send(
-                    S("fun.dice.limit", max_dice=MAX_DICE_TOTAL),
-                    ephemeral=not post,
-                )
-
-            lines: List[str] = []
-            grand_total = 0
-            per_spec_totals: List[int] = []
-
-            for n, sides, mod, spec in parsed:
-                rolls = [random.randint(1, sides) for _ in range(n)]
-                subtotal = sum(rolls) + mod
-                grand_total += subtotal
-                per_spec_totals.append(subtotal)
-
-                rolls_text = "[" + ", ".join(str(r) for r in rolls) + "]"
-                mod_text = S("fun.dice.mod_text", mod=mod) if mod != 0 else ""
-                lines.append(
-                    S("fun.dice.rolls_line", spec=spec, rolls=rolls_text, mod_text=mod_text, total=subtotal)
-                )
-
-            embed = discord.Embed(
-                title=S("fun.dice.title"),
-                description="\n".join(lines),
-                color=discord.Color.blurple(),
+            parsed = parse_specs(specs)
+        except DiceSpecError as exc:
+            bad = str(exc)
+            return await interaction.followup.send(
+                S("fun.dice.invalid_spec", text=bad if bad != "empty" else specs or "."),
+                ephemeral=not post,
             )
-            embed.add_field(name="\u200b", value=S("fun.dice.total", total=grand_total), inline=False)
 
-            await interaction.followup.send(embed=embed, ephemeral=not post)
+        lines, total_dice_requested, grand_total = roll_dice(parsed)
+        if total_dice_requested > MAX_DICE_TOTAL:
+            return await interaction.followup.send(
+                S("fun.dice.limit", max_dice=MAX_DICE_TOTAL),
+                ephemeral=not post,
+            )
 
-            log.info(
-                "fun.dice.used",
-                extra={
-                    "guild_id": getattr(interaction, "guild_id", None),
-                    "channel_id": getattr(interaction.channel, "id", None),
-                    "user_id": interaction.user.id,
-                    "specs": specs,
-                    "spec_count": len(parsed),
-                    "dice_total": total_dice_requested,
-                    "grand_total": grand_total,
-                    "post": post,
-                },
-            )
-        except Exception:
-            log.exception(
-                "fun.dice.failed",
-                extra={
-                    "guild_id": getattr(interaction, "guild_id", None),
-                    "channel_id": getattr(interaction.channel, "id", None),
-                    "user_id": getattr(interaction.user, "id", None),
-                    "specs": specs,
-                },
-            )
-            await interaction.followup.send(S("common.error_generic"), ephemeral=True)
+        spec_lines = []
+        for spec, rolls, modifier, subtotal in lines:
+            rolls_text = "[" + ", ".join(str(r) for r in rolls) + "]"
+            mod_text = S("fun.dice.mod_text", mod=modifier) if modifier != 0 else ""
+            spec_lines.append((spec, rolls_text, mod_text, subtotal))
+
+        embed = build_dice_embed(spec_lines=spec_lines, grand_total=grand_total)
+        await interaction.followup.send(embed=embed, ephemeral=not post)
+
+        log.info(
+            "fun.dice.used",
+            extra={
+                "guild_id": getattr(interaction, "guild_id", None),
+                "channel_id": getattr(interaction.channel, "id", None),
+                "user_id": interaction.user.id,
+                "specs": specs,
+                "spec_count": len(parsed),
+                "dice_total": total_dice_requested,
+                "grand_total": grand_total,
+                "post": post,
+            },
+        )
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(CoinDiceCog(bot))

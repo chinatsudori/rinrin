@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import io
 import logging
-import re
-from calendar import monthrange
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Tuple, Dict, Set
-import os
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set, Tuple
 
 import discord
 from discord import app_commands
@@ -14,193 +11,55 @@ from discord.ext import commands, tasks
 
 from .. import models
 from ..strings import S
-from ..utils.storage import resolve_data_dir
-
-log = logging.getLogger(__name__)
-
-# =========================
-# Config: XP Multipliers
-# =========================
-# Channel multipliers
-XP_MULTIPLIERS: Dict[int, float] = {}  # channel_id -> 2.0 / 4.0 / 8.0 etc.
-MULTIPLIER_DEFAULT = 1.0
-
-# Role multipliers (max applied across user's roles)
-ROLE_XP_MULTIPLIERS: Dict[int, float] = {
-    1418285755339374785: 2.0,  # Server Boosters
-}
-# Pinned message bonus
-PIN_MULTIPLIER: float = 2.0     # total multiplier relative to original message XP
-PIN_FALLBACK_XP: int = 50       # used if we don't have the cached original XP
-
-# Regex & constants ----------------
-WORD_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
-CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:(\d+)>")
-UNICODE_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]")
-MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-DAY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
-WEEK_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
-PT_TZNAME = "America/Los_Angeles"
-_ZW_RE = re.compile(r"[\u200B-\u200D\uFEFF]")  # zero-width
-WHITESPACE_PUNCT_RE = re.compile(r"[\s\.,;:!?\-\(\)\[\]\{\}_+=/\\|~`\"'<>]+", flags=re.UNICODE)
-
-# GIF detection helpers
-GIF_DOMAINS = (
-    "tenor.com", "media.tenor.com",
-    "giphy.com", "media.giphy.com",
-    "imgur.com", "i.imgur.com",
-    "discordapp.com", "cdn.discordapp.com"
+from ..ui.activity import (
+    LESBIAN_COLORS,
+    build_metric_leaderboard_embed as _build_metric_leaderboard_embed,
+    build_profile_embed as _build_profile_embed,
+    build_rank_embed as _build_rank_embed,
+    area_with_vertical_gradient as _area_with_vertical_gradient,
+    format_hour_range_local as _fmt_hour_range_local,
+    require_guild as _require_guild,
+)
+from ..utils.activity import (
+    CUSTOM_EMOJI_RE,
+    DAY_RE,
+    GIF_DOMAINS,
+    PIN_FALLBACK_XP,
+    PIN_MULTIPLIER,
+    ROLE_XP_MULTIPLIERS,
+    UNICODE_EMOJI_RE,
+    XP_MULTIPLIERS,
+    MULTIPLIER_DEFAULT,
+    channel_multiplier as _ch_mult,
+    count_emojis_text as _count_emojis_text,
+    count_words as _count_words,
+    day_default as _day_default,
+    ensure_matplotlib_environment,
+    gif_source_from_url as _gif_source_from_url,
+    is_emoji_only as _is_emoji_only,
+    month_default as _month_default,
+    now_iso as _now_iso,
+    parse_scope_and_key as _parse_scope_and_key,
+    prime_window_from_hist as _prime_window_from_hist,
+    role_multiplier as _role_mult,
+    day_key as _day_key,
+    MONTH_RE,
+    WEEK_RE,
+    week_default as _week_default,
+    xp_multiplier as _xp_mult,
 )
 
-if "MPLCONFIGDIR" not in os.environ:
-    os.environ["MPLCONFIGDIR"] = str(resolve_data_dir("matplotlib"))
+ensure_matplotlib_environment()
 
 try:
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
+
     _HAS_MPL = True
 except Exception:
     _HAS_MPL = False
 
-LESBIAN_COLORS = ["#D52D00","#EF7627","#FF9A56","#FFFFFF","#D162A4","#B55690","#A30262"]
-
-# --- gradient helper (used by graph) ---
-def _area_with_vertical_gradient(ax, x_positions, y_values, cmap, bg_bottom=0.0):
-    """
-    Draw an area chart y(x) with a vertical gradient using imshow clipped to the area.
-    bg_bottom: baseline (usually 0).
-    """
-    import numpy as np
-    area = ax.fill_between(x_positions, y_values, bg_bottom, color="none")
-    xmin, xmax = min(x_positions) - 0.5, max(x_positions) + 0.5
-    ymin, ymax = bg_bottom, max(max(y_values) * 1.05, 1)
-    grad = np.linspace(0, 1, 256).reshape(256, 1)
-    im = ax.imshow(grad, extent=[xmin, xmax, ymin, ymax], origin="lower", aspect="auto", cmap=cmap, alpha=1.0, zorder=1)
-    im.set_clip_path(area.get_paths()[0], transform=ax.transData)
-    return area, im
-
-# ---------------- utils ----------------
-
-def _strip_custom_emojis(text: str) -> str:
-    return CUSTOM_EMOJI_RE.sub("", text or "")
-
-def _strip_unicode_emojis(text: str) -> str:
-    return UNICODE_EMOJI_RE.sub("", text or "")
-
-def _is_emoji_only(text: str | None) -> bool:
-    if not text:
-        return False
-    t = _ZW_RE.sub("", text)
-    t = _strip_custom_emojis(t)
-    t = _strip_unicode_emojis(t)
-    t = WHITESPACE_PUNCT_RE.sub("", t)
-    return t == ""
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-def _month_default() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
-
-def _week_default() -> str:
-    dt = datetime.now(timezone.utc).date()
-    iso = dt.isocalendar()
-    return f"{iso.year}-W{iso.week:02d}"
-
-def _day_default() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-def _count_words(text: str | None) -> int:
-    return 0 if not text else len(WORD_RE.findall(text))
-
-def _count_emojis_text(text: str | None) -> int:
-    if not text:
-        return 0
-    return len(CUSTOM_EMOJI_RE.findall(text)) + len(UNICODE_EMOJI_RE.findall(text))
-
-def _ch_mult(ch: discord.abc.GuildChannel | None) -> float:
-    if not ch:
-        return MULTIPLIER_DEFAULT
-    return XP_MULTIPLIERS.get(getattr(ch, "id", 0), MULTIPLIER_DEFAULT)
-
-def _role_mult(member: Optional[discord.Member]) -> float:
-    if not member or not getattr(member, "roles", None):
-        return 1.0
-    best = 1.0
-    for r in member.roles:
-        if r and r.id in ROLE_XP_MULTIPLIERS:
-            try:
-                best = max(best, float(ROLE_XP_MULTIPLIERS[r.id]))
-            except Exception:
-                continue
-    return best
-
-def _xp_mult(member: Optional[discord.Member], ch: Optional[discord.abc.GuildChannel]) -> float:
-    return max(0.0, float(_ch_mult(ch) * _role_mult(member)))
-
-def _gif_source_from_url(u: str) -> str:
-    try:
-        from urllib.parse import urlparse
-        host = (urlparse(u).hostname or "").lower()
-        for d in GIF_DOMAINS:
-            if host.endswith(d):
-                root = d.split(".")[-2]
-                return "discord" if root == "discordapp" else root
-        if u.lower().endswith(".gif"):
-            return "other"
-    except Exception:
-        pass
-    return "other"
-
-async def _require_guild(inter: discord.Interaction) -> bool:
-    if not inter.guild:
-        if not inter.response.is_done():
-            await inter.response.send_message(S("common.guild_only"), ephemeral=True)
-        else:
-            await inter.followup.send(S("common.guild_only"), ephemeral=True)
-        return False
-    return True
-
-def _fmt_rank(rows: list[tuple[int, int]], guild: discord.Guild, limit: int) -> str:
-    lines: List[str] = []
-    for i, (uid, cnt) in enumerate(rows[:limit], start=1):
-        m = guild.get_member(uid)
-        name = m.mention if m else f"<@{uid}>"
-        lines.append(f"{i}. {name} — **{cnt}**")
-    return "\n".join(lines) if lines else S("activity.leaderboard.empty")
-
-def _prime_window_from_hist(hour_counts: List[int], window: int = 1) -> tuple[int, int, int]:
-    best_sum, best_h = -1, 0
-    for h in range(24):
-        s = sum(hour_counts[(h + i) % 24] for i in range(window))
-        if s > best_sum:
-            best_sum, best_h = s, h
-    return best_h, (best_h + window) % 24, best_sum
-
-def _fmt_hour_range_local(start: int, end: int, tzlabel: str = "PT") -> str:
-    def h12(h: int) -> str:
-        ampm = "AM" if h < 12 else "PM"
-        hh = h % 12 or 12
-        return f"{hh}{ampm}"
-    return f"{h12(start)}–{h12(end)} {tzlabel}"
-
-def _parse_scope_and_key(scope: str | None, day: str | None, week: str | None, month: str | None) -> tuple[str, Optional[str]]:
-    s = scope or "month"
-    if s == "day":
-        key = day or _day_default()
-        if not DAY_RE.match(key):
-            raise ValueError("bad_day_format")
-    elif s == "week":
-        key = week or _week_default()
-        if not WEEK_RE.match(key):
-            raise ValueError("bad_week_format")
-    elif s == "month":
-        key = month or _month_default()
-        if not MONTH_RE.match(key):
-            raise ValueError("bad_month_format")
-    else:
-        s = "all"; key = None
-    return s, key
+log = logging.getLogger(__name__)
 
 # =========================
 # Activity Cog (+MMO)
@@ -226,12 +85,9 @@ class ActivityCog(commands.Cog):
         self._poll_presence.cancel()
 
     # ---------- internals ----------
-    def _day_key(self, dt: Optional[datetime] = None) -> str:
-        return (dt or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
-
     def _maybe_count_join(self, guild_id: int, user_id: int, app_name: str, when_dt: Optional[datetime] = None) -> None:
         """Count one 'activity_joins' per user/app/day. Idempotent per day."""
-        day = self._day_key(when_dt)
+        day = _day_key(when_dt)
         key = (int(guild_id), int(user_id), str(app_name)[:80], day)
         if key in self._join_seen:
             return
@@ -580,13 +436,15 @@ class ActivityCog(commands.Cog):
         await interaction.response.defer(ephemeral=not post)
         rows = models.top_levels(interaction.guild_id, int(limit))
         if not rows:
-            return await interaction.followup.send("No one has started their journey yet.", ephemeral=not post)
-        lines = []
-        for i, (uid, lvl, xp) in enumerate(rows, start=1):
-            m = interaction.guild.get_member(uid)
-            name = m.mention if m else f"<@{uid}>"
-            lines.append(f"{i}. {name} — **Lv {lvl}** ({xp} XP)")
-        embed = discord.Embed(title=S("activity.rank.title"), description="\n".join(lines), color=discord.Color.gold())
+            return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
+
+        title_scope = s if s == "all" else f"{s}:{key}"
+        embed = _build_metric_leaderboard_embed(
+            guild=interaction.guild,
+            metric_name=metric_name,
+            scope_label=title_scope,
+            rows=[(int(uid), int(cnt)) for uid, cnt in rows],
+        )
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- /activity me (profile) -------
@@ -661,49 +519,31 @@ class ActivityCog(commands.Cog):
         ch_id = models.prime_channel_total(gid, uid)
         prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
-        # Build embed
-        who = target.display_name
-        embed = discord.Embed(
-            title=S("activity.profile.title", user=who),
-            color=discord.Color.purple()
-        )
-
-        steps = 20
-        filled = steps if need == 0 else max(0, min(steps, int(round(steps * (cur / need)))))
-        pct = int(round((cur / need) * 100)) if need > 0 else 100
-        bar = "▰" * filled + "▱" * (steps - filled)
-        embed.add_field(
-            name="Level & Progress",
-            value=f"**Lv {lvl}** — {rpg['xp']} XP\n{bar}\n{cur}/{need} ({pct}%)",
-            inline=False
-        )
-
-        stats = (
-            f"**STR** {rpg['str']}  **DEX** {rpg['dex']}  **INT** {rpg['int']}  "
-            f"**WIS** {rpg['wis']}  **CHA** {rpg['cha']}  **VIT** {rpg['vit']}"
-        )
-        embed.add_field(name=S("activity.profile.stats"), value=stats, inline=False)
-
-        derived = (
-            f"Engagement ratio: **{engagement_ratio:.2f}**\n"
-            f"Reply density: **{reply_density:.2f}**\n"
-            f"Mention depth: **{mention_depth:.2f}**\n"
-            f"Media ratio: **{media_ratio:.2f}**\n"
-            f"Burstiness: **{burstiness:.2f}**\n"
-            f"Prime hour: **{prime_hour}**\n"
-            f"Prime channel: {prime_channel}"
-        )
-        embed.add_field(name=S("activity.profile.derived"), value=derived, inline=False)
-
-        embed.add_field(
-            name=S("activity.profile.voice"),
-            value=f"Voice: **{voice_min}** min · Streaming: **{stream_min}** min",
-            inline=True
-        )
-        embed.add_field(
-            name=S("activity.profile.apps"),
-            value=f"Activities: **{act_min}** min · Joins: **{act_joins}**",
-            inline=True
+        embed = _build_profile_embed(
+            target=target,
+            level=lvl,
+            total_xp=rpg["xp"],
+            progress_current=cur,
+            progress_needed=need,
+            stats={
+                "str": rpg["str"],
+                "dex": rpg["dex"],
+                "int": rpg["int"],
+                "wis": rpg["wis"],
+                "cha": rpg["cha"],
+                "vit": rpg["vit"],
+            },
+            engagement_ratio=engagement_ratio,
+            reply_density=reply_density,
+            mention_depth=mention_depth,
+            media_ratio=media_ratio,
+            burstiness=burstiness,
+            prime_hour=prime_hour,
+            prime_channel=prime_channel,
+            voice_minutes=voice_min,
+            stream_minutes=stream_min,
+            activity_minutes=act_min,
+            activity_joins=act_joins,
         )
 
         await interaction.followup.send(embed=embed, ephemeral=not post)
@@ -841,17 +681,12 @@ class ActivityCog(commands.Cog):
         if not rows:
             return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
 
-        lines = []
-        for i, (uid, cnt) in enumerate(rows, start=1):
-            m = interaction.guild.get_member(int(uid))
-            name = m.mention if m else f"<@{int(uid)}>"
-            lines.append(f"{i}. {name} — **{int(cnt)}** {metric_name}")
-
         title_scope = s if s == "all" else f"{s}:{key}"
-        embed = discord.Embed(
-            title=f"Top {metric_name} — {title_scope}",
-            description="\n".join(lines),
-            color=discord.Color.blurple()
+        embed = _build_metric_leaderboard_embed(
+            guild=interaction.guild,
+            metric_name=metric_name,
+            scope_label=title_scope,
+            rows=[(int(uid), int(cnt)) for uid, cnt in rows],
         )
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
@@ -1061,3 +896,10 @@ class ActivityCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ActivityCog(bot))
+
+
+
+
+
+
+

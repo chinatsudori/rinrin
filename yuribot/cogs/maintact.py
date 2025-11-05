@@ -11,25 +11,28 @@ from discord.ext import commands
 
 from .. import models
 from ..strings import S
+from ..utils.maintact import month_from_day
 
 log = logging.getLogger(__name__)
 
 
-def _month_from_day(day: str) -> str:
-    return day[:7]  # "YYYY-MM-DD" -> "YYYY-MM"
-
-
-# A reusable permission check that BLOCKS execution but doesn't hide the command
-def _require_manage_guild() -> app_commands.Check:
-    async def predicate(inter: discord.Interaction) -> bool:
-        if not inter.guild:
-            await inter.response.send_message(S("common.guild_only"), ephemeral=True)
+def require_manage_guild() -> app_commands.Check:
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
             return False
-        if not inter.user.guild_permissions.manage_guild:  # type: ignore[attr-defined]
-            await inter.response.send_message(S("common.need_manage_server"), ephemeral=True)
+        if not interaction.user.guild_permissions.manage_guild:  # type: ignore[attr-defined]
+            await interaction.response.send_message(S("common.need_manage_server"), ephemeral=True)
             return False
         return True
+
     return app_commands.check(predicate)
+
+
+def read_csv(attachment: discord.Attachment):
+    raw = attachment.read()
+    text = raw.decode("utf-8", errors="replace")
+    return csv.reader(io.StringIO(text))
 
 
 class MaintActivityCog(commands.Cog):
@@ -45,7 +48,7 @@ class MaintActivityCog(commands.Cog):
         file="CSV exported via /activity export scope=day",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
     )
-    @_require_manage_guild()
+    @require_manage_guild()
     async def import_day_csv(
         self,
         interaction: discord.Interaction,
@@ -54,10 +57,7 @@ class MaintActivityCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        raw = await file.read()
-        text = raw.decode("utf-8", errors="replace")
-        reader = csv.reader(io.StringIO(text))
-
+        reader = csv.reader(io.StringIO((await file.read()).decode("utf-8", errors="replace")))
         header = next(reader, None) or []
         try:
             idx_g = header.index("guild_id")
@@ -85,7 +85,7 @@ class MaintActivityCog(commands.Cog):
                 if cnt <= 0:
                     continue
                 models.upsert_member_messages_day(interaction.guild_id, uid, day, cnt)
-                touched.add(_month_from_day(day))
+                touched.add(month_from_day(day))
                 rows_imported += 1
             except Exception:
                 log.exception("maint.import_day_csv.row_failed", extra={"guild_id": interaction.guild_id, "row": row})
@@ -108,7 +108,7 @@ class MaintActivityCog(commands.Cog):
         file="CSV exported via /activity export scope=month",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
     )
-    @_require_manage_guild()
+    @require_manage_guild()
     async def import_month_csv(
         self,
         interaction: discord.Interaction,
@@ -117,10 +117,7 @@ class MaintActivityCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        raw = await file.read()
-        text = raw.decode("utf-8", errors="replace")
-        reader = csv.reader(io.StringIO(text))
-
+        reader = csv.reader(io.StringIO((await file.read()).decode("utf-8", errors="replace")))
         header = next(reader, None) or []
         try:
             idx_g = header.index("guild_id")
@@ -160,7 +157,7 @@ class MaintActivityCog(commands.Cog):
 
     @group.command(name="rebuild_month", description="ADMIN: rebuild a month aggregate from day table.")
     @app_commands.describe(month="YYYY-MM")
-    @_require_manage_guild()
+    @require_manage_guild()
     async def rebuild_month(self, interaction: discord.Interaction, month: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:

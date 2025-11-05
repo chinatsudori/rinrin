@@ -1,28 +1,23 @@
 from __future__ import annotations
+
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
+from typing import Optional
+
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from .. import models
-from ..config import LOCAL_TZ
-from ..utils.time import to_iso
 from ..strings import S
+from ..ui.series import build_series_list_embed
+from ..utils.collection import normalized_club
+from ..utils.series import build_sections, next_friday_at, to_utc
+from ..utils.time import to_iso
 
 log = logging.getLogger(__name__)
 
-def next_friday_at(hour: int) -> datetime:
-    now = datetime.now(tz=LOCAL_TZ)
-    # Monday=0..Sunday=6 ; Friday=4
-    days = (4 - now.weekday()) % 7
-    if days == 0:  # if today is Friday, schedule next Friday
-        days = 7
-    return now.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=days)
-
-def _to_utc(dt_local: datetime) -> datetime:
-    return dt_local.astimezone(timezone.utc)
 
 class SeriesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -42,23 +37,24 @@ class SeriesCog(commands.Cog):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
-            return await interaction.response.send_message(
-                S("series.error.no_cfg", club=club), ephemeral=True
-            )
-        cw = models.latest_collection(interaction.guild_id, cfg["club_id"])
-        if not cw:
+            return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
+
+        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        if not collection:
             return await interaction.response.send_message(S("series.error.no_collection"), ephemeral=True)
-        sub = models.get_submission(cw[0], number)
-        if not sub:
+
+        submission = models.get_submission(collection[0], number)
+        if not submission:
             return await interaction.response.send_message(S("series.error.bad_number"), ephemeral=True)
 
-        sid, title, link, author_id, thread_id, created_at = sub
-        series_id = models.create_series(interaction.guild_id, cfg["club_id"], title, link or "", sid)
+        submission_id, title, link, *_ = submission
+        series_id = models.create_series(interaction.guild_id, cfg["club_id"], title, link or "", submission_id)
         await interaction.response.send_message(
-            S("series.set_from_number.ok", club=club, title=title, id=series_id), ephemeral=True
+            S("series.set_from_number.ok", club=club, title=title, id=series_id),
+            ephemeral=True,
         )
 
     @app_commands.command(name="set_series", description="Create and set active series (manual)")
@@ -71,23 +67,27 @@ class SeriesCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         title: str,
-        link: str | None = None,
+        link: Optional[str] = None,
         club: str = "manga",
     ):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
-            return await interaction.response.send_message(
-                S("series.error.no_cfg", club=club), ephemeral=True
-            )
+            return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
+
         series_id = models.create_series(
-            interaction.guild_id, cfg["club_id"], title.strip(), (link or "").strip(), None
+            interaction.guild_id,
+            cfg["club_id"],
+            title.strip(),
+            (link or "").strip(),
+            None,
         )
         await interaction.response.send_message(
-            S("series.set_manual.ok", club=club, title=title, id=series_id), ephemeral=True
+            S("series.set_manual.ok", club=club, title=title, id=series_id),
+            ephemeral=True,
         )
 
     @app_commands.command(name="list_series", description="List series in this club")
@@ -96,23 +96,16 @@ class SeriesCog(commands.Cog):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
-            return await interaction.response.send_message(
-                S("series.error.no_cfg", club=club), ephemeral=True
-            )
+            return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
+
         rows = models.list_series(interaction.guild_id, cfg["club_id"])
         if not rows:
             return await interaction.response.send_message(S("series.list.none"), ephemeral=True)
 
-        embed = discord.Embed(title=S("series.list.title", club=club), color=discord.Color.pink())
-        for sid, title, link, status in rows[:25]:
-            embed.add_field(
-                name=S("series.list.row_title", id=sid, title=title, status=status),
-                value=(link or S("series.list.no_link")),
-                inline=False,
-            )
+        embed = build_series_list_embed(club=club, rows=[(sid, title, link, status) for sid, title, link, status in rows[:25]])
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="plan_discussions", description="Create discussion events for a series")
@@ -134,49 +127,47 @@ class SeriesCog(commands.Cog):
         duration_hours: app_commands.Range[int, 1, 12] = 2,
         days_between: app_commands.Range[int, 1, 60] = 7,
         club: str = "manga",
-        series_id: int | None = None,
+        series_id: Optional[int] = None,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         if not interaction.guild:
             return await interaction.followup.send(S("common.guild_only"), ephemeral=True)
 
-        club = (club or "").strip() or "manga"
+        club = normalized_club(club)
         cfg = models.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.followup.send(S("series.error.no_cfg", club=club), ephemeral=True)
 
         if series_id:
-            srow = models.get_series(series_id)
-            if not srow or srow[1] != interaction.guild_id:
+            series_row = models.get_series(series_id)
+            if not series_row or series_row[1] != interaction.guild_id:
                 return await interaction.followup.send(S("series.plan.error.not_found"), ephemeral=True)
-            sid = srow[0]; title = srow[2]; link = srow[3]
-            series = (sid, title, link)
+            sid, title, link = series_row[0], series_row[2], series_row[3]
         else:
-            series = models.latest_active_series(interaction.guild_id, cfg["club_id"])
-        if not series:
-            return await interaction.followup.send(S("series.plan.error.no_active"), ephemeral=True)
+            latest = models.latest_active_series(interaction.guild_id, cfg["club_id"])
+            if not latest:
+                return await interaction.followup.send(S("series.plan.error.no_active"), ephemeral=True)
+            sid, title, link = latest
 
-        series_id, title, link = series
-
-        sections = []
-        start = 1
-        while start <= total_chapters:
-            end = min(start + chapters_per_section - 1, total_chapters)
-            sections.append((start, end))
-            start = end + 1
-
+        sections = build_sections(total_chapters, chapters_per_section)
         first_event_local = next_friday_at(hour_local)
 
         created = 0
         failures = []
-        for idx, (s, e) in enumerate(sections):
-            label = S("series.plan.label", s=s, e=e)  # "Ch. s–e"
-            start_dt_local = first_event_local + timedelta(days=days_between * idx)
-            end_dt_local = start_dt_local + timedelta(hours=duration_hours)
+        for idx, (start_ch, end_ch) in enumerate(sections):
+            label = S("series.plan.label", s=start_ch, e=end_ch)
+            start_local = first_event_local + timedelta(days=days_between * idx)
+            end_local = start_local + timedelta(hours=duration_hours)
 
-            start_dt = _to_utc(start_dt_local)
-            end_dt = _to_utc(end_dt_local)
+            start_dt = to_utc(start_local)
+            end_dt = to_utc(end_local)
+
+            description = (
+                S("series.plan.desc_with_link", title=title, label=label, link=link)
+                if link
+                else S("series.plan.desc_no_link", title=title, label=label)
+            )
 
             try:
                 event = await interaction.guild.create_scheduled_event(
@@ -185,20 +176,34 @@ class SeriesCog(commands.Cog):
                     end_time=end_dt,
                     privacy_level=discord.PrivacyLevel.guild_only,
                     entity_type=discord.EntityType.external,
-                    description=(S("series.plan.desc_with_link", title=title, label=label, link=link)
-                                 if link else S("series.plan.desc_no_link", title=title, label=label)),
+                    description=description,
                     location=S("series.plan.location"),
                 )
-                models.add_discussion_section(series_id, label, s, e, to_iso(start_dt), event.id)
+                models.add_discussion_section(
+                    sid,
+                    label,
+                    start_ch,
+                    end_ch,
+                    to_iso(start_dt),
+                    event.id,
+                )
                 created += 1
-            except Exception as ex:
-                failures.append((label, str(ex)))
-                log.exception("Failed to create scheduled event for %s (%s-%s): %s", title, s, e, ex)
+            except Exception as exc:
+                failures.append((label, str(exc)))
+                log.exception(
+                    "series.plan.event_failed",
+                    extra={
+                        "guild_id": interaction.guild_id,
+                        "series_id": sid,
+                        "label": label,
+                        "error": str(exc),
+                    },
+                )
 
             if (idx + 1) % 5 == 0:
                 await asyncio.sleep(1.0)
 
-        msg = S(
+        summary = S(
             "series.plan.summary",
             club=club,
             created=created,
@@ -208,8 +213,9 @@ class SeriesCog(commands.Cog):
             cadence=days_between,
         )
         if failures:
-            msg += S("series.plan.summary_fail_tail", fail=len(failures))
-        await interaction.followup.send(msg, ephemeral=True)
+            summary += S("series.plan.summary_fail_tail", fail=len(failures))
+        await interaction.followup.send(summary, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SeriesCog(bot))
