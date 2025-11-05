@@ -111,6 +111,9 @@ def build_profile_embed(
     else:
         ratio = max(0.0, min(1.0, progress_current / progress_needed))
         filled = int(round(ratio * steps))
+        if 0 < ratio < 1 and filled == 0:
+            filled = 1
+        filled = min(steps, max(0, filled))
         pct = int(round(ratio * 100))
     bar = "[{}{}]".format("=" * filled, "." * (steps - filled))
 
