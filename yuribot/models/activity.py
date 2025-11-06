@@ -198,6 +198,20 @@ def bump_member_words(guild_id: int, user_id: int, when_iso: str, inc: int = 1) 
         con.commit()
 
 
+def fetch_metric_totals(guild_id: int, metric: str) -> Dict[int, int]:
+    with connect() as con:
+        cur = con.cursor()
+        rows = cur.execute(
+            """
+            SELECT user_id, count
+            FROM member_metrics_total
+            WHERE guild_id=? AND metric=?
+            """,
+            (guild_id, metric),
+        ).fetchall()
+    return {int(uid): int(count or 0) for uid, count in rows}
+
+
 def bump_member_mentioned(guild_id: int, user_id: int, when_iso: str, inc: int = 1) -> None:
     day, week_key, month, _ = _iso_parts(when_iso)
     with connect() as con:
@@ -546,12 +560,31 @@ def reset_member_mentions(guild_id: int, scope: str, key: str | None = None) -> 
     _reset_metric(guild_id, "mentions", scope, key)
 
 
+def reset_member_mentions_sent(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "mentions_sent", scope, key)
+
+
 def reset_member_emoji_chat(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "emoji_chat", scope, key)
 
 
 def reset_member_emoji_react(guild_id: int, scope: str, key: str | None = None) -> None:
     _reset_metric(guild_id, "emoji_react", scope, key)
+
+
+def reset_member_emoji_only(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "emoji_only", scope, key)
+
+
+def reset_member_reactions_received(guild_id: int, scope: str, key: str | None = None) -> None:
+    _reset_metric(guild_id, "reactions_received", scope, key)
+
+
+def reset_member_channel_totals(guild_id: int) -> None:
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("DELETE FROM member_channel_totals WHERE guild_id=?", (guild_id,))
+        con.commit()
 
 
 # =============================================================================
@@ -915,6 +948,7 @@ __all__ = [
     "bump_voice_minutes",
     "cleanup_activity",
     "ensure_activity_views",
+    "fetch_metric_totals",
     "import_month_csv_rows",
     "member_daily_counts_month",
     "member_hour_histogram_total",
@@ -924,9 +958,13 @@ __all__ = [
     "rebuild_month_from_days",
     "reset_member_activity",
     "reset_member_emoji_chat",
+    "reset_member_emoji_only",
     "reset_member_emoji_react",
     "reset_member_mentions",
+    "reset_member_mentions_sent",
     "reset_member_words",
+    "reset_member_reactions_received",
+    "reset_member_channel_totals",
     "rebuild_activity_totals_for_guild",
     "top_members_emoji_chat_period",
     "top_members_emoji_chat_total",

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 from ..db import connect
-from ..models import activity, emoji_stats, rpg
+from ..models import activity, emoji_stats, rpg, message_archive
 from ..strings import S
 from ..ui.activity import (
     LESBIAN_COLORS,
@@ -51,6 +53,8 @@ from ..utils.activity import (
 )
 
 ensure_matplotlib_environment()
+
+MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 try:
     import matplotlib.pyplot as plt
@@ -285,6 +289,128 @@ class ActivityCog(commands.Cog):
                 emoji_stats.bump_emoji_usage(gid, when, key, "", False, True, 1)
         except Exception:
             pass
+
+    @commands.Cog.listener("on_backread_archive_batch")
+    async def _on_backread_archive_batch(self, rows: List[message_archive.ArchivedMessage]):
+        for row in rows:
+            try:
+                self._process_archived_message(row)
+            except Exception:
+                log.exception(
+                    "activity.backread.process_failed",
+                    extra={"guild_id": getattr(row, "guild_id", None), "message_id": getattr(row, "message_id", None)},
+                )
+
+    async def replay_archived_messages(
+        self,
+        rows: Iterable[message_archive.ArchivedMessage],
+        *,
+        yield_every: int = 500,
+        progress_cb: Callable[[int], Awaitable[None]] | None = None,
+    ) -> int:
+        processed = 0
+        for row in rows:
+            try:
+                self._process_archived_message(row)
+            except Exception:
+                log.exception(
+                    "activity.backread.process_failed",
+                    extra={"guild_id": getattr(row, "guild_id", None), "message_id": getattr(row, "message_id", None)},
+                )
+            else:
+                processed += 1
+                if yield_every and processed % yield_every == 0:
+                    if progress_cb is not None:
+                        try:
+                            await progress_cb(processed)
+                        except Exception:
+                            log.debug("activity.replay.progress_cb_failed", exc_info=True)
+                    await asyncio.sleep(0)
+
+        if progress_cb is not None:
+            try:
+                await progress_cb(processed)
+            except Exception:
+                log.debug("activity.replay.progress_cb_failed", exc_info=True)
+        return processed
+
+    def _process_archived_message(self, row: message_archive.ArchivedMessage) -> None:
+        gid = int(row.guild_id)
+        uid = int(row.author_id)
+        when = row.created_at or _now_iso()
+        channel_id = int(row.channel_id)
+
+        guild = self.bot.get_guild(gid)
+        channel: Optional[discord.abc.GuildChannel] = None
+        member: Optional[discord.Member] = None
+        if guild:
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = guild.get_thread(channel_id)  # type: ignore[attr-defined]
+                except Exception:
+                    channel = None
+            member = guild.get_member(uid)
+
+        mult = _xp_mult(member, channel)
+
+        try:
+            activity.bump_member_message(gid, uid, when_iso=when, inc=1)
+            activity.bump_channel_message_total(gid, uid, channel_id, 1)
+            base = rpg.XP_RULES["messages"]
+            rpg.award_xp_for_event(gid, uid, base, mult)
+        except Exception:
+            log.exception("activity.backread.bump_message_failed", extra={"guild_id": gid, "user_id": uid})
+
+        content = row.content or ""
+
+        try:
+            wc = _count_words(content)
+            if wc > 0:
+                activity.bump_member_words(gid, uid, when_iso=when, inc=wc)
+                add = (wc // 20) * rpg.XP_RULES["words_per_20"]
+                if add:
+                    rpg.award_xp_for_event(gid, uid, add, mult)
+        except Exception:
+            log.exception("activity.backread.words_failed", extra={"guild_id": gid, "user_id": uid})
+
+        try:
+            mention_ids = self._extract_mentions(content)
+            filtered_mentions: List[int] = []
+            for mid in mention_ids:
+                rec_member = guild.get_member(mid) if guild else None
+                if rec_member and rec_member.bot:
+                    continue
+                activity.bump_member_mentioned(gid, mid, when_iso=when, inc=1)
+                rec_mult = _xp_mult(rec_member, channel)
+                rpg.award_xp_for_event(gid, mid, rpg.XP_RULES["mentions_received"], rec_mult)
+                filtered_mentions.append(mid)
+            if filtered_mentions:
+                base_sent = rpg.XP_RULES["mentions_sent"] * len(filtered_mentions)
+                activity.bump_member_mentions_sent(gid, uid, when_iso=when, inc=len(filtered_mentions))
+                rpg.award_xp_for_event(gid, uid, base_sent, mult)
+        except Exception:
+            log.exception("activity.backread.mentions_failed", extra={"guild_id": gid, "user_id": uid})
+
+        try:
+            ec = _count_emojis_text(content)
+            if ec > 0:
+                activity.bump_member_emoji_chat(gid, uid, when_iso=when, inc=ec)
+                base_emoji = rpg.XP_RULES["emoji_chat"] * ec
+                rpg.award_xp_for_event(gid, uid, base_emoji, mult)
+            if content and _is_emoji_only(content):
+                activity.bump_member_emoji_only(gid, uid, when_iso=when, inc=1)
+        except Exception:
+            log.exception("activity.backread.emoji_failed", extra={"guild_id": gid, "user_id": uid})
+
+    def _extract_mentions(self, content: str) -> Set[int]:
+        ids: Set[int] = set()
+        for match in MENTION_RE.findall(content or ""):
+            try:
+                ids.add(int(match))
+            except ValueError:
+                continue
+        return ids
 
     # ---- Voice sessions: minutes & streaming ----
     @commands.Cog.listener()

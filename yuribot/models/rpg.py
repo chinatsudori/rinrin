@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from math import log1p, sqrt
-from typing import Dict, Tuple
+from typing import Dict, Mapping, Tuple
 
 from ..db import connect
 
@@ -419,12 +419,94 @@ def respec_stats_to_formula(guild_id: int, user_id: int | None = None) -> int:
     return processed
 
 
+def apply_stat_snapshot(guild_id: int, stat_map: Mapping[int, Mapping[str, int]]) -> int:
+    if not stat_map:
+        return 0
+
+    processed = 0
+    with connect() as con:
+        cur = con.cursor()
+        for uid, stats in stat_map.items():
+            try:
+                row = cur.execute(
+                    """
+                    SELECT level, xp
+                    FROM member_rpg_progress
+                    WHERE guild_id=? AND user_id=?
+                    """,
+                    (guild_id, int(uid)),
+                ).fetchone()
+                if row:
+                    level, xp = int(row[0] or 1), int(row[1] or 0)
+                    cur.execute(
+                        """
+                        UPDATE member_rpg_progress
+                           SET str=?, int=?, cha=?, vit=?, dex=?, wis=?
+                         WHERE guild_id=? AND user_id=?
+                        """,
+                        (
+                            int(stats.get("str", 5)),
+                            int(stats.get("int", 5)),
+                            int(stats.get("cha", 5)),
+                            int(stats.get("vit", 5)),
+                            int(stats.get("dex", 5)),
+                            int(stats.get("wis", 5)),
+                            guild_id,
+                            int(uid),
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO member_rpg_progress
+                            (guild_id, user_id, level, xp, str, int, cha, vit, dex, wis)
+                        VALUES (?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            guild_id,
+                            int(uid),
+                            int(stats.get("str", 5)),
+                            int(stats.get("int", 5)),
+                            int(stats.get("cha", 5)),
+                            int(stats.get("vit", 5)),
+                            int(stats.get("dex", 5)),
+                            int(stats.get("wis", 5)),
+                        ),
+                    )
+                processed += 1
+            except Exception:
+                log.exception("rpg.apply_stat_snapshot.failed", extra={"guild_id": guild_id, "user_id": uid})
+        con.commit()
+    log.info("rpg.apply_stat_snapshot", extra={"guild_id": guild_id, "processed": processed})
+    return processed
+
+
+def reset_progress(guild_id: int, user_id: int | None = None) -> int:
+    """Remove RPG progress rows so XP/levels can be rebuilt from scratch."""
+    with connect() as con:
+        cur = con.cursor()
+        if user_id is None:
+            cur.execute("DELETE FROM member_rpg_progress WHERE guild_id=?", (guild_id,))
+            affected = cur.rowcount or 0
+        else:
+            cur.execute(
+                "DELETE FROM member_rpg_progress WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            )
+            affected = cur.rowcount or 0
+        con.commit()
+    log.info("rpg.reset_progress", extra={"guild_id": guild_id, "user_id": user_id, "removed": affected})
+    return int(affected)
+
+
 __all__ = [
     'XP_RULES',
     'award_xp_for_event',
     'get_rpg_progress',
     'level_from_xp',
+    'apply_stat_snapshot',
     'respec_stats_to_formula',
+    'reset_progress',
     'top_levels',
     'xp_progress',
 ]

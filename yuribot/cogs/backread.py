@@ -8,7 +8,9 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from datetime import datetime, timezone, time as dtime
+
+from discord.ext import commands, tasks
 
 from ..models import message_archive
 from ..utils.admin import ensure_guild
@@ -90,6 +92,8 @@ class BackreadCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._last_gap_scan_month: Optional[str] = None
+        self._monthly_gap_scan.start()
 
     group = app_commands.Group(name="backread", description="Archive server message history")
 
@@ -876,18 +880,131 @@ class BackreadCog(commands.Cog):
             missing_found += 1
 
             if len(batch_rows) >= 200:
-                message_archive.upsert_many(batch_rows)
+                _, new_rows = message_archive.upsert_many(batch_rows, return_new=True)
+                self._dispatch_archived_rows(new_rows)
                 batch_rows.clear()
                 if progress_cb:
                     await progress_cb("Filling gaps (writing batch)…", missing_found, scanned)
 
         if batch_rows:
-            message_archive.upsert_many(batch_rows)
+            _, new_rows = message_archive.upsert_many(batch_rows, return_new=True)
+            self._dispatch_archived_rows(new_rows)
             batch_rows.clear()
             if progress_cb:
                 await progress_cb("Filling gaps (finalize)…", missing_found, scanned)
 
         return missing_found, scanned
+
+    def _dispatch_archived_rows(self, rows: List[message_archive.ArchivedMessage]) -> None:
+        if rows:
+            self.bot.dispatch("backread_archive_batch", rows)
+
+    @tasks.loop(time=dtime(hour=7, tzinfo=timezone.utc))
+    async def _monthly_gap_scan(self) -> None:
+        now = datetime.now(timezone.utc)
+        month_key = now.strftime("%Y-%m")
+        if now.day != 1 or self._last_gap_scan_month == month_key:
+            return
+
+        await self.bot.wait_until_ready()
+
+        self._last_gap_scan_month = month_key
+
+        for guild in list(self.bot.guilds):
+            me = guild.me
+            if not isinstance(me, discord.Member):
+                try:
+                    me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
+                except Exception:
+                    log.exception("backread.maintenance.resolve_member_failed", extra={"guild_id": guild.id})
+                    continue
+
+            channels: List[discord.abc.GuildChannel] = list(guild.text_channels)
+            try:
+                channels.extend(guild.forum_channels)  # type: ignore[attr-defined]
+            except AttributeError:
+                channels.extend(ch for ch in guild.channels if isinstance(ch, discord.ForumChannel))
+
+            for channel in channels:
+                can_read, reason = self._can_backread(channel, me)
+                if not can_read:
+                    log.debug(
+                        "backread.maintenance.skip_channel",
+                        extra={"guild_id": guild.id, "channel_id": getattr(channel, "id", None), "reason": reason},
+                    )
+                    continue
+
+                messageables: List[discord.abc.Messageable] = []
+                if isinstance(channel, discord.ForumChannel):
+                    try:
+                        threads = await self._gather_threads(channel, include_private=False, me=me)
+                        messageables.extend(threads)
+                    except Exception:
+                        log.exception(
+                            "backread.maintenance.gather_threads_failed",
+                            extra={"guild_id": guild.id, "channel_id": getattr(channel, "id", None)},
+                        )
+                        continue
+                else:
+                    messageables.append(channel)  # type: ignore[arg-type]
+                    try:
+                        threads = await self._gather_threads(channel, include_private=False, me=me)
+                        messageables.extend(threads)
+                    except Exception:
+                        log.debug(
+                            "backread.maintenance.thread_scan_skipped",
+                            extra={"guild_id": guild.id, "channel_id": getattr(channel, "id", None)},
+                        )
+
+                for target in messageables:
+                    target_id = getattr(target, "id", None)
+                    if target_id is None:
+                        continue
+                    try:
+                        existing_ids = self._load_existing_ids(guild.id, target_id)  # type: ignore[arg-type]
+                    except Exception:
+                        log.exception(
+                            "backread.maintenance.load_ids_failed",
+                            extra={"guild_id": guild.id, "channel_id": target_id},
+                        )
+                        continue
+
+                    try:
+                        missing, scanned = await self._fill_missing_history(target, existing_ids=existing_ids)
+                        log.info(
+                            "backread.maintenance.channel_scanned",
+                            extra={
+                                "guild_id": guild.id,
+                                "channel_id": target_id,
+                                "missing_filled": missing,
+                                "messages_scanned": scanned,
+                            },
+                        )
+                    except discord.Forbidden:
+                        log.debug(
+                            "backread.maintenance.forbidden",
+                            extra={"guild_id": guild.id, "channel_id": target_id},
+                        )
+                    except discord.HTTPException as exc:
+                        log.exception(
+                            "backread.maintenance.http_error",
+                            extra={"guild_id": guild.id, "channel_id": target_id, "status": getattr(exc, "status", "?")},
+                        )
+                    except Exception:
+                        log.exception(
+                            "backread.maintenance.unexpected_error",
+                            extra={"guild_id": guild.id, "channel_id": target_id},
+                        )
+
+    @_monthly_gap_scan.before_loop
+    async def _monthly_gap_scan_ready(self) -> None:
+        await self.bot.wait_until_ready()
+
+    def cog_unload(self) -> None:
+        try:
+            self._monthly_gap_scan.cancel()
+        except Exception:
+            pass
 
     # ---- DB stats helper
     def _fetch_archive_stats(self, guild_id: int) -> Tuple[int, int, int]:
@@ -1085,7 +1202,8 @@ class BackreadCog(commands.Cog):
                 if len(batch) >= BATCH_SIZE:
                     first_batch_id = batch[0].message_id
                     last_batch_id = batch[-1].message_id
-                    stored_now = message_archive.upsert_many(batch)
+                    stored_now, new_rows = message_archive.upsert_many(batch, return_new=True)
+                    self._dispatch_archived_rows(new_rows)
                     stored += stored_now
                     latest_seen_id = max(latest_seen_id or 0, last_batch_id)
                     if stored % PROGRESS_LOG_BATCH < BATCH_SIZE:
@@ -1126,7 +1244,8 @@ class BackreadCog(commands.Cog):
             if batch:
                 first_batch_id = batch[0].message_id
                 last_batch_id = batch[-1].message_id
-                stored_now = message_archive.upsert_many(batch)
+                stored_now, new_rows = message_archive.upsert_many(batch, return_new=True)
+                self._dispatch_archived_rows(new_rows)
                 stored += stored_now
                 latest_seen_id = max(latest_seen_id or 0, last_batch_id)
                 log.debug(
