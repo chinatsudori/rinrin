@@ -230,7 +230,7 @@ class BackreadCog(commands.Cog):
     # ------------------------
     @group.command(
         name="export",
-        description="Export a channel or thread to CSV. Can also fill in missing messages before exporting.",
+        description="Export a channel or thread to CSV. Fills missing messages first (unless disabled).",
     )
     @app_commands.describe(
         channel="A TextChannel or Thread to export.",
@@ -253,17 +253,14 @@ class BackreadCog(commands.Cog):
         if guild is None:
             return await interaction.followup.send("Guild not resolved.", ephemeral=True)
 
-        # Resolve target: allow TextChannel or Thread. ForumChannel parent isn’t exportable as a whole.
         target = channel
         if target is None:
             return await interaction.followup.send("Pick a specific text channel or thread.", ephemeral=True)
-
         if isinstance(target, discord.ForumChannel):
             return await interaction.followup.send(
                 "Export a **specific forum thread**, not the forum parent.", ephemeral=True
             )
 
-        # Permission check
         me = guild.me
         if not isinstance(me, discord.Member):
             me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
@@ -273,17 +270,35 @@ class BackreadCog(commands.Cog):
                 f"I can’t read {self._label(target)}: {reason}.", ephemeral=True
             )
 
-        # If it’s a Thread, make sure parent exists/permissions ok (Discord edge cases)
-        if isinstance(target, discord.Thread) and target.parent is None:
-            return await interaction.followup.send(
-                f"Thread `{target.id}` has no parent; cannot export.", ephemeral=True
-            )
-
         label = self._label(target)
         guild_id = guild.id
         channel_id = target.id
 
-        # 1) Build an in-memory set of message_ids already in DB for this channel
+        # progress message + throttled editor
+        progress_msg = await interaction.followup.send(f"**Exporting {label}…**\nPreparing…", ephemeral=True)
+        import time
+        last_edit = 0.0
+
+        async def _edit(stage: str, *, found: int = 0, scanned: int = 0, exported: int = 0):
+            nonlocal last_edit
+            now = time.monotonic()
+            if now - last_edit < 1.0:
+                return
+            parts = [f"**Exporting {label}…**", f"• {stage}"]
+            if fill_missing:
+                parts.append(f"• Missing found this run: **{found:,}**")
+            if scanned:
+                parts.append(f"• Messages scanned: **{scanned:,}**")
+            if exported:
+                parts.append(f"• Rows written: **{exported:,}**")
+            try:
+                await progress_msg.edit(content="\n".join(parts))
+                last_edit = now
+            except Exception:
+                pass
+
+        # 1) Load existing IDs
+        await _edit("Loading existing IDs from DB…")
         existing_ids: set[int] = set()
         try:
             con = message_archive.get_connection()
@@ -297,22 +312,33 @@ class BackreadCog(commands.Cog):
                     existing_ids.add(int(mid))
         except Exception:
             log.exception("backread.export.load_existing_failed", extra={"guild_id": guild_id, "channel_id": channel_id})
-            return await interaction.followup.send("DB read failed while loading existing rows.", ephemeral=True)
+            return await progress_msg.edit(content=f"**Exporting {label}…**\nDB read failed while loading existing rows.")
 
-        # 2) Optionally fill in missing by walking Discord history
+        # 2) Fill missing (optional)
         missing_found = 0
+        scanned = 0
         if fill_missing and hasattr(target, "history"):
+            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
             batch_rows: list[message_archive.ArchivedMessage] = []
             try:
                 async for msg in target.history(limit=None, oldest_first=True):  # type: ignore[attr-defined]
+                    scanned += 1
                     if msg.id in existing_ids:
+                        if scanned % 250 == 0:
+                            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
                         continue
-                    # Create archive row, collect, remember ID
+
                     try:
                         row = message_archive.from_discord_message(msg)
                     except Exception as exc:
-                        log.debug("backread.export.from_message_failed", extra={"channel_id": channel_id, "msg_id": msg.id, "err": str(exc)})
+                        log.debug(
+                            "backread.export.from_message_failed",
+                            extra={"channel_id": channel_id, "msg_id": msg.id, "err": str(exc)},
+                        )
+                        if scanned % 250 == 0:
+                            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
                         continue
+
                     batch_rows.append(row)
                     existing_ids.add(msg.id)
                     missing_found += 1
@@ -320,28 +346,30 @@ class BackreadCog(commands.Cog):
                     if len(batch_rows) >= 200:
                         message_archive.upsert_many(batch_rows)
                         batch_rows.clear()
+                        await _edit("Filling gaps (writing batch)…", found=missing_found, scanned=scanned)
 
                 if batch_rows:
                     message_archive.upsert_many(batch_rows)
                     batch_rows.clear()
+                    await _edit("Filling gaps (finalize)…", found=missing_found, scanned=scanned)
+
             except discord.Forbidden:
-                return await interaction.followup.send(
-                    f"Forbidden reading history in {label}. Grant **Read Message History**.",
-                    ephemeral=True,
+                return await progress_msg.edit(
+                    content=f"**Exporting {label}…**\nForbidden: need **Read Message History**."
                 )
             except discord.HTTPException as exc:
                 log.exception("backread.export.history_http", extra={"status": getattr(exc, 'status', '?')})
-                return await interaction.followup.send(
-                    f"Discord API error while reading history (HTTP {getattr(exc, 'status', '?')}).",
-                    ephemeral=True,
+                return await progress_msg.edit(
+                    content=f"**Exporting {label}…**\nDiscord API error while reading history (HTTP {getattr(exc, 'status', '?')})."
                 )
 
-        # 3) Export the final, authoritative rows from DB to CSV (ordered by created_at then id)
-        import csv, io, time, zipfile
+        # 3) Dump to CSV from DB (authoritative)
+        await _edit("Dumping rows from DB to CSV…", found=missing_found, scanned=scanned)
+        import csv, io, zipfile
 
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
-        header = [
+        writer.writerow([
             "message_id",
             "guild_id",
             "channel_id",
@@ -354,8 +382,7 @@ class BackreadCog(commands.Cog):
             "embeds",
             "reactions_json",
             "reply_to_id",
-        ]
-        writer.writerow(header)
+        ])
 
         exported = 0
         try:
@@ -372,39 +399,41 @@ class BackreadCog(commands.Cog):
                     """,
                     (guild_id, channel_id),
                 )
-                for row in cur:
-                    # row is a tuple in the same order as header; content may contain newlines—CSV handles quoting.
-                    writer.writerow(row)
-                    exported += 1
+                fetch_sz = 1000
+                rows = cur.fetchmany(fetch_sz)
+                while rows:
+                    for row in rows:
+                        writer.writerow(row)
+                        exported += 1
+                    await _edit("Dumping rows from DB to CSV…", found=missing_found, scanned=scanned, exported=exported)
+                    rows = cur.fetchmany(fetch_sz)
         except Exception:
             log.exception("backread.export.dump_failed", extra={"guild_id": guild_id, "channel_id": channel_id})
-            return await interaction.followup.send("DB read failed during export.", ephemeral=True)
+            return await progress_msg.edit(content=f"**Exporting {label}…**\nDB read failed during export.")
 
+        # 4) Attach file (zip if big or requested)
         csv_bytes = buf.getvalue().encode("utf-8-sig")
         filename_base = f"{guild.name}-{getattr(target, 'name', target.id)}".replace("/", "_")
         csv_name = f"{filename_base}.csv"
 
-        # Auto-compress if big or if requested
-        attach_bytes: bytes
-        attach_name: str
         if compress or len(csv_bytes) > int(7.5 * 1024 * 1024):
-            attach_name = f"{filename_base}.zip"
             zbuf = io.BytesIO()
             with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
                 z.writestr(csv_name, csv_bytes)
-            attach_bytes = zbuf.getvalue()
+            file = discord.File(io.BytesIO(zbuf.getvalue()), filename=f"{filename_base}.zip")
         else:
-            attach_name = csv_name
-            attach_bytes = csv_bytes
-
-        file = discord.File(io.BytesIO(attach_bytes), filename=attach_name)
+            file = discord.File(io.BytesIO(csv_bytes), filename=csv_name)
 
         summary = [
             f"**Export for {label}**",
             f"• Rows exported: **{exported:,}**",
             f"• Missing messages filled this run: **{missing_found:,}**" if fill_missing else "• Missing fill: skipped",
         ]
-        await interaction.followup.send("\n".join(summary), file=file, ephemeral=True)
+        try:
+            await progress_msg.edit(content="\n".join(summary), attachments=[file])
+        except Exception:
+            # Fallback: send a new followup with the file if editing with attachment fails
+            await interaction.followup.send("\n".join(summary), file=file, ephemeral=True)
 
     # ------------------------
     # /backread audit
