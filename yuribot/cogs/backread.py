@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from ..models import message_archive
 from ..utils.admin import ensure_guild
+from ..utils.threads import iter_forum_archived_threads
 
 log = logging.getLogger(__name__)
 
@@ -179,21 +180,39 @@ class BackreadCog(commands.Cog):
                 )
                 return threads
             if callable(archived_iter):
+                iterator = None
                 try:
-                    async for thread in archived_iter(limit=None, private=True):
-                        if isinstance(thread, discord.Thread) and thread.id not in seen:
-                            threads.append(thread)
-                            seen.add(thread.id)
-                except discord.Forbidden:
-                    log.info(
-                        "backread.threads.private_forbidden",
-                        extra={"guild_id": channel.guild.id, "channel_id": channel.id},
-                    )
-                except discord.HTTPException:
+                    iterator = archived_iter(limit=None, private=True)
+                except TypeError:
+                    if isinstance(channel, discord.ForumChannel):
+                        iterator = iter_forum_archived_threads(channel, private=True, limit=None)
+                    else:
+                        log.exception(
+                            "backread.threads.private_error",
+                            extra={"guild_id": channel.guild.id, "channel_id": channel.id},
+                        )
+                except Exception:
                     log.exception(
                         "backread.threads.private_error",
                         extra={"guild_id": channel.guild.id, "channel_id": channel.id},
                     )
+
+                if iterator is not None:
+                    try:
+                        async for thread in iterator:
+                            if isinstance(thread, discord.Thread) and thread.id not in seen:
+                                threads.append(thread)
+                                seen.add(thread.id)
+                    except discord.Forbidden:
+                        log.info(
+                            "backread.threads.private_forbidden",
+                            extra={"guild_id": channel.guild.id, "channel_id": channel.id},
+                        )
+                    except discord.HTTPException:
+                        log.exception(
+                            "backread.threads.private_error",
+                            extra={"guild_id": channel.guild.id, "channel_id": channel.id},
+                        )
 
         return threads
 

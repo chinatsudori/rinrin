@@ -6,6 +6,8 @@ from typing import Iterable, List, Optional, Tuple
 
 import discord
 
+from .threads import iter_forum_archived_threads
+
 log = logging.getLogger(__name__)
 
 DEFAULT_FORUM_ID = 1428158868843921429
@@ -42,14 +44,14 @@ async def collect_threads(
         pass
 
     try:
-        async for thread in forum.archived_threads(limit=None, private=False):
+        async for thread in forum.archived_threads(limit=None):
             threads.append(thread)
     except Exception as exc:
         log.warning("cleanup.archived.public_failed", extra={"forum_id": forum.id, "error": str(exc)})
 
     if include_private_archived:
         try:
-            async for thread in forum.archived_threads(limit=None, private=True):
+            async for thread in iter_forum_archived_threads(forum, private=True, limit=None):
                 threads.append(thread)
         except Exception as exc:
             log.warning("cleanup.archived.private_failed", extra={"forum_id": forum.id, "error": str(exc)})

@@ -35,6 +35,7 @@ from ..utils.mangaupdates import (
     series_id_title_from_result,
     stringify_aliases,
 )
+from ..utils.threads import iter_forum_archived_threads
 
 
 
@@ -527,7 +528,7 @@ class MUWatcher(commands.Cog):
         # Collect threads: active + archived (public)
         threads: list[discord.Thread] = list(fch.threads)
         try:
-            async for th in fch.archived_threads(limit=None, private=False):
+            async for th in iter_forum_archived_threads(fch, private=False, limit=None):
                 threads.append(th)
         except Exception:
             pass
