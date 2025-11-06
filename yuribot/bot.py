@@ -150,6 +150,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.timestamp",
             "yuribot.cogs.booly",
             "yuribot.cogs.polls",
+            "yuribot.cogs.backread",
             "yuribot.cogs.lifecycle",
         )
         await self._load_extensions(extensions)
