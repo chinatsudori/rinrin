@@ -225,6 +225,187 @@ class BackreadCog(commands.Cog):
             await progress_msg.edit(content="\n".join(summary_lines))
         except Exception:
             await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
+        # ------------------------
+    # /backread export
+    # ------------------------
+    @group.command(
+        name="export",
+        description="Export a channel or thread to CSV. Can also fill in missing messages before exporting.",
+    )
+    @app_commands.describe(
+        channel="A TextChannel or Thread to export.",
+        fill_missing="Fetch any messages not in the DB first (default: true).",
+        compress="Zip the CSV if large (auto if >7.5MB).",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def export_cmd(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.abc.GuildChannel] = None,
+        fill_missing: bool = True,
+        compress: bool = False,
+    ):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+
+        # Resolve target: allow TextChannel or Thread. ForumChannel parent isn’t exportable as a whole.
+        target = channel
+        if target is None:
+            return await interaction.followup.send("Pick a specific text channel or thread.", ephemeral=True)
+
+        if isinstance(target, discord.ForumChannel):
+            return await interaction.followup.send(
+                "Export a **specific forum thread**, not the forum parent.", ephemeral=True
+            )
+
+        # Permission check
+        me = guild.me
+        if not isinstance(me, discord.Member):
+            me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
+        can_read, reason = self._can_backread(target, me)
+        if not can_read:
+            return await interaction.followup.send(
+                f"I can’t read {self._label(target)}: {reason}.", ephemeral=True
+            )
+
+        # If it’s a Thread, make sure parent exists/permissions ok (Discord edge cases)
+        if isinstance(target, discord.Thread) and target.parent is None:
+            return await interaction.followup.send(
+                f"Thread `{target.id}` has no parent; cannot export.", ephemeral=True
+            )
+
+        label = self._label(target)
+        guild_id = guild.id
+        channel_id = target.id
+
+        # 1) Build an in-memory set of message_ids already in DB for this channel
+        existing_ids: set[int] = set()
+        try:
+            con = message_archive.get_connection()
+            with con:
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT message_id FROM message_archive WHERE guild_id=? AND channel_id=?",
+                    (guild_id, channel_id),
+                )
+                for (mid,) in cur.fetchall():
+                    existing_ids.add(int(mid))
+        except Exception:
+            log.exception("backread.export.load_existing_failed", extra={"guild_id": guild_id, "channel_id": channel_id})
+            return await interaction.followup.send("DB read failed while loading existing rows.", ephemeral=True)
+
+        # 2) Optionally fill in missing by walking Discord history
+        missing_found = 0
+        if fill_missing and hasattr(target, "history"):
+            batch_rows: list[message_archive.ArchivedMessage] = []
+            try:
+                async for msg in target.history(limit=None, oldest_first=True):  # type: ignore[attr-defined]
+                    if msg.id in existing_ids:
+                        continue
+                    # Create archive row, collect, remember ID
+                    try:
+                        row = message_archive.from_discord_message(msg)
+                    except Exception as exc:
+                        log.debug("backread.export.from_message_failed", extra={"channel_id": channel_id, "msg_id": msg.id, "err": str(exc)})
+                        continue
+                    batch_rows.append(row)
+                    existing_ids.add(msg.id)
+                    missing_found += 1
+
+                    if len(batch_rows) >= 200:
+                        message_archive.upsert_many(batch_rows)
+                        batch_rows.clear()
+
+                if batch_rows:
+                    message_archive.upsert_many(batch_rows)
+                    batch_rows.clear()
+            except discord.Forbidden:
+                return await interaction.followup.send(
+                    f"Forbidden reading history in {label}. Grant **Read Message History**.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException as exc:
+                log.exception("backread.export.history_http", extra={"status": getattr(exc, 'status', '?')})
+                return await interaction.followup.send(
+                    f"Discord API error while reading history (HTTP {getattr(exc, 'status', '?')}).",
+                    ephemeral=True,
+                )
+
+        # 3) Export the final, authoritative rows from DB to CSV (ordered by created_at then id)
+        import csv, io, time, zipfile
+
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        header = [
+            "message_id",
+            "guild_id",
+            "channel_id",
+            "author_id",
+            "message_type",
+            "created_at",
+            "content",
+            "edited_at",
+            "attachments",
+            "embeds",
+            "reactions_json",
+            "reply_to_id",
+        ]
+        writer.writerow(header)
+
+        exported = 0
+        try:
+            con = message_archive.get_connection()
+            with con:
+                cur = con.cursor()
+                cur.execute(
+                    """
+                    SELECT message_id, guild_id, channel_id, author_id, message_type,
+                           created_at, content, edited_at, attachments, embeds, reactions, reply_to_id
+                    FROM message_archive
+                    WHERE guild_id=? AND channel_id=?
+                    ORDER BY created_at ASC, message_id ASC
+                    """,
+                    (guild_id, channel_id),
+                )
+                for row in cur:
+                    # row is a tuple in the same order as header; content may contain newlines—CSV handles quoting.
+                    writer.writerow(row)
+                    exported += 1
+        except Exception:
+            log.exception("backread.export.dump_failed", extra={"guild_id": guild_id, "channel_id": channel_id})
+            return await interaction.followup.send("DB read failed during export.", ephemeral=True)
+
+        csv_bytes = buf.getvalue().encode("utf-8-sig")
+        filename_base = f"{guild.name}-{getattr(target, 'name', target.id)}".replace("/", "_")
+        csv_name = f"{filename_base}.csv"
+
+        # Auto-compress if big or if requested
+        attach_bytes: bytes
+        attach_name: str
+        if compress or len(csv_bytes) > int(7.5 * 1024 * 1024):
+            attach_name = f"{filename_base}.zip"
+            zbuf = io.BytesIO()
+            with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+                z.writestr(csv_name, csv_bytes)
+            attach_bytes = zbuf.getvalue()
+        else:
+            attach_name = csv_name
+            attach_bytes = csv_bytes
+
+        file = discord.File(io.BytesIO(attach_bytes), filename=attach_name)
+
+        summary = [
+            f"**Export for {label}**",
+            f"• Rows exported: **{exported:,}**",
+            f"• Missing messages filled this run: **{missing_found:,}**" if fill_missing else "• Missing fill: skipped",
+        ]
+        await interaction.followup.send("\n".join(summary), file=file, ephemeral=True)
+
     # ------------------------
     # /backread audit
     # ------------------------
