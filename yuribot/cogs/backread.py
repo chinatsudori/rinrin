@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple, Dict, Any
 
 import discord
 from discord import app_commands
@@ -19,6 +20,14 @@ BATCH_SIZE = 100
 DELAY_BETWEEN_CHANNELS = 0.5
 PROGRESS_LOG_EVERY_SEC = 2.0
 PROGRESS_LOG_BATCH = 5000  # also log every ~N messages per channel
+
+# --- Archive DB discovery + schema knobs (adjust if your module differs) ---
+ARCHIVE_DB_PATH_ATTR = "DB_PATH"            # e.g., message_archive.DB_PATH = "/path/to/archive.sqlite"
+ARCHIVE_GET_CONN_ATTR = "get_connection"    # e.g., def get_connection() -> sqlite3.Connection
+ARCHIVE_TABLE = "messages"
+COL_GUILD_ID = "guild_id"
+COL_CHANNEL_ID = "channel_id"
+COL_AUTHOR_ID = "author_id"
 
 
 @dataclass
@@ -83,6 +92,9 @@ class BackreadCog(commands.Cog):
 
     group = app_commands.Group(name="backread", description="Archive server message history")
 
+    # ------------------------
+    # /backread start
+    # ------------------------
     @group.command(name="start", description="Backread text channels into the message archive.")
     @app_commands.describe(
         channel="Limit to a specific text channel.",
@@ -123,8 +135,6 @@ class BackreadCog(commands.Cog):
             targets.append(channel)
         else:
             targets.extend(guild.text_channels)
-
-            # discord.py versions differ on guild.forum_channels
             try:
                 forum_channels = list(guild.forum_channels)  # type: ignore[attr-defined]
             except AttributeError:
@@ -215,6 +225,93 @@ class BackreadCog(commands.Cog):
         except Exception:
             await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
 
+    # ------------------------
+    # /backread stats
+    # ------------------------
+    @group.command(name="stats", description="Show archive stats for this server (messages, channels, unique users).")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def stats_cmd(self, interaction: discord.Interaction):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+
+        try:
+            msg_count, ch_count, user_count = self._fetch_archive_stats(guild.id)
+        except Exception as exc:
+            log.exception("backread.stats.failed", extra={"guild_id": getattr(guild, 'id', None)})
+            return await interaction.followup.send(f"Failed to fetch stats: `{exc}`", ephemeral=True)
+
+        lines = [
+            f"**Archive stats for `{guild.name}`**",
+            f"• Messages: **{msg_count:,}**",
+            f"• Channels: **{ch_count:,}**",
+            f"• Unique users: **{user_count:,}**",
+        ]
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    # ---- implementation detail: discover DB and query counts
+    def _fetch_archive_stats(self, guild_id: int) -> Tuple[int, int, int]:
+        """
+        Returns (messages, distinct channels, distinct users) for the given guild_id.
+        Tries, in order:
+          1) message_archive.stats_summary(guild_id) -> {"messages": int, "channels": int, "users": int}
+          2) message_archive.get_connection() -> sqlite3.Connection
+          3) sqlite3.connect(message_archive.DB_PATH)
+        """
+        # Path 1: a helper that may exist in your module
+        if hasattr(message_archive, "stats_summary"):
+            summary = message_archive.stats_summary(guild_id)  # type: ignore[attr-defined]
+            return int(summary["messages"]), int(summary["channels"]), int(summary["users"])
+
+        # Path 2 or 3: raw SQL
+        conn = None
+        close_after = False
+
+        if hasattr(message_archive, ARCHIVE_GET_CONN_ATTR):
+            get_conn = getattr(message_archive, ARCHIVE_GET_CONN_ATTR)
+            conn = get_conn()  # type: ignore[call-arg]
+        elif hasattr(message_archive, ARCHIVE_DB_PATH_ATTR):
+            db_path = getattr(message_archive, ARCHIVE_DB_PATH_ATTR)
+            conn = sqlite3.connect(db_path)
+            close_after = True
+        else:
+            raise RuntimeError(
+                "No way to reach the archive DB. Expose stats_summary(), get_connection(), or DB_PATH in message_archive."
+            )
+
+        try:
+            cur = conn.cursor()
+            # Validate the columns exist (optional—but helps catch schema mismatches)
+            # If your schema differs, adjust ARCHIVE_TABLE/COL_* above.
+            sql_msg = f"SELECT COUNT(*) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
+            sql_ch = f"SELECT COUNT(DISTINCT {COL_CHANNEL_ID}) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
+            sql_user = f"SELECT COUNT(DISTINCT {COL_AUTHOR_ID}) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
+
+            cur.execute(sql_msg, (guild_id,))
+            msg_count = int(cur.fetchone()[0])
+
+            cur.execute(sql_ch, (guild_id,))
+            ch_count = int(cur.fetchone()[0])
+
+            cur.execute(sql_user, (guild_id,))
+            user_count = int(cur.fetchone()[0])
+
+            return msg_count, ch_count, user_count
+        finally:
+            try:
+                cur.close()  # type: ignore[has-type]
+            except Exception:
+                pass
+            if close_after and conn:
+                conn.close()
+
+    # ------------------------
+    # internals
+    # ------------------------
     async def _gather_threads(
         self,
         channel: discord.abc.GuildChannel,
@@ -328,7 +425,6 @@ class BackreadCog(commands.Cog):
         latest_seen_id = last_id
         seen_ids: set[int] = set()
         try:
-            # type: ignore[attr-defined] to satisfy type checker on .history
             async for message in channel.history(**history_kwargs):  # type: ignore[attr-defined]
                 if latest_seen_id is not None and message.id <= latest_seen_id:
                     log.debug(
@@ -386,7 +482,7 @@ class BackreadCog(commands.Cog):
             return
         except discord.HTTPException as exc:
             stats.errors.append(f"{label}: HTTP {getattr(exc, 'status', '?')}")
-        except Exception:  # pragma: no cover - safety net
+        except Exception:
             log.exception(
                 "backread.history.error",
                 extra={"guild_id": guild_id, "channel_id": channel.id, "label": label},
@@ -503,6 +599,7 @@ class BackreadCog(commands.Cog):
             extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
         )
 
+    @group.error
     @start.error
     async def _on_start_error(
         self,
