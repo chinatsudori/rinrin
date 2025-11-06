@@ -36,6 +36,7 @@ EMOJI: Dict[str, str] = {
     "gimme_hug": "<a:gimme_hug:1275464256330006589>",
     "henyaNodder": "<a:henyaNodder:1432286485905801306>",
     "wavehi": "<a:wavehi:1432286440028639272>",
+    "WaveHiHi": "<a:wavehi:1432286440028639272>",
 }
 
 
