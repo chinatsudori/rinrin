@@ -9,7 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from .. import models
+from ..db import connect
+from ..models import activity, emoji_stats, rpg
 from ..strings import S
 from ..ui.activity import (
     LESBIAN_COLORS,
@@ -93,7 +94,7 @@ class ActivityCog(commands.Cog):
             return
         self._join_seen.add(key)
         try:
-            models.bump_activity_join(guild_id, user_id, when_iso=_now_iso(), app_name=app_name, joins=1)
+            activity.bump_activity_join(guild_id, user_id, when_iso=_now_iso(), app_name=app_name, joins=1)
         except Exception:
             log.exception("bump.activity_join_failed", extra={"guild_id": guild_id, "user_id": user_id, "app": app_name})
 
@@ -115,10 +116,10 @@ class ActivityCog(commands.Cog):
 
         # 1) messages
         try:
-            models.bump_member_message(gid, uid, when_iso=when, inc=1)
-            models.bump_channel_message_total(gid, uid, getattr(ch, "id", 0), 1)
-            base = models.XP_RULES["messages"]
-            models.award_xp_for_event(gid, uid, base, mult)
+            activity.bump_member_message(gid, uid, when_iso=when, inc=1)
+            activity.bump_channel_message_total(gid, uid, getattr(ch, "id", 0), 1)
+            base = rpg.XP_RULES["messages"]
+            rpg.award_xp_for_event(gid, uid, base, mult)
             total_xp_for_msg += int(base * mult)
         except Exception:
             log.exception("bump.messages_failed", extra={"guild_id": gid, "user_id": uid})
@@ -127,10 +128,10 @@ class ActivityCog(commands.Cog):
         try:
             wc = _count_words(message.content)
             if wc > 0:
-                models.bump_member_words(gid, uid, when_iso=when, inc=wc)
-                add = (wc // 20) * models.XP_RULES["words_per_20"]
+                activity.bump_member_words(gid, uid, when_iso=when, inc=wc)
+                add = (wc // 20) * rpg.XP_RULES["words_per_20"]
                 if add:
-                    models.award_xp_for_event(gid, uid, add, mult)
+                    rpg.award_xp_for_event(gid, uid, add, mult)
                     total_xp_for_msg += int(add * mult)
         except Exception:
             log.exception("bump.words_failed", extra={"guild_id": gid, "user_id": uid})
@@ -139,14 +140,14 @@ class ActivityCog(commands.Cog):
         try:
             mentioned_ids = {m.id for m in message.mentions if not m.bot}
             for mid in mentioned_ids:
-                models.bump_member_mentioned(gid, mid, when_iso=when, inc=1)
+                activity.bump_member_mentioned(gid, mid, when_iso=when, inc=1)
                 rec_member = message.guild.get_member(mid)
                 rec_mult = _xp_mult(rec_member, ch)
-                models.award_xp_for_event(gid, mid, models.XP_RULES["mentions_received"], rec_mult)
+                rpg.award_xp_for_event(gid, mid, rpg.XP_RULES["mentions_received"], rec_mult)
             if mentioned_ids:
-                models.bump_member_mentions_sent(gid, uid, when_iso=when, inc=len(mentioned_ids))
-                base_sent = models.XP_RULES["mentions_sent"] * len(mentioned_ids)
-                models.award_xp_for_event(gid, uid, base_sent, mult)
+                activity.bump_member_mentions_sent(gid, uid, when_iso=when, inc=len(mentioned_ids))
+                base_sent = rpg.XP_RULES["mentions_sent"] * len(mentioned_ids)
+                rpg.award_xp_for_event(gid, uid, base_sent, mult)
                 total_xp_for_msg += int(base_sent * mult)
         except Exception:
             log.exception("bump.mentions_failed", extra={"guild_id": gid})
@@ -155,16 +156,16 @@ class ActivityCog(commands.Cog):
         try:
             ec = _count_emojis_text(message.content)
             if ec > 0:
-                models.bump_member_emoji_chat(gid, uid, when_iso=when, inc=ec)
-                base_emoji = models.XP_RULES["emoji_chat"] * ec
-                models.award_xp_for_event(gid, uid, base_emoji, mult)
+                activity.bump_member_emoji_chat(gid, uid, when_iso=when, inc=ec)
+                base_emoji = rpg.XP_RULES["emoji_chat"] * ec
+                rpg.award_xp_for_event(gid, uid, base_emoji, mult)
                 total_xp_for_msg += int(base_emoji * mult)
         except Exception:
             log.exception("bump.emoji_chat_failed", extra={"guild_id": gid, "user_id": uid})
         # 4b) emoji-only message => DEX-flavored signal (no extra XP)
         try:
             if message.content and _is_emoji_only(message.content):
-                models.bump_member_emoji_only(gid, uid, when_iso=when, inc=1)
+                activity.bump_member_emoji_only(gid, uid, when_iso=when, inc=1)
         except Exception:
             log.exception("bump.emoji_only_failed", extra={"guild_id": gid, "user_id": uid})
 
@@ -172,9 +173,9 @@ class ActivityCog(commands.Cog):
         try:
             if message.stickers:
                 for st in message.stickers:
-                    models.bump_sticker_usage(gid, when, sticker_id=st.id, sticker_name=(st.name or ""), inc=1)
-                base_st = models.XP_RULES["sticker_use"] * len(message.stickers)
-                models.award_xp_for_event(gid, uid, base_st, mult)
+                    emoji_stats.bump_sticker_usage(gid, when, sticker_id=st.id, sticker_name=(st.name or ""), inc=1)
+                base_st = rpg.XP_RULES["sticker_use"] * len(message.stickers)
+                rpg.award_xp_for_event(gid, uid, base_st, mult)
                 total_xp_for_msg += int(base_st * mult)
         except Exception:
             log.exception("bump.sticker_failed", extra={"guild_id": gid, "user_id": uid})
@@ -189,7 +190,7 @@ class ActivityCog(commands.Cog):
                 ctype = (att.content_type or "").lower() if hasattr(att, "content_type") else ""
                 if filename.endswith(".gif") or "gif" in ctype:
                     gif_count += 1
-                    models.bump_gif_usage(gid, when, att.url, "discord", 1)
+                    emoji_stats.bump_gif_usage(gid, when, att.url, "discord", 1)
 
             # Embeds that look like GIFs
             for em in message.embeds or []:
@@ -198,7 +199,7 @@ class ActivityCog(commands.Cog):
                     if isinstance(u, str) and u:
                         if u.lower().endswith(".gif") or any(d in u for d in GIF_DOMAINS):
                             gif_count += 1
-                            models.bump_gif_usage(gid, when, u, _gif_source_from_url(u), 1)
+                            emoji_stats.bump_gif_usage(gid, when, u, _gif_source_from_url(u), 1)
                 except Exception:
                     pass
 
@@ -209,12 +210,12 @@ class ActivityCog(commands.Cog):
                         u = tok.strip("<>")
                         if u.lower().endswith(".gif") or any(d in u for d in GIF_DOMAINS):
                             gif_count += 1
-                            models.bump_gif_usage(gid, when, u, _gif_source_from_url(u), 1)
+                            emoji_stats.bump_gif_usage(gid, when, u, _gif_source_from_url(u), 1)
 
             if gif_count > 0:
-                models.bump_member_gifs(gid, uid, when_iso=when, inc=gif_count)
-                base_gif = models.XP_RULES["gif_use"] * gif_count
-                models.award_xp_for_event(gid, uid, base_gif, mult)
+                activity.bump_member_gifs(gid, uid, when_iso=when, inc=gif_count)
+                base_gif = rpg.XP_RULES["gif_use"] * gif_count
+                rpg.award_xp_for_event(gid, uid, base_gif, mult)
                 total_xp_for_msg += int(base_gif * mult)
         except Exception:
             log.exception("bump.gif_failed", extra={"guild_id": gid, "user_id": uid})
@@ -223,10 +224,10 @@ class ActivityCog(commands.Cog):
         try:
             if message.content:
                 for m in CUSTOM_EMOJI_RE.finditer(message.content):
-                    models.bump_emoji_usage(gid, when, f"custom:{m.group(1)}", "", True, False, 1)
+                    emoji_stats.bump_emoji_usage(gid, when, f"custom:{m.group(1)}", "", True, False, 1)
                 for ch_ in UNICODE_EMOJI_RE.findall(message.content):
                     key = "uni:" + "-".join(f"{ord(c):X}" for c in ch_)
-                    models.bump_emoji_usage(gid, when, key, "", False, False, 1)
+                    emoji_stats.bump_emoji_usage(gid, when, key, "", False, False, 1)
         except Exception:
             pass
 
@@ -256,8 +257,8 @@ class ActivityCog(commands.Cog):
 
         # award reactor
         try:
-            models.bump_member_emoji_react(gid, uid, when_iso=when, inc=1)
-            models.award_xp_for_event(gid, uid, models.XP_RULES["emoji_react"], mult)
+            activity.bump_member_emoji_react(gid, uid, when_iso=when, inc=1)
+            rpg.award_xp_for_event(gid, uid, rpg.XP_RULES["emoji_react"], mult)
         except Exception:
             log.exception("bump.emoji_react_failed", extra={"guild_id": gid, "user_id": uid})
 
@@ -266,10 +267,10 @@ class ActivityCog(commands.Cog):
             if guild and ch and hasattr(ch, "fetch_message"):
                 msg = await ch.fetch_message(payload.message_id)
                 if msg and msg.author and not msg.author.bot:
-                    models.bump_reactions_received(gid, msg.author.id, when, 1)
+                    activity.bump_reactions_received(gid, msg.author.id, when, 1)
                     author_member = guild.get_member(msg.author.id)
                     recv_mult = _xp_mult(author_member, ch)
-                    models.award_xp_for_event(gid, msg.author.id, models.XP_RULES["reactions_received"], recv_mult)
+                    rpg.award_xp_for_event(gid, msg.author.id, rpg.XP_RULES["reactions_received"], recv_mult)
         except Exception:
             pass
 
@@ -277,11 +278,11 @@ class ActivityCog(commands.Cog):
         try:
             em = payload.emoji
             if getattr(em, "id", None):
-                models.bump_emoji_usage(gid, when, f"custom:{int(em.id)}", str(em.name or ""), True, True, 1)
+                emoji_stats.bump_emoji_usage(gid, when, f"custom:{int(em.id)}", str(em.name or ""), True, True, 1)
             else:
                 ch_ = str(em)
                 key = "uni:" + "-".join(f"{ord(c):X}" for c in ch_)
-                models.bump_emoji_usage(gid, when, key, "", False, True, 1)
+                emoji_stats.bump_emoji_usage(gid, when, key, "", False, True, 1)
         except Exception:
             pass
 
@@ -312,13 +313,13 @@ class ActivityCog(commands.Cog):
                 minutes = max(0, int((now - info["joined"]).total_seconds() // 60))
                 stream_minutes = minutes if info.get("stream_on") else 0
                 when = _now_iso()
-                models.bump_voice_minutes(gid, uid, when, minutes, stream_minutes)
+                activity.bump_voice_minutes(gid, uid, when, minutes, stream_minutes)
                 voice_mult = max(MULTIPLIER_DEFAULT, float(XP_MULTIPLIERS.get(info["ch_id"], MULTIPLIER_DEFAULT)))
                 voice_mult *= _role_mult(member)
                 if minutes:
-                    models.award_xp_for_event(gid, uid, models.XP_RULES["voice_minutes"] * minutes, voice_mult)
+                    rpg.award_xp_for_event(gid, uid, rpg.XP_RULES["voice_minutes"] * minutes, voice_mult)
                 if stream_minutes:
-                    models.award_xp_for_event(gid, uid, models.XP_RULES["voice_stream_minutes"] * stream_minutes, voice_mult)
+                    rpg.award_xp_for_event(gid, uid, rpg.XP_RULES["voice_stream_minutes"] * stream_minutes, voice_mult)
 
     # ---- Presence poll: approximate “Activities” minutes + joins ----
     @tasks.loop(minutes=5)
@@ -338,8 +339,8 @@ class ActivityCog(commands.Cog):
                     names = {str(getattr(a, "name", "")[:64]) for a in apps if a}
                     for nm in names:
                         # minutes
-                        models.bump_activity_minutes(guild.id, m.id, now_iso, nm, minutes=5, launches=0)
-                        models.award_xp_for_event(guild.id, m.id, models.XP_RULES["activity_minutes"] * 5, _role_mult(m))
+                        activity.bump_activity_minutes(guild.id, m.id, now_iso, nm, minutes=5, launches=0)
+                        rpg.award_xp_for_event(guild.id, m.id, rpg.XP_RULES["activity_minutes"] * 5, _role_mult(m))
                         # join (once/day/app)
                         self._maybe_count_join(guild.id, m.id, app_name=nm, when_dt=now_dt)
             except Exception:
@@ -390,13 +391,13 @@ class ActivityCog(commands.Cog):
             if base_recorded is not None:
                 bonus = int((max(PIN_MULTIPLIER, 1.0) - 1.0) * base_recorded)
                 if msg and msg.author and not msg.author.bot and bonus > 0:
-                    models.award_xp_for_event(gid, msg.author.id, bonus, 1.0)
+                    rpg.award_xp_for_event(gid, msg.author.id, bonus, 1.0)
                 self._pin_awarded.add(key)
                 return
 
             if msg and msg.author and not msg.author.bot:
                 mult = _xp_mult(msg.author if isinstance(msg.author, discord.Member) else guild.get_member(msg.author.id), ch)
-                models.award_xp_for_event(gid, msg.author.id, PIN_FALLBACK_XP, mult)
+                rpg.award_xp_for_event(gid, msg.author.id, PIN_FALLBACK_XP, mult)
                 self._pin_awarded.add(key)
                 return
 
@@ -410,7 +411,7 @@ class ActivityCog(commands.Cog):
     async def _month_autocomplete(self, inter: discord.Interaction, current: str):
         gid = inter.guild_id
         try:
-            available = models.available_months(gid) or []
+            available = activity.available_months(gid) or []
         except Exception:
             available = []
         if not available:
@@ -434,7 +435,7 @@ class ActivityCog(commands.Cog):
         if not await _require_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
-        rows = models.top_levels(interaction.guild_id, int(limit))
+        rows = rpg.top_levels(interaction.guild_id, int(limit))
         if not rows:
             return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
 
@@ -475,12 +476,12 @@ class ActivityCog(commands.Cog):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
         # RPG
-        rpg = models.get_rpg_progress(gid, uid)
-        lvl, cur, need = models.xp_progress(rpg["xp"])
+        rpg = rpg.get_rpg_progress(gid, uid)
+        lvl, cur, need = rpg.xp_progress(rpg["xp"])
 
         # Totals helper
         def tot(metric: str) -> int:
-            with models.connect() as con:
+            with connect() as con:
                 cur_ = con.cursor()
                 row = cur_.execute("""
                     SELECT count FROM member_metrics_total
@@ -510,12 +511,12 @@ class ActivityCog(commands.Cog):
 
         # Prime hour & channel
         try:
-            hist = models.member_hour_histogram_total(gid, uid, tz="America/Los_Angeles")
+            hist = activity.member_hour_histogram_total(gid, uid, tz="America/Los_Angeles")
             s1, e1, _ = _prime_window_from_hist(list(hist), window=1)
             prime_hour = _fmt_hour_range_local(s1, e1, "PT")
         except Exception:
             prime_hour = "N/A"
-        ch_id = models.prime_channel_total(gid, uid)
+        ch_id = activity.prime_channel_total(gid, uid)
         prime_channel = f"<#{ch_id}>" if ch_id else "N/A"
 
         embed = _build_profile_embed(
@@ -560,7 +561,7 @@ class ActivityCog(commands.Cog):
 
         gid = interaction.guild_id
         users: set[int] = set()
-        with models.connect() as con:
+        with connect() as con:
             cur = con.cursor()
             for row in cur.execute("SELECT DISTINCT user_id FROM member_metrics_total WHERE guild_id=?", (gid,)):
                 users.add(int(row[0]))
@@ -580,7 +581,7 @@ class ActivityCog(commands.Cog):
         w.writerow(head)
 
         def _tot(uid: int, metric: str) -> int:
-            with models.connect() as con:
+            with connect() as con:
                 cur = con.cursor()
                 row = cur.execute("""
                     SELECT count FROM member_metrics_total
@@ -589,8 +590,8 @@ class ActivityCog(commands.Cog):
                 return int(row[0]) if row else 0
 
         for uid in sorted(users):
-            rpg = models.get_rpg_progress(gid, uid)
-            ch_id = models.prime_channel_total(gid, uid) or 0
+            rpg = rpg.get_rpg_progress(gid, uid)
+            ch_id = activity.prime_channel_total(gid, uid) or 0
             w.writerow([
                 gid, uid, rpg["level"], rpg["xp"],
                 rpg["str"], rpg["dex"], rpg["int"], rpg["wis"], rpg["cha"], rpg["vit"],
@@ -652,7 +653,7 @@ class ActivityCog(commands.Cog):
 
         rows: List[Tuple[int, int]] = []
 
-        with models.connect() as con:
+        with connect() as con:
             cur = con.cursor()
             if s == "all":
                 rows = cur.execute(
@@ -716,7 +717,7 @@ class ActivityCog(commands.Cog):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
         uid = user.id if user else None
-        rows = models.member_daily_counts_month(gid, uid, month)
+        rows = activity.member_daily_counts_month(gid, uid, month)
         if not rows:
             return await interaction.followup.send("No data for that month.", ephemeral=not post)
 
@@ -803,7 +804,7 @@ class ActivityCog(commands.Cog):
         if not MONTH_RE.match(month):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
-        with models.connect() as con:
+        with connect() as con:
             cur = con.cursor()
             rows = cur.execute("""
                 SELECT user_id, day, count
@@ -877,9 +878,9 @@ class ActivityCog(commands.Cog):
 
         try:
             if m == "messages":
-                models.reset_member_activity(gid, scope=s, key=k)
+                activity.reset_member_activity(gid, scope=s, key=k)
             else:
-                models._reset_metric(gid, metric=m, scope=s, key=k)
+                activity._reset_metric(gid, metric=m, scope=s, key=k)
         except Exception:
             log.exception("reset.failed", extra={"guild_id": gid, "metric": m, "scope": s, "key": k})
             return await interaction.followup.send("Reset failed. Check logs.", ephemeral=not post)

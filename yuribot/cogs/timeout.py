@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import mod_actions
 from ..strings import S
 from ..ui.timeout import build_dm_embed
 from ..utils.time import now_local, to_iso
@@ -97,7 +97,7 @@ class TimeoutCog(commands.Cog):
             return await interaction.followup.send(S("timeout.error.http"), ephemeral=not post)
 
         try:
-            models.add_timeout(
+            mod_actions.add_timeout(
                 guild_id=interaction.guild_id,
                 target_user_id=user.id,
                 target_username=str(user),

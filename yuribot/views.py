@@ -1,6 +1,6 @@
 from __future__ import annotations
 import discord
-from .models import record_vote
+from .models import polls
 
 class VoteView(discord.ui.View):
     def __init__(self, poll_id:int, options:list[tuple[int,str]]):
@@ -15,5 +15,5 @@ class VoteButton(discord.ui.Button):
         self.option_id = option_id
 
     async def callback(self, interaction: discord.Interaction):
-        record_vote(self.poll_id, interaction.user.id, self.option_id)
+        polls.record_vote(self.poll_id, interaction.user.id, self.option_id)
         await interaction.response.send_message("Vote recorded.", ephemeral=True)

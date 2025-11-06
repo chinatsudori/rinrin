@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import aiohttp
 import discord
 
-from .. import models
+from ..models import mangaupdates as mu_models, settings
 from ..strings import S
 from .storage import resolve_data_file
 
@@ -522,7 +522,7 @@ def save_state(state: Dict[str, dict]) -> None:
 
 
 def resolve_mu_forum(guild: discord.Guild) -> Optional[discord.ForumChannel]:
-    channel_id = models.get_mu_forum_channel(guild.id)
+    channel_id = settings.get_mu_forum_channel(guild.id)
     if channel_id:
         channel = guild.get_channel(channel_id)
         if isinstance(channel, discord.ForumChannel):

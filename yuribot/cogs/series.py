@@ -9,7 +9,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import collections as collection_models
+from ..models import guilds
+from ..models import series as series_models
 from ..strings import S
 from ..ui.series import build_series_list_embed
 from ..utils.collection import normalized_club
@@ -38,20 +40,20 @@ class SeriesCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
 
-        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        collection = collection_models.latest_collection(interaction.guild_id, cfg["club_id"])
         if not collection:
             return await interaction.response.send_message(S("series.error.no_collection"), ephemeral=True)
 
-        submission = models.get_submission(collection[0], number)
+        submission = collection_models.get_submission(collection[0], number)
         if not submission:
             return await interaction.response.send_message(S("series.error.bad_number"), ephemeral=True)
 
         submission_id, title, link, *_ = submission
-        series_id = models.create_series(interaction.guild_id, cfg["club_id"], title, link or "", submission_id)
+        series_id = series_models.create_series(interaction.guild_id, cfg["club_id"], title, link or "", submission_id)
         await interaction.response.send_message(
             S("series.set_from_number.ok", club=club, title=title, id=series_id),
             ephemeral=True,
@@ -74,11 +76,11 @@ class SeriesCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
 
-        series_id = models.create_series(
+        series_id = series_models.create_series(
             interaction.guild_id,
             cfg["club_id"],
             title.strip(),
@@ -97,11 +99,11 @@ class SeriesCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(S("series.error.no_cfg", club=club), ephemeral=True)
 
-        rows = models.list_series(interaction.guild_id, cfg["club_id"])
+        rows = series_models.list_series(interaction.guild_id, cfg["club_id"])
         if not rows:
             return await interaction.response.send_message(S("series.list.none"), ephemeral=True)
 
@@ -135,17 +137,17 @@ class SeriesCog(commands.Cog):
             return await interaction.followup.send(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.followup.send(S("series.error.no_cfg", club=club), ephemeral=True)
 
         if series_id:
-            series_row = models.get_series(series_id)
+            series_row = series_models.get_series(series_id)
             if not series_row or series_row[1] != interaction.guild_id:
                 return await interaction.followup.send(S("series.plan.error.not_found"), ephemeral=True)
             sid, title, link = series_row[0], series_row[2], series_row[3]
         else:
-            latest = models.latest_active_series(interaction.guild_id, cfg["club_id"])
+            latest = series_models.latest_active_series(interaction.guild_id, cfg["club_id"])
             if not latest:
                 return await interaction.followup.send(S("series.plan.error.no_active"), ephemeral=True)
             sid, title, link = latest
@@ -179,7 +181,7 @@ class SeriesCog(commands.Cog):
                     description=description,
                     location=S("series.plan.location"),
                 )
-                models.add_discussion_section(
+                series_models.add_discussion_section(
                     sid,
                     label,
                     start_ch,

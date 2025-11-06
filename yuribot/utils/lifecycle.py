@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import discord
 
-from .. import models
+from ..models import settings
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def build_shutdown_message(sig_name: str) -> str:
 def botlog_channels(bot: discord.Client):
     for guild in list(bot.guilds):
         try:
-            channel_id = models.get_bot_logs_channel(guild.id)
+            channel_id = settings.get_bot_logs_channel(guild.id)
         except Exception:
             continue
         if not channel_id:

@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import activity
 from ..strings import S
 from ..utils.maintact import month_from_day
 
@@ -84,7 +84,7 @@ class MaintActivityCog(commands.Cog):
                 cnt = int(row[idx_c])
                 if cnt <= 0:
                     continue
-                models.upsert_member_messages_day(interaction.guild_id, uid, day, cnt)
+                activity.upsert_member_messages_day(interaction.guild_id, uid, day, cnt)
                 touched.add(month_from_day(day))
                 rows_imported += 1
             except Exception:
@@ -93,7 +93,7 @@ class MaintActivityCog(commands.Cog):
         rebuilt = 0
         for m in sorted(touched):
             try:
-                models.rebuild_month_from_days(interaction.guild_id, m)
+                activity.rebuild_month_from_days(interaction.guild_id, m)
                 rebuilt += 1
             except Exception:
                 log.exception("maint.rebuild_month.failed", extra={"guild_id": interaction.guild_id, "month": m})
@@ -144,7 +144,7 @@ class MaintActivityCog(commands.Cog):
                 cnt = int(row[idx_c])
                 if cnt <= 0:
                     continue
-                models.upsert_member_messages_month(interaction.guild_id, uid, mon, cnt)
+                activity.upsert_member_messages_month(interaction.guild_id, uid, mon, cnt)
                 months_touched.add(mon)
                 rows_imported += 1
             except Exception:
@@ -161,7 +161,7 @@ class MaintActivityCog(commands.Cog):
     async def rebuild_month(self, interaction: discord.Interaction, month: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            models.rebuild_month_from_days(interaction.guild_id, month)
+            activity.rebuild_month_from_days(interaction.guild_id, month)
             await interaction.followup.send(f"Rebuilt aggregates for **{month}**.", ephemeral=True)
         except Exception:
             log.exception("maint.rebuild_month.failed", extra={"guild_id": interaction.guild_id, "month": month})

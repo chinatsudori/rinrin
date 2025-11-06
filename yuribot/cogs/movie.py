@@ -8,9 +8,11 @@ from discord import app_commands
 from discord.ext import commands
 
 try:
-    from .. import models
+    from ..models import guilds as guild_models
+    from ..models import movie as movie_models
 except Exception:  # pragma: no cover
-    models = None
+    guild_models = None
+    movie_models = None
 
 from ..strings import S
 from ..ui.movie import build_description, build_embed
@@ -108,16 +110,17 @@ class MovieClubCog(commands.Cog):
         except discord.HTTPException as exc:
             return await interaction.followup.send(S("movie.error.http", error=str(exc)), ephemeral=True)
 
-        if models and hasattr(models, "create_movie_events"):
+        if movie_models and hasattr(movie_models, "create_movie_events"):
             try:
                 show_date_iso = target_date.isoformat()
                 club_id = 0
-                if hasattr(models, "get_club_cfg"):
+                if guild_models and hasattr(guild_models, "get_club_cfg"):
                     try:
-                        club_id = models.get_club_cfg(guild.id, "movie")["club_id"]  # type: ignore[index]
+                        cfg = guild_models.get_club_cfg(guild.id, "movie")
+                        club_id = int(cfg["club_id"]) if cfg else 0
                     except Exception:
                         club_id = 0
-                models.create_movie_events(
+                movie_models.create_movie_events(
                     guild_id=guild.id,
                     club_id=club_id,
                     title=title,

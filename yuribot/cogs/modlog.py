@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import mod_actions, settings
 from ..strings import S
 from ..ui.modlog import build_dm_embed, build_modlog_embed, build_relay_embed
 from ..utils.modlog import RULE_CHOICES, permission_ok
@@ -60,7 +60,7 @@ class ModLogCog(commands.Cog):
         if not permission_ok(interaction.user):
             return await interaction.response.send_message(S("modlog.err.perms"), ephemeral=True)
 
-        channel_id = models.get_mod_logs_channel(interaction.guild_id)
+        channel_id = settings.get_mod_logs_channel(interaction.guild_id)
         if not channel_id:
             return await interaction.response.send_message(S("modlog.err.no_channel"), ephemeral=True)
         channel = interaction.guild.get_channel(channel_id)
@@ -122,7 +122,7 @@ class ModLogCog(commands.Cog):
             )
 
         try:
-            models.add_mod_action(
+            mod_actions.add_mod_action(
                 guild_id=interaction.guild_id,
                 target_user_id=user.id,
                 target_username=str(user),

@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import emoji_stats
 from ..strings import S
 from ..ui.emoji_stats import build_emoji_embed, build_sticker_embed
 from ..utils.emoji_stats import (
@@ -36,18 +36,18 @@ class EmojiStatsCog(commands.Cog):
             for st in message.stickers:
                 sid = int(st.id)
                 sname = st.name or f"sticker:{sid}"
-                models.bump_sticker_usage(message.guild.id, when_iso, sid, sname, 1)
+                emoji_stats.bump_sticker_usage(message.guild.id, when_iso, sid, sname, 1)
 
         content = message.content or ""
         for m in CUSTOM_EMOJI_RE.finditer(content):
             eid = m.group("id")
             name = m.group("name")
             key = f"custom:{eid}"
-            models.bump_emoji_usage(message.guild.id, when_iso, key, f":{name}:", True, False, 1)
+            emoji_stats.bump_emoji_usage(message.guild.id, when_iso, key, f":{name}:", True, False, 1)
         if content:
             for uni in iter_unicode_emojis(content):
                 key = f"uni:{uni}"
-                models.bump_emoji_usage(
+                emoji_stats.bump_emoji_usage(
                     message.guild.id,
                     when_iso,
                     key,
@@ -66,11 +66,11 @@ class EmojiStatsCog(commands.Cog):
         if e.is_custom_emoji():
             key = f"custom:{e.id}"
             name = f":{e.name}:"
-            models.bump_emoji_usage(payload.guild_id, when_iso, key, name, True, True, 1)
+            emoji_stats.bump_emoji_usage(payload.guild_id, when_iso, key, name, True, True, 1)
         else:
             uni = str(e)
             key = f"uni:{uni}"
-            models.bump_emoji_usage(
+            emoji_stats.bump_emoji_usage(
                 payload.guild_id,
                 when_iso,
                 key,
@@ -94,7 +94,7 @@ class EmojiStatsCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         month = month or month_default()
-        rows = models.top_emojis(interaction.guild_id, month, int(limit))
+        rows = emoji_stats.top_emojis(interaction.guild_id, month, int(limit))
         if not rows:
             return await interaction.response.send_message(
                 S("emoji.none_for_month", month=month), ephemeral=True
@@ -115,7 +115,7 @@ class EmojiStatsCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         month = month or month_default()
-        rows = models.top_stickers(interaction.guild_id, month, int(limit))
+        rows = emoji_stats.top_stickers(interaction.guild_id, month, int(limit))
         if not rows:
             return await interaction.response.send_message(
                 S("sticker.none_for_month", month=month), ephemeral=True
@@ -131,8 +131,8 @@ class EmojiStatsCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         month = month or month_default()
-        e_rows = models.top_emojis(interaction.guild_id, month, 1000)
-        s_rows = models.top_stickers(interaction.guild_id, month, 1000)
+        e_rows = emoji_stats.top_emojis(interaction.guild_id, month, 1000)
+        s_rows = emoji_stats.top_stickers(interaction.guild_id, month, 1000)
 
         csv_buf = export_usage_csv(month, e_rows, s_rows)
         filename = f"usage-{interaction.guild_id}-{month}.csv"
