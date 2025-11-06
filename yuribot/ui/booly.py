@@ -92,14 +92,22 @@ SPECIAL_DEFAULT_POOL: List[str] = [
     ":gura_heart:",
 ]
 
-# Per-user pools
+# ===== Personalized pools =====
+SPECIAL_DEFAULT_POOL: List[str] = [
+    ":henyaHeart:",
+    ":gura_heart:",
+]
+
 MOM_1_POOL: List[str] = [
     "hi mom a::wavehi: im mostly behaving today ~",
     "hearts you ~ :gura_heart:",
     "fine ill eat something but sister has to eat too",
-    "dont worry... I've only caused, like. two minor emotional damages today :henyaNodder:",
-    "???.",
-    "????????????!:gura_heart:",
+    "dont worry... I’ve only caused, like… two minor emotional damages today :henyaNodder:",
+    "youd still love me if i accidentally ban someone right ? :sadcrydepression:",
+    "a::gimme_hug:",
+    "おはよう、お母さん ～！:henyaHeart:",
+    "疲れた…",
+    "お母さんは今日もかわいい！:gura_heart:",
     "hi mom pls dont scroll up or check my logs :gura_heart:",
 ]
 MOM_2_POOL: List[str] = [
@@ -110,15 +118,15 @@ MOM_2_POOL: List[str] = [
     "mooooom Nat stayed up too late again",
     "a::gimme_hug:",
     "don't worry mom, I already banned everyone that said gachas arent real games ! :gura_heart:",
-    "????????? ~!:henyaHeart:",
-    "???.",
-    "????????????!:gura_heart:",
+    "おはよう、お母さん ～！:henyaHeart:",
+    "疲れた…",
+    "お母さんは今日もかわいい！:gura_heart:",
     "hi mom pls dont scroll up or check my logs :gura_heart:",
 ]
 NAT_POOL: List[str] = [
     "hai sister  :WaveHiHi:",
     "sister I did a thing, look!",
-    "I'm totally not trying to impress you~ (I am.)",
+    "I’m totally not trying to impress you~ (I am.)",
     "can we play minecraft together",
 ]
 NOVANE_POOL: List[str] = [
@@ -143,7 +151,7 @@ BAGE_POOL: List[str] = [
     "*This was her precious treasure, regained.*",
     "*You can celebrate a 95% Valentine's Day.*",
     "*Je t'aime.*",
-    "??Bagelina??! :henyaHeart:",
+    "我爱Bagelina阿姨! :henyaHeart:",
 ]
 OOKAMI_POOL: List[str] = [
     "Hai ookami ! a::wavehi:",
@@ -160,9 +168,9 @@ BLEP_POOL: List[str] = [
     "yaaay blepblep is here ! :henyaHeart:",
 ]
 VIVI_POOL: List[str] = [
-    "hi aunt vivi a::wavehi: I promise I didn't start this time",
+    "hi aunt vivi a::wavehi: I promise I didn’t start this time",
     "can I hide behind you again :sadcrydepression:",
-    "aunt vivi blink twice if you're tired of everyone's nonsense",
+    "aunt vivi blink twice if you’re tired of everyone’s nonsense",
     "luv u :gura_heart:",
     "can we play some games vivivi :henyaNodder: ?",
 ]
@@ -171,7 +179,7 @@ ADDI_POOL: List[str] = [
     "best puppy !!",
     "awww such a cutie. pat pat pat :gura_heart:",
     "you get extra pets for that one :henyaNodder:",
-    "ok fine you earned a treat ??",
+    "ok fine you earned a treat 😤",
     "woof woof !~",
     "arf arf I want pats too ! :gimme_hug:",
 ]
@@ -179,17 +187,17 @@ MONKE_POOL: List[str] = [
     "wrong ~",
     "wrong again ~",
     "NU UH",
-    "??",
+    "👶",
     "baby needs his bottle ?",
-    "ooh ooh aah aah ??",
+    "ooh ooh aah aah 🐒",
     "mom scary man is talking to me. ban him",
-    "lil bro thinks he's sooo cool",
-    "??",
+    "lil bro thinks he’s sooo cool",
+    "🤡",
     "sit.",
     "sit. lil bro sit.",
     "really?",
-    "lil bro really thinks he cooked with that one ??",
-    "woh... lil bro be yappin again ??",
+    "lil bro really thinks he cooked with that one 💤",
+    "woh... lil bro be yappin again 🙄",
     "this why mom likes me better ~",
     "feeling silly, might time you out later ~",
     "you better be good today monke or I'll tell on you",
@@ -197,11 +205,11 @@ MONKE_POOL: List[str] = [
     "hehe silly monke trying to talk again",
     "-# watch im going to time him out it will be so funny hehe",
     "you sound jealouss ~",
-    "??  rip bozo ??",
+    "🇱  rip bozo 💀",
     "seriously?",
-    "yikes ??",
-    "it's the monke again ??",
-    "??",
+    "yikes 💀",
+    "it's the monke again 🙄",
+    "🙄",
     "oooo it's the slowest monke again",
     "nerd!",
 ]
