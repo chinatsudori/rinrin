@@ -8,7 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import collections as collection_models
+from ..models import guilds
 from ..strings import S
 from ..ui.collection import build_collection_list_embed
 from ..utils.collection import first_url, normalized_club
@@ -36,7 +37,7 @@ class CollectionCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
         club = normalized_club(club)
 
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
                 S("collection.error.no_cfg_with_hint", club=club), ephemeral=True
@@ -44,7 +45,7 @@ class CollectionCog(commands.Cog):
 
         opens = now_local()
         closes = opens + timedelta(days=days)
-        collection_id = models.open_collection(
+        collection_id = collection_models.open_collection(
             interaction.guild_id,
             cfg["club_id"],
             to_iso(opens),
@@ -76,16 +77,16 @@ class CollectionCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
                 S("collection.error.no_cfg", club=club), ephemeral=True
             )
-        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        collection = collection_models.latest_collection(interaction.guild_id, cfg["club_id"])
         if not collection or collection[3] != "open":
             return await interaction.response.send_message(S("collection.error.no_open"), ephemeral=True)
 
-        models.close_collection_by_id(collection[0])
+        collection_models.close_collection_by_id(collection[0])
         await interaction.response.send_message(
             S("collection.reply.closed", club=club, id=collection[0]), ephemeral=True
         )
@@ -100,17 +101,17 @@ class CollectionCog(commands.Cog):
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
 
         club = normalized_club(club)
-        cfg = models.get_club_cfg(interaction.guild_id, club)
+        cfg = guilds.get_club_cfg(interaction.guild_id, club)
         if not cfg:
             return await interaction.response.send_message(
                 S("collection.error.no_cfg", club=club), ephemeral=True
             )
 
-        collection = models.latest_collection(interaction.guild_id, cfg["club_id"])
+        collection = collection_models.latest_collection(interaction.guild_id, cfg["club_id"])
         if not collection:
             return await interaction.response.send_message(S("collection.error.no_windows"), ephemeral=True)
 
-        submissions = models.list_submissions_for_collection(collection[0])
+        submissions = collection_models.list_submissions_for_collection(collection[0])
         if not submissions:
             return await interaction.response.send_message(S("collection.error.no_submissions"), ephemeral=True)
 
@@ -126,12 +127,12 @@ class CollectionCog(commands.Cog):
     async def on_thread_create(self, thread: discord.Thread):
         if thread.guild is None:
             return
-        hit = models.get_club_by_planning_forum(thread.guild.id, thread.parent_id)
+        hit = guilds.get_club_by_planning_forum(thread.guild.id, thread.parent_id)
         if not hit:
             return
 
         club_id, club_type = hit
-        collection = models.latest_collection(thread.guild.id, club_id)
+        collection = collection_models.latest_collection(thread.guild.id, club_id)
         if not collection or collection[3] != "open":
             return
 
@@ -146,7 +147,7 @@ class CollectionCog(commands.Cog):
         link = first_url(starter.content) if starter else ""
         title = thread.name or (starter.content[:80] if starter else "Untitled Submission")
 
-        models.add_submission(
+        collection_models.add_submission(
             thread.guild.id,
             club_id,
             collection[0],

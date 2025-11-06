@@ -5,7 +5,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from .. import models
+from ..models import role_welcome
 from ..ui.booked import build_role_welcome_embed
 from ..utils.booked import TARGET_ROLE_ID, role_ids
 
@@ -33,7 +33,7 @@ class RoleWelcomeCog(commands.Cog):
         user_id = after.id
 
         try:
-            already = models.role_welcome_already_sent(guild_id, user_id, TARGET_ROLE_ID)
+            already = role_welcome.role_welcome_already_sent(guild_id, user_id, TARGET_ROLE_ID)
         except Exception as exc:
             log.exception(
                 "rolewelcome.db_check_failed",
@@ -48,14 +48,14 @@ class RoleWelcomeCog(commands.Cog):
         embed = build_role_welcome_embed(after.guild.name)
         try:
             await after.send(embed=embed)
-            models.role_welcome_mark_sent(guild_id, user_id, TARGET_ROLE_ID)
+            role_welcome.role_welcome_mark_sent(guild_id, user_id, TARGET_ROLE_ID)
             log.info(
                 "rolewelcome.dm_sent",
                 extra={"guild_id": guild_id, "user_id": user_id, "role_id": TARGET_ROLE_ID},
             )
         except discord.Forbidden:
             try:
-                models.role_welcome_mark_sent(guild_id, user_id, TARGET_ROLE_ID)
+                role_welcome.role_welcome_mark_sent(guild_id, user_id, TARGET_ROLE_ID)
             except Exception:
                 pass
             log.warning(

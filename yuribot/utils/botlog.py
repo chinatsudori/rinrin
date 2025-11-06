@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import discord
 
-from .. import models
+from ..models import settings
 
 IGNORED_USER_IDS: set[int] = {
     1211781489931452447,  # Wordle
@@ -35,7 +35,7 @@ class BotLogCache:
         if cached and now - cached[1] < self.ttl:
             return cached[0]
         try:
-            channel_id = models.get_bot_logs_channel(guild_id)
+            channel_id = settings.get_bot_logs_channel(guild_id)
             self._store[guild_id] = (channel_id, now)
             return channel_id
         except Exception:

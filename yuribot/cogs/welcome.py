@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from .. import models
+from ..models import settings
 from ..strings import S
 from ..ui.welcome import build_welcome_embed, welcome_content
 from ..utils.welcome import cfg_cache, has_perms, img_cache, ordinal, resolve_welcome_image
@@ -25,7 +25,7 @@ class WelcomeCog(commands.Cog):
         cfg = cfg_cache.get(member.guild.id)
         if cfg is None:
             try:
-                cfg = models.get_welcome_settings(member.guild.id)
+                cfg = settings.get_welcome_settings(member.guild.id)
             except Exception as exc:
                 log.exception(
                     "welcome.cfg.lookup_failed",

@@ -9,7 +9,7 @@ from typing import Optional
 import discord
 
 from .utils.time import now_local, to_iso
-from . import models
+from .models import guilds, series
 from .strings import S
 
 log = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def _event_url(guild_id: int, event_id: Optional[int]) -> Optional[str]:
 async def _resolve_forum(guild: discord.Guild, guild_id: int) -> Optional[discord.ForumChannel]:
     """Find the configured discussion forum for this guild.
     NOTE: If you need club-specific forums, return club_id in due_discussions() and switch lookup."""
-    gcfg = models.get_guild_cfg(guild_id)
+    gcfg = guilds.get_guild_cfg(guild_id)
     forum_id = gcfg.get("discussion_forum_id") if gcfg else None
     if not forum_id:
         log.warning("discussion: no discussion_forum_id set for guild %s", guild_id)
@@ -80,14 +80,14 @@ async def discussion_poster_loop(bot: discord.Client, interval_sec: int = DEFAUL
 
             async with _RUN_LOCK:
                 now_iso = to_iso(now_local())
-                rows = models.due_discussions(now_iso, limit=MAX_THREADS_PER_TICK)
+                rows = series.due_discussions(now_iso, limit=MAX_THREADS_PER_TICK)
                 if not rows:
                     log.debug("discussion: no due sections at %s", now_iso)
                 else:
                     log.info("discussion: %s section(s) due at %s", len(rows), now_iso)
 
                 for row in rows:
-                    # Schema from your models.due_discussions():
+                    # Schema from series.due_discussions():
                     # id, series_id, label, start_ch, end_ch, discussion_start, discussion_event_id, title, link
                     (
                         section_id,
@@ -102,7 +102,7 @@ async def discussion_poster_loop(bot: discord.Client, interval_sec: int = DEFAUL
                     ) = row
 
                     # get_series() returns: (id, guild_id, title, link, status)
-                    srow = models.get_series(series_id)
+                    srow = series.get_series(series_id)
                     if not srow:
                         log.warning("discussion: series %s not found; skipping section %s", series_id, section_id)
                         continue
@@ -132,7 +132,7 @@ async def discussion_poster_loop(bot: discord.Client, interval_sec: int = DEFAUL
                         continue
 
                     try:
-                        models.mark_discussion_posted(section_id, thread.id)
+                        series.mark_discussion_posted(section_id, thread.id)
                         log.info("discussion: posted section %s → thread #%s (%s)", section_id, thread.id, thread.name)
                     except Exception as ex:
                         log.exception("discussion: failed to mark section %s posted: %s", section_id, ex)

@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import models
+from ..models import guilds
 from ..strings import S
 from ..ui.admin import build_club_config_embed
 from ..utils.admin import ensure_guild, validate_image_filename
@@ -31,7 +31,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=not post)
 
         try:
-            cfg = models.get_club_map(interaction.guild_id)
+            cfg = guilds.get_club_map(interaction.guild_id)
         except Exception:
             log.exception("admin.club_config.lookup_failed", extra={"guild_id": interaction.guild_id})
             return await interaction.followup.send(S("admin.club_config.error"), ephemeral=not post)
@@ -66,7 +66,7 @@ class AdminCog(commands.Cog):
 
         try:
             data = await image.read()
-            models.store_club_image(interaction.guild_id, club_slug, valid_name, data)
+            guilds.store_club_image(interaction.guild_id, club_slug, valid_name, data)
         except Exception:
             log.exception(
                 "admin.set_image.store_failed",
@@ -94,7 +94,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=not post)
 
         try:
-            models.store_club_link(interaction.guild_id, club_slug, url)
+            guilds.store_club_link(interaction.guild_id, club_slug, url)
         except Exception:
             log.exception(
                 "admin.set_link.store_failed",

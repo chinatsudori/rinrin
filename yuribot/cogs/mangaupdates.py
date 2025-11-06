@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from .. import models
+from ..models import mangaupdates as mu_models
 from ..strings import S
 from ..ui.mangaupdates import build_batch_embed, build_release_embed
 from ..utils.mangaupdates import (
@@ -194,7 +194,7 @@ class MUWatcher(commands.Cog):
         thread_obj = created_any.thread if hasattr(created_any, "thread") else created_any  # type: ignore
 
         try:
-            models.mu_register_thread_series(interaction.guild_id, thread_obj.id, sid, title)
+            mu_models.mu_register_thread_series(interaction.guild_id, thread_obj.id, sid, title)
         except Exception:
             pass  # best-effort
 
@@ -288,7 +288,7 @@ class MUWatcher(commands.Cog):
 
         # Save in DB + state
         try:
-            models.mu_register_thread_series(interaction.guild_id, interaction.channel.id, sid, title)
+            mu_models.mu_register_thread_series(interaction.guild_id, interaction.channel.id, sid, title)
         except Exception:
             pass
 
@@ -363,7 +363,7 @@ class MUWatcher(commands.Cog):
         import csv
         from io import StringIO, BytesIO
 
-        rows = models.mu_list_links_for_guild(interaction.guild_id)
+        rows = mu_models.mu_list_links_for_guild(interaction.guild_id)
         if not rows:
             return await interaction.response.send_message("No links found.", ephemeral=True)
 
@@ -398,7 +398,7 @@ class MUWatcher(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        sid = models.mu_get_thread_series(tgt.id, interaction.guild_id)
+        sid = mu_models.mu_get_thread_series(tgt.id, interaction.guild_id)
         we: Optional[WatchEntry] = None
 
         gid = str(interaction.guild_id)
@@ -437,14 +437,14 @@ class MUWatcher(commands.Cog):
 
         # Normalize + persist into DB
         results = [normalize_release_record(sid, r) for r in results]
-        models.mu_bulk_upsert_releases(sid, results)
+        mu_models.mu_bulk_upsert_releases(sid, results)
 
         # First-run behavior
         if we.last_release_ts is None and FIRST_RUN_SEED_ALL:
             # mark ALL as posted, set last_release_ts to newest, and bail
             newest_ts = max((release_timestamp(r) for r in results), default=-1)
             for r in results:
-                models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(r.get("release_id")))
+                mu_models.mu_mark_posted(interaction.guild_id, tgt.id, sid, int(r.get("release_id")))
             for e in self.state[gid]["entries"]:
                 if int(e.get("thread_id")) == we.thread_id:
                     e["last_release_ts"] = newest_ts
@@ -453,7 +453,7 @@ class MUWatcher(commands.Cog):
             return await interaction.followup.send("Indexed existing releases. No new updates.", ephemeral=True)
 
         # Normal "post only new" path
-        unposted = models.mu_list_unposted_for_thread(
+        unposted = mu_models.mu_list_unposted_for_thread(
             interaction.guild_id, tgt.id, sid, english_only=FILTER_ENGLISH_ONLY
         )
 
@@ -465,7 +465,7 @@ class MUWatcher(commands.Cog):
             if rid in seen:
                 continue
             seen.add(rid)
-            rel = models.mu_get_release(sid, rid) or {
+            rel = mu_models.mu_get_release(sid, rid) or {
                 "release_id": rid,
                 "title": tup[1], "raw_title": tup[2], "description": tup[3],
                 "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
@@ -482,7 +482,7 @@ class MUWatcher(commands.Cog):
                 max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
                 for r in rels_to_post[:posted]:
                     rid = int(r.get("release_id"))
-                    models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
+                    mu_models.mu_mark_posted(interaction.guild_id, tgt.id, sid, rid)
                 for e in self.state[gid]["entries"]:
                     if int(e["thread_id"]) == we.thread_id:
                         prev = e.get("last_release_ts") or -1
@@ -554,7 +554,7 @@ class MUWatcher(commands.Cog):
             processed += 1
             name = th.name or ""
             # Skip if already mapped
-            sid = models.mu_get_thread_series(th.id, interaction.guild_id)
+            sid = mu_models.mu_get_thread_series(th.id, interaction.guild_id)
             if sid is None:
                 # Infer MU series by title — with ambiguity guard
                 try:
@@ -604,7 +604,7 @@ class MUWatcher(commands.Cog):
                     except Exception:
                         pass
                     try:
-                        models.mu_register_thread_series(interaction.guild_id, th.id, sid, title)
+                        mu_models.mu_register_thread_series(interaction.guild_id, th.id, sid, title)
                         attached += 1
                     except Exception:
                         pass
@@ -612,7 +612,7 @@ class MUWatcher(commands.Cog):
                     attached += 1  # would-attach
 
             # Pull releases and index them — never post
-            sid = sid or models.mu_get_thread_series(th.id, interaction.guild_id)
+            sid = sid or mu_models.mu_get_thread_series(th.id, interaction.guild_id)
             if not sid:
                 continue
 
@@ -628,12 +628,12 @@ class MUWatcher(commands.Cog):
                 continue
 
             if not dry_run:
-                models.mu_bulk_upsert_releases(sid, items)
+                mu_models.mu_bulk_upsert_releases(sid, items)
                 # Mark ALL as posted in this thread so the watcher won’t flood
                 max_ts = max(int(r.get("release_ts") or -1) for r in items)
                 for r in items:
                     rid = int(r.get("release_id"))
-                    models.mu_mark_posted(interaction.guild_id, th.id, sid, rid)
+                    mu_models.mu_mark_posted(interaction.guild_id, th.id, sid, rid)
 
                 # Update state.last_release_ts
                 gid = str(interaction.guild_id)
@@ -744,7 +744,7 @@ class MUWatcher(commands.Cog):
                 self._prune_entry(gid, we.thread_id)
                 continue
 
-            sid = models.mu_get_thread_series(we.thread_id, gid) or we.series_id
+            sid = mu_models.mu_get_thread_series(we.thread_id, gid) or we.series_id
 
             try:
                 rels = await client.get_series_releases(sid, page=1, per_page=25)
@@ -755,12 +755,12 @@ class MUWatcher(commands.Cog):
             if not results:
                 continue
 
-            models.mu_bulk_upsert_releases(sid, results)
+            mu_models.mu_bulk_upsert_releases(sid, results)
 
             if we.last_release_ts is None and FIRST_RUN_SEED_ALL:
                 newest_ts = max((release_timestamp(r) for r in results), default=-1)
                 for r in results:
-                    models.mu_mark_posted(gid, we.thread_id, sid, int(r.get("release_id")))
+                    mu_models.mu_mark_posted(gid, we.thread_id, sid, int(r.get("release_id")))
                 try:
                     for ee in self.state[str(gid)]["entries"]:
                         if int(ee["thread_id"]) == we.thread_id:
@@ -771,7 +771,7 @@ class MUWatcher(commands.Cog):
                     pass
                 continue  # skip posting on the first cycle
 
-            unposted = models.mu_list_unposted_for_thread(
+            unposted = mu_models.mu_list_unposted_for_thread(
                 gid, we.thread_id, sid, english_only=FILTER_ENGLISH_ONLY
             )
 
@@ -783,7 +783,7 @@ class MUWatcher(commands.Cog):
                 if rid in seen:
                     continue
                 seen.add(rid)
-                rel = models.mu_get_release(sid, rid) or {
+                rel = mu_models.mu_get_release(sid, rid) or {
                     "release_id": rid,
                     "title": tup[1], "raw_title": tup[2], "description": tup[3],
                     "volume": tup[4], "chapter": tup[5], "subchapter": tup[6],
@@ -801,7 +801,7 @@ class MUWatcher(commands.Cog):
                         max_posted_ts = max(int(r.get("release_ts") or -1) for r in rels_to_post[:posted])
                         for r in rels_to_post[:posted]:
                             rid = int(r.get("release_id"))
-                            models.mu_mark_posted(gid, we.thread_id, sid, rid)
+                            mu_models.mu_mark_posted(gid, we.thread_id, sid, rid)
                         for ee in self.state[str(gid)]["entries"]:
                             if int(ee["thread_id"]) == we.thread_id:
                                 prev = ee.get("last_release_ts") or -1
