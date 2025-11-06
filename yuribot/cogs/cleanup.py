@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-
+from .admin import AdminCog
 from ..utils.cleanup import (
     DEFAULT_BOT_AUTHOR_ID,
     DEFAULT_FORUM_ID,
@@ -20,12 +20,34 @@ log = logging.getLogger(__name__)
 
 
 class CleanupCog(commands.Cog):
-    """Utility cleanup commands."""
-
+    """Mod cleanup utilities."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._parent_group: app_commands.Group | None = None
 
     group = app_commands.Group(name="cleanup", description="Mod cleanup utilities")
+
+    async def cog_load(self) -> None:
+        admin_cog = self.bot.get_cog("AdminCog")
+        if isinstance(admin_cog, AdminCog):
+            try: admin_cog.group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
+            admin_cog.group.add_command(self.group)
+            self._parent_group = admin_cog.group
+        else:
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
+            self.bot.tree.add_command(self.group)
+            self._parent_group = None
+
+    async def cog_unload(self) -> None:
+        if self._parent_group is not None:
+            try: self._parent_group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
+        else:
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
+
 
     @group.command(
         name="mupurge",

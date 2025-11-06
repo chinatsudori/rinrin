@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional, Tuple
-
+from .admin import AdminCog
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, time as dtime
@@ -88,15 +88,36 @@ class ProgressReporter:
 
 
 class BackreadCog(commands.Cog):
-    """Archive historic guild messages into SQLite for analytics."""
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._last_gap_scan_month: Optional[str] = None
-        self._monthly_gap_scan.start()
+        self._parent_group: app_commands.Group | None = None
 
+    # your full group and commands already exist; keep them
     group = app_commands.Group(name="backread", description="Archive server message history")
 
+    async def cog_load(self) -> None:
+        """Attach /backread under /admin if AdminCog is present; else add to root."""
+        admin_cog = self.bot.get_cog("AdminCog")
+        if isinstance(admin_cog, AdminCog):
+            # ensure no duplicate
+            try: admin_cog.group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
+            admin_cog.group.add_command(self.group)
+            self._parent_group = admin_cog.group
+        else:
+            # root fallback
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
+            self.bot.tree.add_command(self.group)
+            self._parent_group = None
+
+    async def cog_unload(self) -> None:
+        if self._parent_group is not None:
+            try: self._parent_group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
+        else:
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
     # ------------------------
     # /backread start
     # ------------------------

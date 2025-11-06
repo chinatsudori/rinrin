@@ -39,47 +39,34 @@ def read_csv(attachment: discord.Attachment):
     return csv.reader(io.StringIO(text))
 
 
-class MaintActivityCog(commands.GroupCog, name="maint", description="Admin: activity maintenance"):
-    """Admin tools to import day/month CSVs and rebuild aggregates."""
-
+class MaintActivityCog(commands.Cog):
+    """Admin: activity maintenance (CSV import, rebuild, replay)."""
     def __init__(self, bot: commands.Bot):
-        super().__init__()
         self.bot = bot
-        self._parent_group: Optional[app_commands.Group] = None
+        self._parent_group: app_commands.Group | None = None
+
+    group = app_commands.Group(name="maint", description="Admin: activity maintenance")
 
     async def cog_load(self) -> None:
         admin_cog = self.bot.get_cog("AdminCog")
         if isinstance(admin_cog, AdminCog):
-            admin_cog.group.remove_command(self.group.name)
-            try:
-                admin_cog.group.add_command(self.group)
-            except app_command_errors.CommandAlreadyRegistered:
-                # Discord.py caches commands on the parent group. If a prior
-                # load partially succeeded, make sure the stale command is
-                # removed before registering again.
-                admin_cog.group.remove_command(self.group.name)
-                admin_cog.group.add_command(self.group)
+            try: admin_cog.group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
+            admin_cog.group.add_command(self.group)
             self._parent_group = admin_cog.group
         else:
-            try:
-                self.bot.tree.remove_command(self.group.name, type=self.group.type)
-            except (AttributeError, KeyError):
-                pass
-            try:
-                self.bot.tree.add_command(self.group)
-            except app_command_errors.CommandAlreadyRegistered:
-                self.bot.tree.remove_command(self.group.name, type=self.group.type)
-                self.bot.tree.add_command(self.group)
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
+            self.bot.tree.add_command(self.group)
             self._parent_group = None
 
     async def cog_unload(self) -> None:
         if self._parent_group is not None:
-            self._parent_group.remove_command(self.group.name)
+            try: self._parent_group.remove_command(self.group.name)
+            except (KeyError, AttributeError): pass
         else:
-            try:
-                self.bot.tree.remove_command(self.group.name, type=self.group.type)
-            except (AttributeError, KeyError):
-                pass
+            try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (KeyError, AttributeError): pass
 
     @app_commands.command(
         name="activity_report",
