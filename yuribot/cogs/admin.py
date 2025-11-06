@@ -21,6 +21,20 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_load(self) -> None:
+        """Ensure the slash command group is registered with the tree."""
+        if self.bot.tree.get_command(self.group.name) is None:
+            self.bot.tree.add_command(self.group)
+
+    def cog_unload(self) -> None:
+        try:
+            self.bot.tree.remove_command(
+                self.group.name,
+                type=discord.AppCommandType.chat_input,
+            )
+        except Exception:
+            log.exception("admin.group.remove_failed")
+
     group = app_commands.Group(name="admin", description="Admin tools")
 
     @group.command(name="club_config", description="Show configured club IDs and assets.")
