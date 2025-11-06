@@ -24,7 +24,12 @@ class AdminCog(commands.Cog):
 
     async def cog_load(self) -> None:
         """Ensure the slash command group is registered with the tree."""
-        group = self.group.copy()
+        # discord.py 2.6 removed the public ``Group.copy`` helper that used to be
+        # available on app commands.  ``Group._copy_with`` performs the same work
+        # (binding the group and all of its children to this cog instance) and is
+        # what the library now uses internally.  Use it here so we can register a
+        # per-instance copy of the group with the tree.
+        group = type(self).group._copy_with(parent=None, binding=self)
         existing = self.bot.tree.get_command(group.name)
         if existing is not None:
             self.bot.tree.remove_command(group.name, type=group.type)
