@@ -225,6 +225,140 @@ class BackreadCog(commands.Cog):
             await progress_msg.edit(content="\n".join(summary_lines))
         except Exception:
             await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
+    # ------------------------
+    # /backread audit
+    # ------------------------
+    @group.command(
+        name="audit",
+        description="Audit what the bot can read: channels/threads (incl. private) and what's skipped.",
+    )
+    @app_commands.describe(
+        channel="Limit to a specific text or forum channel.",
+        include_archived_threads="Scan archived threads for each channel (public).",
+        include_private_threads="Try private archived threads (TextChannels only; forums unsupported).",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def audit_cmd(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.abc.GuildChannel] = None,
+        include_archived_threads: bool = True,
+        include_private_threads: bool = True,
+    ):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+
+        me = guild.me
+        if not isinstance(me, discord.Member):
+            try:
+                me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
+            except Exception:
+                return await interaction.followup.send(
+                    "Unable to resolve my member object for permission checks.",
+                    ephemeral=True,
+                )
+
+        # Target discovery: text + forum channels
+        targets: List[discord.abc.GuildChannel] = []
+        if channel:
+            targets.append(channel)
+        else:
+            targets.extend(guild.text_channels)
+            try:
+                forum_channels = list(guild.forum_channels)  # type: ignore[attr-defined]
+            except AttributeError:
+                forum_channels = []
+            if not forum_channels:
+                forum_channels = [ch for ch in guild.channels if isinstance(ch, discord.ForumChannel)]
+            targets.extend(forum_channels)
+
+        readable_channels = 0
+        skipped_channels: list[str] = []
+        total_threads = 0
+        readable_threads = 0
+        public_threads = 0
+        private_threads = 0
+        skipped_threads: list[str] = []
+        notes: list[str] = []
+
+        # Quick note about forum private threads limitation
+        if include_private_threads:
+            notes.append(
+                "Private **forum** threads are not retrievable on this discord.py version; counted as unsupported."
+            )
+
+        for parent in targets:
+            can_read, reason = self._can_backread(parent, me)
+            label = self._label(parent)
+            if not can_read:
+                skipped_channels.append(f"{label} ({reason})")
+                continue
+
+            readable_channels += 1
+
+            # Gather candidate threads (this can page archived public; private for TextChannel only)
+            if include_archived_threads or include_private_threads:
+                threads = await self._gather_threads(parent, include_private_threads, me)
+            else:
+                threads = [t for t in getattr(parent, "threads", []) if isinstance(t, discord.Thread)]
+
+            # Tally and check each thread access
+            for t in threads:
+                total_threads += 1
+                # classify private/public best-effort
+                ttype = getattr(t, "type", None)
+                ttype_name = str(getattr(ttype, "name", ttype)).lower() if ttype is not None else ""
+                is_private = "private" in ttype_name
+                if is_private:
+                    private_threads += 1
+                else:
+                    public_threads += 1
+
+                t_can_read, t_reason = self._can_backread(t, me)
+                if t_can_read:
+                    readable_threads += 1
+                else:
+                    skipped_threads.append(f"{self._label(t)} ({t_reason})")
+
+        # Compose result
+        lines = [
+            f"**Audit for `{guild.name}`**",
+            f"• Channels readable: **{readable_channels:,}**",
+        ]
+        if skipped_channels:
+            preview = ", ".join(skipped_channels[:8])
+            if len(skipped_channels) > 8:
+                preview += ", ..."
+            lines.append(f"• Channels skipped (perm): **{len(skipped_channels):,}**")
+            lines.append(f"  ↳ {preview}")
+
+        lines.extend(
+            [
+                f"• Threads discovered: **{total_threads:,}** "
+                f"(public: **{public_threads:,}**, private: **{private_threads:,}**)",
+                f"• Threads readable now: **{readable_threads:,}**",
+            ]
+        )
+        if skipped_threads:
+            tprev = ", ".join(skipped_threads[:8])
+            if len(skipped_threads) > 8:
+                tprev += ", ..."
+            lines.append(f"• Threads skipped (perm): **{len(skipped_threads):,}**")
+            lines.append(f"  ↳ {tprev}")
+
+        if include_private_threads:
+            lines.append("• Private threads (TextChannels): require **Manage Threads** to fetch archived ones.")
+            lines.append("• Private threads (ForumChannels): **unsupported** to fetch when archived in this lib.")
+
+        if notes:
+            lines.append("\n".join(f"ℹ️ {n}" for n in notes))
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # ------------------------
     # /backread stats
