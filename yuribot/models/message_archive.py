@@ -198,4 +198,13 @@ def max_message_id(guild_id: int, channel_id: int) -> int | None:
         ).fetchone()
     if row and row[0] is not None:
         return int(row[0])
-    return None
+
+
+def has_message(message_id: int) -> bool:
+    with connect() as con:
+        cur = con.cursor()
+        row = cur.execute(
+            "SELECT 1 FROM message_archive WHERE message_id=? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+    return bool(row)
