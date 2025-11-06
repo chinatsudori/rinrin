@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Sequence, Tuple, Dict, Any
+from typing import Iterable, Sequence, Tuple, Dict, Any, Iterator
 
 # Public DB surface for other modules (e.g., cogs) to use.
 # connect() must return a sqlite3.Connection-compatible object.
@@ -51,6 +51,48 @@ def stats_summary(guild_id: int) -> Dict[str, int]:
         users = int(cur.fetchone()[0])
 
     return {"messages": messages, "channels": channels, "users": users}
+
+
+def iter_guild_messages(
+    guild_id: int,
+    *,
+    channel_id: int | None = None,
+    after_message_id: int | None = None,
+    before_message_id: int | None = None,
+    chunk_size: int = 500,
+) -> Iterator[ArchivedMessage]:
+    """Yield archived messages for a guild ordered by timestamp then id."""
+
+    conditions: list[str] = ["guild_id=?"]
+    params: list[object] = [guild_id]
+
+    if channel_id is not None:
+        conditions.append("channel_id=?")
+        params.append(channel_id)
+    if after_message_id is not None:
+        conditions.append("message_id>?")
+        params.append(after_message_id)
+    if before_message_id is not None:
+        conditions.append("message_id<?")
+        params.append(before_message_id)
+
+    where_clause = " AND ".join(conditions)
+    sql = (
+        "SELECT message_id, guild_id, channel_id, author_id, message_type, created_at, content, "
+        "edited_at, attachments, embeds, reactions, reply_to_id "
+        f"FROM message_archive WHERE {where_clause} "
+        "ORDER BY created_at ASC, message_id ASC"
+    )
+
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(sql, params)
+        while True:
+            rows = cur.fetchmany(max(1, int(chunk_size)))
+            if not rows:
+                break
+            for row in rows:
+                yield ArchivedMessage(*row)
 
 
 # ---- Existing archiver types & functions ----
@@ -191,25 +233,39 @@ def from_discord_message(message: "discord.Message") -> ArchivedMessage:
     )
 
 
-def upsert_many(rows: Sequence[ArchivedMessage] | Iterable[ArchivedMessage]) -> int:
+def upsert_many(
+    rows: Sequence[ArchivedMessage] | Iterable[ArchivedMessage],
+    *,
+    return_new: bool = False,
+) -> int | tuple[int, list[ArchivedMessage]]:
     if not rows:
-        return 0
+        return (0, []) if return_new else 0
 
     # Support both sequences and general iterables.
     iterable: Iterable[ArchivedMessage]
     if isinstance(rows, Sequence):
         if len(rows) == 0:
-            return 0
+            return (0, []) if return_new else 0
         iterable = rows
     else:
         iterable = list(rows)
         if not iterable:
-            return 0
+            return (0, []) if return_new else 0
 
     tuples = [row.as_db_tuple() for row in iterable]
 
     with connect() as con:
         cur = con.cursor()
+
+        existing_ids: set[int] = set()
+        if return_new:
+            ids = [row.message_id for row in iterable]
+            placeholders = ",".join("?" for _ in ids)
+            if placeholders:
+                sql = f"SELECT message_id FROM message_archive WHERE message_id IN ({placeholders})"
+                cur.execute(sql, ids)
+                existing_ids = {int(mid) for (mid,) in cur.fetchall()}
+
         cur.executemany(
             """
             INSERT INTO message_archive (
@@ -233,7 +289,13 @@ def upsert_many(rows: Sequence[ArchivedMessage] | Iterable[ArchivedMessage]) -> 
             tuples,
         )
         con.commit()
-    return len(tuples)
+
+    total = len(tuples)
+    if not return_new:
+        return total
+
+    new_rows = [row for row in iterable if row.message_id not in existing_ids]
+    return total, new_rows
 
 
 def max_message_id(guild_id: int, channel_id: int) -> int | None:
