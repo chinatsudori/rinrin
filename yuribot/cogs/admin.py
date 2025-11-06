@@ -20,20 +20,31 @@ class AdminCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._registered_group: Optional[app_commands.Group] = None
 
     async def cog_load(self) -> None:
         """Ensure the slash command group is registered with the tree."""
-        if self.bot.tree.get_command(self.group.name) is None:
-            self.bot.tree.add_command(self.group)
+        group = self.group.copy()
+        existing = self.bot.tree.get_command(group.name)
+        if existing is not None:
+            self.bot.tree.remove_command(group.name, type=group.type)
+
+        self.bot.tree.add_command(group)
+        self._registered_group = group
 
     def cog_unload(self) -> None:
+        if self._registered_group is None:
+            return
+
         try:
             self.bot.tree.remove_command(
-                self.group.name,
-                type=discord.AppCommandType.chat_input,
+                self._registered_group.name,
+                type=self._registered_group.type,
             )
         except Exception:
             log.exception("admin.group.remove_failed")
+        finally:
+            self._registered_group = None
 
     group = app_commands.Group(name="admin", description="Admin tools")
 
