@@ -39,15 +39,11 @@ def read_csv(attachment: discord.Attachment):
     return csv.reader(io.StringIO(text))
 
 
-class MaintActivityCog(commands.Cog):
+class MaintActivityCog(commands.GroupCog, name="maint", description="Admin: activity maintenance"):
     """Admin tools to import day/month CSVs and rebuild aggregates."""
 
-    group = app_commands.Group(
-        name="maint",
-        description="Admin: activity maintenance",
-    )
-
     def __init__(self, bot: commands.Bot):
+        super().__init__()
         self.bot = bot
         self._parent_group: Optional[app_commands.Group] = None
 
@@ -85,7 +81,7 @@ class MaintActivityCog(commands.Cog):
             except (AttributeError, KeyError):
                 pass
 
-    @group.command(
+    @app_commands.command(
         name="activity_report",
         description="ADMIN: Generate a full activity analytics report from the archive.",
     )
@@ -149,7 +145,7 @@ class MaintActivityCog(commands.Cog):
                 ephemeral=True,
             )
 
-    @group.command(name="import_day_csv", description="ADMIN: import day-scope CSV and rebuild months.")
+    @app_commands.command(name="import_day_csv", description="ADMIN: import day-scope CSV and rebuild months.")
     @app_commands.describe(
         file="CSV exported via /activity export scope=day",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
@@ -209,7 +205,7 @@ class MaintActivityCog(commands.Cog):
             ephemeral=True,
         )
 
-    @group.command(name="import_month_csv", description="ADMIN: import month-scope CSV (direct month upserts).")
+    @app_commands.command(name="import_month_csv", description="ADMIN: import month-scope CSV (direct month upserts).")
     @app_commands.describe(
         file="CSV exported via /activity export scope=month",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
@@ -261,7 +257,7 @@ class MaintActivityCog(commands.Cog):
             ephemeral=True,
         )
 
-    @group.command(name="rebuild_month", description="ADMIN: rebuild a month aggregate from day table.")
+    @app_commands.command(name="rebuild_month", description="ADMIN: rebuild a month aggregate from day table.")
     @app_commands.describe(month="YYYY-MM")
     @require_manage_guild()
     async def rebuild_month(self, interaction: discord.Interaction, month: str):
@@ -273,7 +269,7 @@ class MaintActivityCog(commands.Cog):
             log.exception("maint.rebuild_month.failed", extra={"guild_id": interaction.guild_id, "month": month})
             await interaction.followup.send(S("common.error_generic"), ephemeral=True)
 
-    @group.command(
+    @app_commands.command(
         name="replay_archive",
         description="ADMIN: Replay archived messages into activity metrics and RPG XP.",
     )
