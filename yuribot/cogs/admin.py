@@ -35,8 +35,8 @@ log = logging.getLogger(__name__)
 # Nested groups under /admin
 # -------------------------------
 _BACKREAD = app_commands.Group(name="backread", description="Archive server message history")
-_MAINT = app_commands.Group(name="maint", description="Admin: activity maintenance")
-_CLEANUP = app_commands.Group(name="cleanup", description="Mod cleanup utilities")
+_MAINT    = app_commands.Group(name="maint",    description="Admin: activity maintenance")
+_CLEANUP  = app_commands.Group(name="cleanup",  description="Mod cleanup utilities")
 
 # -------------------------------
 # Helpers
@@ -70,18 +70,13 @@ class BackreadStats:
 # ======================================================================
 # ONE COG TO RULE THEM ALL
 # ======================================================================
+
 class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
-    """
-    Single consolidated admin cog. Provides:
-      /admin backread ...
-      /admin maint ...
-      /admin cleanup ...
-      /admin club_config | set_image | set_link
-      /admin sync_guild | sync_global | show_tree
-    """
+    # ❗ define the parent group explicitly for this discord.py version
+    group = app_commands.Group(name="admin", description="Admin tools")
 
     def __init__(self, bot: commands.Bot):
-        super().__init__()
+        # do NOT call super().__init__ here; GroupCog wiring is done by the framework
         self.bot = bot
 
     # ------------------------------------------------------------
@@ -1130,25 +1125,23 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
     # attach nested groups to /admin
     # ------------------------------------------------------------
     async def cog_load(self) -> None:
-        # ensure groups attach under /admin
-        try:
-            self.group.add_command(_BACKREAD)
-        except app_command_errors.CommandAlreadyRegistered:
-            self.group.remove_command(_BACKREAD.name)
-            self.group.add_command(_BACKREAD)
+        """
+        Attach our three subgroups under /admin. Be idempotent so hot reloads
+        don’t throw CommandAlreadyRegistered.
+        """
+        parent = self.group  # guaranteed to exist because we declared it above
 
-        try:
-            self.group.add_command(_MAINT)
-        except app_command_errors.CommandAlreadyRegistered:
-            self.group.remove_command(_MAINT.name)
-            self.group.add_command(_MAINT)
-
-        try:
-            self.group.add_command(_CLEANUP)
-        except app_command_errors.CommandAlreadyRegistered:
-            self.group.remove_command(_CLEANUP.name)
-            self.group.add_command(_CLEANUP)
-
+        # Attach (or re-attach) each subgroup safely
+        for subgroup in (_BACKREAD, _MAINT, _CLEANUP):
+            try:
+                parent.add_command(subgroup)
+            except app_commands.CommandAlreadyRegistered:
+                # remove stale then re-add
+                try:
+                    parent.remove_command(subgroup.name)
+                except (KeyError, AttributeError):
+                    pass
+                parent.add_command(subgroup)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
