@@ -69,10 +69,11 @@ log = logging.getLogger(__name__)
 # =========================
 # Activity Cog (+MMO)
 # =========================
-class ActivityCog(commands.Cog):
+class ActivityCog(commands.GroupCog, name="activity", description="Member activity + RPG"):
     """Activity tracking + RPG progression (roles & pins multipliers, GIFs)."""
 
     def __init__(self, bot: commands.Bot):
+        super().__init__()
         self.bot = bot
         # track voice sessions (join -> leave)
         self._vc_sessions: dict[tuple[int,int], dict] = {}  # (guild_id, user_id) -> {joined: dt, ch_id: int, stream_on: bool}
@@ -532,7 +533,6 @@ class ActivityCog(commands.Cog):
             log.exception("pin_bonus.failed", extra={"payload": str(getattr(payload, "data", None))})
 
     # ---------- Slash commands ----------
-    group = app_commands.Group(name="activity", description="Member activity + RPG")
 
     async def _month_autocomplete(self, inter: discord.Interaction, current: str):
         gid = inter.guild_id
@@ -553,7 +553,7 @@ class ActivityCog(commands.Cog):
         return [app_commands.Choice(name=c, value=c) for c in filtered[:25]]
 
     # ------- /activity rank (by level) -------
-    @group.command(name="rank", description="Top members by Level.")
+    @app_commands.command(name="rank", description="Top members by Level.")
     @app_commands.describe(limit="How many to list (5–50)", post="Post publicly?")
     async def rank(self, interaction: discord.Interaction,
                    limit: app_commands.Range[int, 5, 50] = 20,
@@ -574,7 +574,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- /activity me (profile) -------
-    @group.command(
+    @app_commands.command(
         name="me",
         description="Profile: level, stats, derived metrics, voice, activities. You can inspect someone else."
     )
@@ -675,7 +675,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- Master export (everything) -------
-    @group.command(name="export_master", description="Export a master report: totals, RPG, derived.")
+    @app_commands.command(name="export_master", description="Export a master report: totals, RPG, derived.")
     @app_commands.describe(post="Post publicly?")
     async def export_master(self, interaction: discord.Interaction, post: bool = False):
         import csv
@@ -732,7 +732,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(file=file, ephemeral=not post)
 
     # ------- /activity top -------
-    @group.command(name="top", description="Leaderboard for a metric.")
+    @app_commands.command(name="top", description="Leaderboard for a metric.")
     @app_commands.describe(
         metric="Which metric to rank by",
         scope="day/week/month/all",
@@ -817,7 +817,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
     # ------- /activity graph -------
-    @group.command(name="graph", description="Plot daily messages for a month (guild or a user).")
+    @app_commands.command(name="graph", description="Plot daily messages for a month (guild or a user).")
     @app_commands.describe(
         month="YYYY-MM (default: current month)",
         user="Optional: pick a member to graph",
@@ -896,7 +896,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(file=file, ephemeral=not post)
 
     # ------- /activity export -------
-    @group.command(name="export", description="Export a CSV for a metric and month.")
+    @app_commands.command(name="export", description="Export a CSV for a metric and month.")
     @app_commands.describe(
         metric="Metric to export",
         month="YYYY-MM (default: current month)",
@@ -952,7 +952,7 @@ class ActivityCog(commands.Cog):
         await interaction.followup.send(file=file, ephemeral=not post)
 
     # ------- /activity reset -------
-    @group.command(name="reset", description="Admin: reset metrics (careful).")
+    @app_commands.command(name="reset", description="Admin: reset metrics (careful).")
     @app_commands.describe(
         metric="Which metric to reset (messages has special legacy handling)",
         scope="day/week/month/all",
