@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Awaitable, Callable, List, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -299,68 +299,42 @@ class BackreadCog(commands.Cog):
 
         # 1) Load existing IDs
         await _edit("Loading existing IDs from DB…")
-        existing_ids: set[int] = set()
         try:
-            con = message_archive.get_connection()
-            with con:
-                cur = con.cursor()
-                cur.execute(
-                    "SELECT message_id FROM message_archive WHERE guild_id=? AND channel_id=?",
-                    (guild_id, channel_id),
-                )
-                for (mid,) in cur.fetchall():
-                    existing_ids.add(int(mid))
+            existing_ids = self._load_existing_ids(guild_id, channel_id)
         except Exception:
-            log.exception("backread.export.load_existing_failed", extra={"guild_id": guild_id, "channel_id": channel_id})
-            return await progress_msg.edit(content=f"**Exporting {label}…**\nDB read failed while loading existing rows.")
+            log.exception(
+                "backread.export.load_existing_failed",
+                extra={"guild_id": guild_id, "channel_id": channel_id},
+            )
+            return await progress_msg.edit(
+                content=f"**Exporting {label}…**\nDB read failed while loading existing rows."
+            )
 
         # 2) Fill missing (optional)
         missing_found = 0
         scanned = 0
         if fill_missing and hasattr(target, "history"):
-            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
-            batch_rows: list[message_archive.ArchivedMessage] = []
             try:
-                async for msg in target.history(limit=None, oldest_first=True):  # type: ignore[attr-defined]
-                    scanned += 1
-                    if msg.id in existing_ids:
-                        if scanned % 250 == 0:
-                            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
-                        continue
-
-                    try:
-                        row = message_archive.from_discord_message(msg)
-                    except Exception as exc:
-                        log.debug(
-                            "backread.export.from_message_failed",
-                            extra={"channel_id": channel_id, "msg_id": msg.id, "err": str(exc)},
-                        )
-                        if scanned % 250 == 0:
-                            await _edit("Scanning Discord history for gaps…", found=missing_found, scanned=scanned)
-                        continue
-
-                    batch_rows.append(row)
-                    existing_ids.add(msg.id)
-                    missing_found += 1
-
-                    if len(batch_rows) >= 200:
-                        message_archive.upsert_many(batch_rows)
-                        batch_rows.clear()
-                        await _edit("Filling gaps (writing batch)…", found=missing_found, scanned=scanned)
-
-                if batch_rows:
-                    message_archive.upsert_many(batch_rows)
-                    batch_rows.clear()
-                    await _edit("Filling gaps (finalize)…", found=missing_found, scanned=scanned)
-
+                missing_found, scanned = await self._fill_missing_history(
+                    target,
+                    existing_ids=existing_ids,
+                    progress_cb=lambda stage, found, scan: _edit(
+                        stage, found=found, scanned=scan
+                    ),
+                )
             except discord.Forbidden:
                 return await progress_msg.edit(
                     content=f"**Exporting {label}…**\nForbidden: need **Read Message History**."
                 )
             except discord.HTTPException as exc:
-                log.exception("backread.export.history_http", extra={"status": getattr(exc, 'status', '?')})
+                log.exception(
+                    "backread.export.history_http",
+                    extra={"status": getattr(exc, "status", "?")},
+                )
                 return await progress_msg.edit(
-                    content=f"**Exporting {label}…**\nDiscord API error while reading history (HTTP {getattr(exc, 'status', '?')})."
+                    content=(
+                        f"**Exporting {label}…**\nDiscord API error while reading history (HTTP {getattr(exc, 'status', '?')} )."
+                    )
                 )
 
         # 3) Dump to CSV from DB (authoritative)
@@ -434,6 +408,254 @@ class BackreadCog(commands.Cog):
         except Exception:
             # Fallback: send a new followup with the file if editing with attachment fails
             await interaction.followup.send("\n".join(summary), file=file, ephemeral=True)
+
+
+    # ------------------------
+    # /backread forum_scan
+    # ------------------------
+    @group.command(
+        name="forum_scan",
+        description="Fill missing messages for all threads in a forum channel.",
+    )
+    @app_commands.describe(
+        forum="Forum parent channel to scan for missing thread messages.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def forum_scan_cmd(
+        self,
+        interaction: discord.Interaction,
+        forum: discord.ForumChannel,
+    ):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+
+        me = guild.me
+        if not isinstance(me, discord.Member):
+            me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
+
+        can_read, reason = self._can_backread(forum, me)
+        if not can_read:
+            return await interaction.followup.send(
+                f"I can’t read {self._label(forum)}: {reason}.", ephemeral=True
+            )
+
+        threads = await self._gather_threads(forum, include_private=False, me=me)
+        threads = [t for t in threads if isinstance(t, discord.Thread)]
+        if not threads:
+            return await interaction.followup.send(
+                f"No accessible threads found in {self._label(forum)}.", ephemeral=True
+            )
+
+        progress_msg = await interaction.followup.send(
+            f"**Scanning {self._label(forum)}…**\nPreparing threads…", ephemeral=True
+        )
+
+        import time
+
+        last_edit = 0.0
+        threads_total = len(threads)
+        threads_completed = 0
+        total_missing = 0
+        total_scanned = 0
+        skipped: list[str] = []
+        errors: list[str] = []
+
+        async def _edit(
+            *,
+            stage: str,
+            current: str | None,
+            thread_found: int,
+            thread_scanned: int,
+            done: int,
+            missing_sum: int,
+            scanned_sum: int,
+        ):
+            nonlocal last_edit
+            now = time.monotonic()
+            if now - last_edit < 1.0:
+                return
+            parts = [f"**Scanning {self._label(forum)}…**"]
+            if stage:
+                parts.append(f"• {stage}")
+            parts.extend(
+                [
+                    f"• Threads processed: **{done}/{threads_total}**",
+                    f"• Missing messages filled: **{missing_sum:,}**",
+                    f"• Messages scanned: **{scanned_sum:,}**",
+                ]
+            )
+            if current:
+                parts.append(
+                    f"• Current: {current} — {stage} (found {thread_found:,}, scanned {thread_scanned:,})"
+                )
+            if skipped:
+                parts.append(f"• Skipped threads: {len(skipped)}")
+            if errors:
+                parts.append(f"• Errors: {len(errors)}")
+            try:
+                await progress_msg.edit(content="\n".join(parts))
+                last_edit = now
+            except Exception:
+                pass
+        await _edit(
+            stage="Preparing threads…",
+            current=None,
+            thread_found=0,
+            thread_scanned=0,
+            done=threads_completed,
+            missing_sum=total_missing,
+            scanned_sum=total_scanned,
+        )
+
+        thread_summaries: list[tuple[str, int, int]] = []
+
+        for thread in threads:
+            thread_label = self._label(thread)
+            can_read_thread, reason_thread = self._can_backread(thread, me)
+            if not can_read_thread:
+                skipped.append(f"{thread_label} ({reason_thread})")
+                await _edit(
+                    stage="Skipped",
+                    current=None,
+                    thread_found=0,
+                    thread_scanned=0,
+                    done=threads_completed,
+                    missing_sum=total_missing,
+                    scanned_sum=total_scanned,
+                )
+                continue
+
+            try:
+                existing_ids = self._load_existing_ids(guild.id, thread.id)
+            except Exception:
+                log.exception(
+                    "backread.forum_scan.load_existing_failed",
+                    extra={"guild_id": guild.id, "channel_id": thread.id},
+                )
+                errors.append(f"{thread_label} (DB read failed)")
+                await _edit(
+                    stage="DB load failed",
+                    current=thread_label,
+                    thread_found=0,
+                    thread_scanned=0,
+                    done=threads_completed,
+                    missing_sum=total_missing,
+                    scanned_sum=total_scanned,
+                )
+                continue
+
+            async def progress(stage: str, found: int, scanned: int, *, label=thread_label):
+                await _edit(
+                    stage=stage,
+                    current=label,
+                    thread_found=found,
+                    thread_scanned=scanned,
+                    done=threads_completed,
+                    missing_sum=total_missing + found,
+                    scanned_sum=total_scanned + scanned,
+                )
+
+            try:
+                missing_found, scanned_count = await self._fill_missing_history(
+                    thread,
+                    existing_ids=existing_ids,
+                    progress_cb=progress,
+                )
+            except discord.Forbidden:
+                skipped.append(f"{thread_label} (missing Read Message History)")
+                await _edit(
+                    stage="Forbidden",
+                    current=None,
+                    thread_found=0,
+                    thread_scanned=0,
+                    done=threads_completed,
+                    missing_sum=total_missing,
+                    scanned_sum=total_scanned,
+                )
+                continue
+            except discord.HTTPException as exc:
+                log.exception(
+                    "backread.forum_scan.history_http",
+                    extra={"status": getattr(exc, "status", "?"), "channel_id": thread.id},
+                )
+                errors.append(
+                    f"{thread_label} (Discord API HTTP {getattr(exc, 'status', '?')})"
+                )
+                await _edit(
+                    stage="Discord API error",
+                    current=thread_label,
+                    thread_found=0,
+                    thread_scanned=0,
+                    done=threads_completed,
+                    missing_sum=total_missing,
+                    scanned_sum=total_scanned,
+                )
+                continue
+            except Exception:
+                log.exception(
+                    "backread.forum_scan.thread_error",
+                    extra={"guild_id": guild.id, "channel_id": thread.id},
+                )
+                errors.append(f"{thread_label} (unexpected error)")
+                await _edit(
+                    stage="Unexpected error",
+                    current=thread_label,
+                    thread_found=0,
+                    thread_scanned=0,
+                    done=threads_completed,
+                    missing_sum=total_missing,
+                    scanned_sum=total_scanned,
+                )
+                continue
+
+            threads_completed += 1
+            total_missing += missing_found
+            total_scanned += scanned_count
+            thread_summaries.append((thread_label, missing_found, scanned_count))
+
+            await _edit(
+                stage="Completed",
+                current=thread_label,
+                thread_found=missing_found,
+                thread_scanned=scanned_count,
+                done=threads_completed,
+                missing_sum=total_missing,
+                scanned_sum=total_scanned,
+            )
+
+        summary_lines = [
+            f"**Forum scan complete for {self._label(forum)}.**",
+            f"• Threads processed: **{threads_completed}/{threads_total}**",
+            f"• Missing messages filled: **{total_missing:,}**",
+            f"• Messages scanned: **{total_scanned:,}**",
+        ]
+
+        if thread_summaries:
+            top = sorted(thread_summaries, key=lambda item: item[1], reverse=True)[:5]
+            preview = ", ".join(
+                f"{label}: +{missing:,}" for label, missing, _ in top if missing
+            )
+            if preview:
+                summary_lines.append(f"• Top fills: {preview}")
+
+        if skipped:
+            preview = ", ".join(skipped[:5])
+            if len(skipped) > 5:
+                preview += ", …"
+            summary_lines.append(f"• Skipped: {preview}")
+
+        if errors:
+            preview = "; ".join(errors[:3])
+            if len(errors) > 3:
+                preview += "; …"
+            summary_lines.append(f"• Errors: {preview}")
+
+        await progress_msg.edit(content="\n".join(summary_lines))
 
     # ------------------------
     # /backread audit
@@ -597,6 +819,75 @@ class BackreadCog(commands.Cog):
             f"• Unique users: **{user_count:,}**",
         ]
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+    def _load_existing_ids(self, guild_id: int, channel_id: int) -> set[int]:
+        """Fetch all archived message IDs for a channel from the SQLite archive."""
+        existing_ids: set[int] = set()
+        con = message_archive.get_connection()
+        with con:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT message_id FROM message_archive WHERE guild_id=? AND channel_id=?",
+                (guild_id, channel_id),
+            )
+            for (mid,) in cur.fetchall():
+                existing_ids.add(int(mid))
+        return existing_ids
+
+    async def _fill_missing_history(
+        self,
+        target: discord.abc.Messageable,
+        *,
+        existing_ids: set[int],
+        progress_cb: Optional[Callable[[str, int, int], Awaitable[None]]] = None,
+    ) -> tuple[int, int]:
+        """Scan Discord history for a channel/thread and upsert any missing messages."""
+        if not hasattr(target, "history"):
+            return 0, 0
+
+        missing_found = 0
+        scanned = 0
+        batch_rows: list[message_archive.ArchivedMessage] = []
+
+        if progress_cb:
+            await progress_cb("Scanning Discord history for gaps…", missing_found, scanned)
+
+        async for msg in target.history(limit=None, oldest_first=True):  # type: ignore[attr-defined]
+            scanned += 1
+            if msg.id in existing_ids:
+                if progress_cb and scanned % 250 == 0:
+                    await progress_cb("Scanning Discord history for gaps…", missing_found, scanned)
+                continue
+
+            try:
+                row = message_archive.from_discord_message(msg)
+            except Exception as exc:
+                log.debug(
+                    "backread.fill.from_message_failed",
+                    extra={"channel_id": getattr(target, "id", None), "msg_id": msg.id, "err": str(exc)},
+                )
+                if progress_cb and scanned % 250 == 0:
+                    await progress_cb("Scanning Discord history for gaps…", missing_found, scanned)
+                continue
+
+            batch_rows.append(row)
+            existing_ids.add(msg.id)
+            missing_found += 1
+
+            if len(batch_rows) >= 200:
+                message_archive.upsert_many(batch_rows)
+                batch_rows.clear()
+                if progress_cb:
+                    await progress_cb("Filling gaps (writing batch)…", missing_found, scanned)
+
+        if batch_rows:
+            message_archive.upsert_many(batch_rows)
+            batch_rows.clear()
+            if progress_cb:
+                await progress_cb("Filling gaps (finalize)…", missing_found, scanned)
+
+        return missing_found, scanned
 
     # ---- DB stats helper
     def _fetch_archive_stats(self, guild_id: int) -> Tuple[int, int, int]:
