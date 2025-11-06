@@ -3,10 +3,57 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Tuple, Dict, Any
 
+# Public DB surface for other modules (e.g., cogs) to use.
+# connect() must return a sqlite3.Connection-compatible object.
 from ..db import connect
 
+
+# ---- Public helpers expected by the cog ----
+
+def get_connection():
+    """
+    Return a *new* connection to the archive DB.
+
+    Consumers that need a context-managed connection can do:
+        with get_connection() as con:
+            ...
+    """
+    return connect()
+
+
+def stats_summary(guild_id: int) -> Dict[str, int]:
+    """
+    Return archive stats for a guild:
+        {"messages": <int>, "channels": <int>, "users": <int>}
+
+    Uses the existing `message_archive` table and its columns.
+    """
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM message_archive WHERE guild_id=?",
+            (guild_id,),
+        )
+        messages = int(cur.fetchone()[0])
+
+        cur.execute(
+            "SELECT COUNT(DISTINCT channel_id) FROM message_archive WHERE guild_id=?",
+            (guild_id,),
+        )
+        channels = int(cur.fetchone()[0])
+
+        cur.execute(
+            "SELECT COUNT(DISTINCT author_id) FROM message_archive WHERE guild_id=?",
+            (guild_id,),
+        )
+        users = int(cur.fetchone()[0])
+
+    return {"messages": messages, "channels": channels, "users": users}
+
+
+# ---- Existing archiver types & functions ----
 
 @dataclass(slots=True)
 class ArchivedMessage:
