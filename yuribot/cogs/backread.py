@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -15,19 +15,20 @@ from ..utils.admin import ensure_guild
 
 log = logging.getLogger(__name__)
 
-# Tune as needed
+# Tuning
 BATCH_SIZE = 100
 DELAY_BETWEEN_CHANNELS = 0.5
 PROGRESS_LOG_EVERY_SEC = 2.0
 PROGRESS_LOG_BATCH = 5000  # also log every ~N messages per channel
 
-# --- Archive DB discovery + schema knobs (adjust if your module differs) ---
-ARCHIVE_DB_PATH_ATTR = "DB_PATH"            # e.g., message_archive.DB_PATH = "/path/to/archive.sqlite"
+# ---- Adjust if your archive module uses different names/schema ----
+ARCHIVE_DB_PATH_ATTR = "DB_PATH"            # e.g., message_archive.DB_PATH
 ARCHIVE_GET_CONN_ATTR = "get_connection"    # e.g., def get_connection() -> sqlite3.Connection
 ARCHIVE_TABLE = "messages"
 COL_GUILD_ID = "guild_id"
 COL_CHANNEL_ID = "channel_id"
 COL_AUTHOR_ID = "author_id"
+# -------------------------------------------------------------------
 
 
 @dataclass
@@ -253,7 +254,7 @@ class BackreadCog(commands.Cog):
         ]
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
-    # ---- implementation detail: discover DB and query counts
+    # ---- DB stats helper
     def _fetch_archive_stats(self, guild_id: int) -> Tuple[int, int, int]:
         """
         Returns (messages, distinct channels, distinct users) for the given guild_id.
@@ -262,12 +263,12 @@ class BackreadCog(commands.Cog):
           2) message_archive.get_connection() -> sqlite3.Connection
           3) sqlite3.connect(message_archive.DB_PATH)
         """
-        # Path 1: a helper that may exist in your module
+        # 1) helper in your module
         if hasattr(message_archive, "stats_summary"):
             summary = message_archive.stats_summary(guild_id)  # type: ignore[attr-defined]
             return int(summary["messages"]), int(summary["channels"]), int(summary["users"])
 
-        # Path 2 or 3: raw SQL
+        # 2/3) raw SQL
         conn = None
         close_after = False
 
@@ -285,8 +286,6 @@ class BackreadCog(commands.Cog):
 
         try:
             cur = conn.cursor()
-            # Validate the columns exist (optional—but helps catch schema mismatches)
-            # If your schema differs, adjust ARCHIVE_TABLE/COL_* above.
             sql_msg = f"SELECT COUNT(*) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
             sql_ch = f"SELECT COUNT(DISTINCT {COL_CHANNEL_ID}) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
             sql_user = f"SELECT COUNT(DISTINCT {COL_AUTHOR_ID}) FROM {ARCHIVE_TABLE} WHERE {COL_GUILD_ID}=?"
@@ -303,7 +302,7 @@ class BackreadCog(commands.Cog):
             return msg_count, ch_count, user_count
         finally:
             try:
-                cur.close()  # type: ignore[has-type]
+                cur.close()  # type: ignore[name-defined]
             except Exception:
                 pass
             if close_after and conn:
@@ -343,8 +342,7 @@ class BackreadCog(commands.Cog):
                     extra={"guild_id": channel.guild.id, "channel_id": channel.id, "archived": "public"},
                 )
 
-        # Private archived threads:
-        # Only pass private=True for TextChannel — ForumChannel private archived not supported on your lib version.
+        # Private archived threads: only pass private=True for TextChannel.
         if include_private and isinstance(channel, discord.TextChannel):
             perms = channel.permissions_for(me)
             if not perms.manage_threads:
@@ -370,6 +368,7 @@ class BackreadCog(commands.Cog):
                         extra={"guild_id": channel.guild.id, "channel_id": channel.id},
                     )
         elif include_private and isinstance(channel, discord.ForumChannel):
+            # Not supported in the library version you’re on.
             log.info(
                 "backread.threads.private_forum_unsupported",
                 extra={"guild_id": channel.guild.id, "channel_id": channel.id},
@@ -599,7 +598,7 @@ class BackreadCog(commands.Cog):
             extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
         )
 
-    @group.error
+    # Per-command error handler (correct signature for bound method)
     @start.error
     async def _on_start_error(
         self,
