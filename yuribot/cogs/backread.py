@@ -470,4 +470,52 @@ class BackreadCog(commands.Cog):
         message_archive.upsert_many([row])
         log.debug(
             "backread.live.edit_stored",
-            extra={"guild_id": row.guild_id, "channel_id": row.channel_
+            extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
+        )
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        if payload.guild_id is None:
+            return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(payload.channel_id)
+            except Exception:
+                return
+
+        if not hasattr(channel, "fetch_message"):
+            return
+
+        try:
+            message = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
+        except Exception:
+            return
+
+        try:
+            row = message_archive.from_discord_message(message)
+        except Exception:
+            return
+        message_archive.upsert_many([row])
+        log.debug(
+            "backread.live.raw_edit_stored",
+            extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
+        )
+
+    @start.error
+    async def _on_start_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message(
+                "You need **Manage Server** to run this.", ephemeral=True
+            )
+        else:
+            raise error
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(BackreadCog(bot))
