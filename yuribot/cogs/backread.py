@@ -224,23 +224,76 @@ class BackreadCog(commands.Cog):
         guild_id = channel.guild.id  # type: ignore[assignment]
         last_id = message_archive.max_message_id(guild_id, channel.id)  # type: ignore[arg-type]
 
+        log.debug(
+            "backread.history.begin",
+            extra={
+                "guild_id": guild_id,
+                "channel_id": channel.id,
+                "label": label,
+                "last_id": last_id,
+                "is_thread": is_thread,
+            },
+        )
+
         history_kwargs = {"limit": None, "oldest_first": True}
         if last_id:
             history_kwargs["after"] = discord.Object(id=last_id)
 
         batch: List[message_archive.ArchivedMessage] = []
         stored = 0
+        latest_seen_id = last_id
+        seen_ids: set[int] = set()
         try:
             async for message in channel.history(**history_kwargs):  # type: ignore[attr-defined]
+                if latest_seen_id is not None and message.id <= latest_seen_id:
+                    log.debug(
+                        "backread.history.skip_existing",
+                        extra={
+                            "guild_id": guild_id,
+                            "channel_id": channel.id,
+                            "label": label,
+                            "message_id": message.id,
+                        },
+                    )
+                    continue
                 try:
                     row = message_archive.from_discord_message(message)
                 except Exception as exc:
                     stats.errors.append(f"{label}: {exc}")
                     continue
 
+                if row.message_id in seen_ids:
+                    log.debug(
+                        "backread.history.skip_duplicate_batch",
+                        extra={
+                            "guild_id": guild_id,
+                            "channel_id": channel.id,
+                            "label": label,
+                            "message_id": row.message_id,
+                        },
+                    )
+                    continue
+
+                seen_ids.add(row.message_id)
+
                 batch.append(row)
                 if len(batch) >= BATCH_SIZE:
-                    stored += message_archive.upsert_many(batch)
+                    first_batch_id = batch[0].message_id
+                    last_batch_id = batch[-1].message_id
+                    stored_now = message_archive.upsert_many(batch)
+                    stored += stored_now
+                    latest_seen_id = max(latest_seen_id or 0, last_batch_id)
+                    log.debug(
+                        "backread.history.store_batch",
+                        extra={
+                            "guild_id": guild_id,
+                            "channel_id": channel.id,
+                            "label": label,
+                            "count": stored_now,
+                            "first_id": first_batch_id,
+                            "last_id": last_batch_id,
+                        },
+                    )
                     batch.clear()
         except discord.Forbidden:
             stats.skipped.append(f"{label} (forbidden)")
@@ -255,13 +308,40 @@ class BackreadCog(commands.Cog):
             stats.errors.append(f"{label}: {exc}")
         finally:
             if batch:
-                stored += message_archive.upsert_many(batch)
+                first_batch_id = batch[0].message_id
+                last_batch_id = batch[-1].message_id
+                stored_now = message_archive.upsert_many(batch)
+                stored += stored_now
+                latest_seen_id = max(latest_seen_id or 0, last_batch_id)
+                log.debug(
+                    "backread.history.store_batch",
+                    extra={
+                        "guild_id": guild_id,
+                        "channel_id": channel.id,
+                        "label": label,
+                        "count": stored_now,
+                        "first_id": first_batch_id,
+                        "last_id": last_batch_id,
+                    },
+                )
 
         stats.messages_archived += stored
         if is_thread:
             stats.threads_scanned += 1
         else:
             stats.channels_scanned += 1
+
+        log.debug(
+            "backread.history.complete",
+            extra={
+                "guild_id": guild_id,
+                "channel_id": channel.id,
+                "label": label,
+                "stored": stored,
+                "latest_seen_id": latest_seen_id,
+                "is_thread": is_thread,
+            },
+        )
 
     @staticmethod
     def _label(channel: discord.abc.GuildChannel) -> str:
@@ -280,7 +360,26 @@ class BackreadCog(commands.Cog):
             row = message_archive.from_discord_message(message)
         except Exception:
             return
+        if message_archive.has_message(row.message_id):
+            log.debug(
+                "backread.live.skip_existing",
+                extra={
+                    "guild_id": row.guild_id,
+                    "channel_id": row.channel_id,
+                    "message_id": row.message_id,
+                },
+            )
+            return
+
         message_archive.upsert_many([row])
+        log.debug(
+            "backread.live.stored",
+            extra={
+                "guild_id": row.guild_id,
+                "channel_id": row.channel_id,
+                "message_id": row.message_id,
+            },
+        )
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
@@ -291,6 +390,14 @@ class BackreadCog(commands.Cog):
         except Exception:
             return
         message_archive.upsert_many([row])
+        log.debug(
+            "backread.live.edit_stored",
+            extra={
+                "guild_id": row.guild_id,
+                "channel_id": row.channel_id,
+                "message_id": row.message_id,
+            },
+        )
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
@@ -317,6 +424,14 @@ class BackreadCog(commands.Cog):
         except Exception:
             return
         message_archive.upsert_many([row])
+        log.debug(
+            "backread.live.raw_edit_stored",
+            extra={
+                "guild_id": row.guild_id,
+                "channel_id": row.channel_id,
+                "message_id": row.message_id,
+            },
+        )
 
     @start.error
     async def _on_start_error(
