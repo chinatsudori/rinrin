@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from typing import Iterable, List, Tuple
 
 from ..db import connect
