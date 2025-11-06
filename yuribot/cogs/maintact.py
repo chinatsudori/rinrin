@@ -14,6 +14,7 @@ from discord.ext import commands
 from ..models import activity, activity_report, message_archive, rpg
 from ..strings import S
 from ..utils.maintact import month_from_day
+from .admin import AdminCog
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +44,11 @@ class MaintActivityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    group = app_commands.Group(name="maint", description="Admin: activity maintenance")
+    group = app_commands.Group(
+        name="maint",
+        description="Admin: activity maintenance",
+        parent=AdminCog.group,
+    )
 
     @group.command(
         name="activity_report",

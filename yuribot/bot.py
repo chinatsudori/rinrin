@@ -134,6 +134,7 @@ class YuriBot(commands.Bot):
         # 2) Load cogs to build the in-process command tree
         extensions: Sequence[str] = (
             "yuribot.cogs.admin",
+            "yuribot.cogs.maintact",
             "yuribot.cogs.modlog",
             "yuribot.cogs.botlog",
             "yuribot.cogs.welcome",
