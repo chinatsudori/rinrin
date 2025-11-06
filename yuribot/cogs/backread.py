@@ -14,8 +14,11 @@ from ..utils.admin import ensure_guild
 
 log = logging.getLogger(__name__)
 
+# Tune as needed
 BATCH_SIZE = 100
 DELAY_BETWEEN_CHANNELS = 0.5
+PROGRESS_LOG_EVERY_SEC = 2.0
+PROGRESS_LOG_BATCH = 5000  # also log every ~N messages per channel
 
 
 @dataclass
@@ -25,6 +28,51 @@ class BackreadStats:
     messages_archived: int = 0
     skipped: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+
+
+class ProgressReporter:
+    """Periodic console logs and (optional) ephemeral status edits."""
+
+    def __init__(self, stats: BackreadStats, *, log_every_sec: float = PROGRESS_LOG_EVERY_SEC):
+        self.stats = stats
+        self.log_every_sec = log_every_sec
+        self._task: Optional[asyncio.Task] = None
+        self._running = asyncio.Event()
+        self._running.set()
+        self._edit_cb = None  # async def() -> None
+
+    def set_edit_callback(self, cb):
+        self._edit_cb = cb
+
+    async def _run(self):
+        while self._running.is_set():
+            log.info(
+                "backread.progress",
+                extra={
+                    "channels_scanned": self.stats.channels_scanned,
+                    "threads_scanned": self.stats.threads_scanned,
+                    "messages_archived": self.stats.messages_archived,
+                    "skipped": len(self.stats.skipped),
+                    "errors": len(self.stats.errors),
+                },
+            )
+            if self._edit_cb:
+                try:
+                    await self._edit_cb()
+                except Exception:
+                    log.debug("backread.progress.ephemeral_edit_failed", exc_info=True)
+            await asyncio.sleep(self.log_every_sec)
+
+    async def start(self):
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        self._running.clear()
+        if self._task:
+            try:
+                await asyncio.wait_for(self._task, timeout=2.0)
+            except asyncio.TimeoutError:
+                self._task.cancel()
 
 
 class BackreadCog(commands.Cog):
@@ -53,6 +101,7 @@ class BackreadCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+        progress_msg = await interaction.followup.send("Starting backread…", ephemeral=True)
 
         guild = interaction.guild
         if guild is None:
@@ -68,61 +117,83 @@ class BackreadCog(commands.Cog):
                     "Unable to resolve my member object for permission checks.", ephemeral=True
                 )
 
+        # Target discovery: text + forum channels
         targets: List[discord.abc.GuildChannel] = []
         if channel:
             targets.append(channel)
         else:
             targets.extend(guild.text_channels)
 
+            # discord.py versions differ on guild.forum_channels
             try:
                 forum_channels = list(guild.forum_channels)  # type: ignore[attr-defined]
             except AttributeError:
                 forum_channels = []
-
             if not forum_channels:
-                forum_channels = [
-                    ch for ch in guild.channels if isinstance(ch, discord.ForumChannel)
-                ]
-
+                forum_channels = [ch for ch in guild.channels if isinstance(ch, discord.ForumChannel)]
             targets.extend(forum_channels)
 
         stats = BackreadStats()
-        for text_channel in targets:
-            can_read, reason = self._can_backread(text_channel, me)
-            label = self._label(text_channel)
-            if not can_read:
-                stats.skipped.append(f"{label} ({reason})")
-                continue
+        reporter = ProgressReporter(stats, log_every_sec=PROGRESS_LOG_EVERY_SEC)
 
-            log.info(
-                "backread.channel.start",
-                extra={"guild_id": guild.id, "channel_id": text_channel.id, "label": label},
-            )
+        async def _edit_progress():
+            lines = [
+                f"**Backreading…**",
+                f"Archived: **{stats.messages_archived}** messages",
+                f"Scanned: **{stats.channels_scanned}** channels, **{stats.threads_scanned}** threads",
+            ]
+            if stats.skipped:
+                lines.append(f"Skipped (perm): {len(stats.skipped)}")
+            if stats.errors:
+                lines.append(f"Errors: {len(stats.errors)}")
+            try:
+                await progress_msg.edit(content="\n".join(lines))
+            except Exception:
+                log.debug("backread.progress.ephemeral_edit_failed", exc_info=True)
 
-            counted_by_history = False
-            if isinstance(text_channel, discord.TextChannel):
-                await self._archive_history(text_channel, stats, is_thread=False)
-                counted_by_history = True
+        reporter.set_edit_callback(_edit_progress)
+        await reporter.start()
 
-            if include_archived_threads or include_private_threads:
-                threads = await self._gather_threads(text_channel, include_private_threads, me)
-            else:
-                threads = [t for t in getattr(text_channel, "threads", []) if isinstance(t, discord.Thread)]
-
-            for thread in threads:
-                t_can_read, t_reason = self._can_backread(thread, me)
-                t_label = self._label(thread)
-                if not t_can_read:
-                    stats.skipped.append(f"{t_label} ({t_reason})")
+        try:
+            for text_channel in targets:
+                can_read, reason = self._can_backread(text_channel, me)
+                label = self._label(text_channel)
+                if not can_read:
+                    stats.skipped.append(f"{label} ({reason})")
                     continue
-                await self._archive_history(thread, stats, is_thread=True)
+
+                log.info(
+                    "backread.channel.start",
+                    extra={"guild_id": guild.id, "channel_id": text_channel.id, "label": label},
+                )
+
+                # Archive the channel's own history if it supports .history()
+                if hasattr(text_channel, "history"):
+                    await self._archive_history(text_channel, stats, is_thread=False)
+
+                # Threads
+                if include_archived_threads or include_private_threads:
+                    threads = await self._gather_threads(text_channel, include_private_threads, me)
+                else:
+                    threads = [
+                        t for t in getattr(text_channel, "threads", []) if isinstance(t, discord.Thread)
+                    ]
+
+                for thread in threads:
+                    t_can_read, t_reason = self._can_backread(thread, me)
+                    t_label = self._label(thread)
+                    if not t_can_read:
+                        stats.skipped.append(f"{t_label} ({t_reason})")
+                        continue
+                    await self._archive_history(thread, stats, is_thread=True)
+                    await asyncio.sleep(DELAY_BETWEEN_CHANNELS)
+
                 await asyncio.sleep(DELAY_BETWEEN_CHANNELS)
 
-            if not counted_by_history:
-                stats.channels_scanned += 1
+        finally:
+            await reporter.stop()
 
-            await asyncio.sleep(DELAY_BETWEEN_CHANNELS)
-
+        # Final summary
         summary_lines = [
             f"Archived **{stats.messages_archived}** messages.",
             f"Scanned **{stats.channels_scanned}** channels and **{stats.threads_scanned}** threads.",
@@ -139,7 +210,10 @@ class BackreadCog(commands.Cog):
                 error_preview += "; ..."
             summary_lines.append(f"Errors: {error_preview}")
 
-        await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
+        try:
+            await progress_msg.edit(content="\n".join(summary_lines))
+        except Exception:
+            await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
 
     async def _gather_threads(
         self,
@@ -147,6 +221,7 @@ class BackreadCog(commands.Cog):
         include_private: bool,
         me: discord.Member,
     ) -> List[discord.Thread]:
+        """Collect live and archived threads, handling API differences for forums."""
         threads: List[discord.Thread] = [
             t for t in getattr(channel, "threads", []) if isinstance(t, discord.Thread)
         ]
@@ -154,6 +229,7 @@ class BackreadCog(commands.Cog):
 
         archived_iter = getattr(channel, "archived_threads", None)
         if callable(archived_iter):
+            # Public archived threads (supported for TextChannel & ForumChannel)
             try:
                 async for thread in archived_iter(limit=None):
                     if isinstance(thread, discord.Thread) and thread.id not in seen:
@@ -170,7 +246,9 @@ class BackreadCog(commands.Cog):
                     extra={"guild_id": channel.guild.id, "channel_id": channel.id, "archived": "public"},
                 )
 
-        if include_private:
+        # Private archived threads:
+        # Only pass private=True for TextChannel — ForumChannel private archived not supported on your lib version.
+        if include_private and isinstance(channel, discord.TextChannel):
             perms = channel.permissions_for(me)
             if not perms.manage_threads:
                 log.warning(
@@ -194,6 +272,11 @@ class BackreadCog(commands.Cog):
                         "backread.threads.private_error",
                         extra={"guild_id": channel.guild.id, "channel_id": channel.id},
                     )
+        elif include_private and isinstance(channel, discord.ForumChannel):
+            log.info(
+                "backread.threads.private_forum_unsupported",
+                extra={"guild_id": channel.guild.id, "channel_id": channel.id},
+            )
 
         return threads
 
@@ -220,6 +303,7 @@ class BackreadCog(commands.Cog):
         *,
         is_thread: bool,
     ) -> None:
+        """Stream a channel/thread history into the archive, with batch writes and progress logs."""
         label = self._label(channel)
         guild_id = channel.guild.id  # type: ignore[assignment]
         last_id = message_archive.max_message_id(guild_id, channel.id)  # type: ignore[arg-type]
@@ -244,16 +328,12 @@ class BackreadCog(commands.Cog):
         latest_seen_id = last_id
         seen_ids: set[int] = set()
         try:
+            # type: ignore[attr-defined] to satisfy type checker on .history
             async for message in channel.history(**history_kwargs):  # type: ignore[attr-defined]
                 if latest_seen_id is not None and message.id <= latest_seen_id:
                     log.debug(
                         "backread.history.skip_existing",
-                        extra={
-                            "guild_id": guild_id,
-                            "channel_id": channel.id,
-                            "label": label,
-                            "message_id": message.id,
-                        },
+                        extra={"guild_id": guild_id, "channel_id": channel.id, "label": label, "message_id": message.id},
                     )
                     continue
                 try:
@@ -265,24 +345,30 @@ class BackreadCog(commands.Cog):
                 if row.message_id in seen_ids:
                     log.debug(
                         "backread.history.skip_duplicate_batch",
-                        extra={
-                            "guild_id": guild_id,
-                            "channel_id": channel.id,
-                            "label": label,
-                            "message_id": row.message_id,
-                        },
+                        extra={"guild_id": guild_id, "channel_id": channel.id, "label": label, "message_id": row.message_id},
                     )
                     continue
 
                 seen_ids.add(row.message_id)
-
                 batch.append(row)
+
                 if len(batch) >= BATCH_SIZE:
                     first_batch_id = batch[0].message_id
                     last_batch_id = batch[-1].message_id
                     stored_now = message_archive.upsert_many(batch)
                     stored += stored_now
                     latest_seen_id = max(latest_seen_id or 0, last_batch_id)
+                    if stored % PROGRESS_LOG_BATCH < BATCH_SIZE:
+                        log.info(
+                            "backread.history.progress",
+                            extra={
+                                "guild_id": guild_id,
+                                "channel_id": channel.id,
+                                "label": label,
+                                "stored_so_far": stored,
+                                "latest_seen_id": latest_seen_id,
+                            },
+                        )
                     log.debug(
                         "backread.history.store_batch",
                         extra={
@@ -300,12 +386,12 @@ class BackreadCog(commands.Cog):
             return
         except discord.HTTPException as exc:
             stats.errors.append(f"{label}: HTTP {getattr(exc, 'status', '?')}")
-        except Exception as exc:  # pragma: no cover - safety net
+        except Exception:  # pragma: no cover - safety net
             log.exception(
                 "backread.history.error",
                 extra={"guild_id": guild_id, "channel_id": channel.id, "label": label},
             )
-            stats.errors.append(f"{label}: {exc}")
+            stats.errors.append(f"{label}: unexpected error")
         finally:
             if batch:
                 first_batch_id = batch[0].message_id
@@ -363,22 +449,14 @@ class BackreadCog(commands.Cog):
         if message_archive.has_message(row.message_id):
             log.debug(
                 "backread.live.skip_existing",
-                extra={
-                    "guild_id": row.guild_id,
-                    "channel_id": row.channel_id,
-                    "message_id": row.message_id,
-                },
+                extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
             )
             return
 
         message_archive.upsert_many([row])
         log.debug(
             "backread.live.stored",
-            extra={
-                "guild_id": row.guild_id,
-                "channel_id": row.channel_id,
-                "message_id": row.message_id,
-            },
+            extra={"guild_id": row.guild_id, "channel_id": row.channel_id, "message_id": row.message_id},
         )
 
     @commands.Cog.listener()
@@ -392,60 +470,4 @@ class BackreadCog(commands.Cog):
         message_archive.upsert_many([row])
         log.debug(
             "backread.live.edit_stored",
-            extra={
-                "guild_id": row.guild_id,
-                "channel_id": row.channel_id,
-                "message_id": row.message_id,
-            },
-        )
-
-    @commands.Cog.listener()
-    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
-        if payload.guild_id is None:
-            return
-
-        channel = self.bot.get_channel(payload.channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(payload.channel_id)
-            except Exception:
-                return
-
-        if not hasattr(channel, "fetch_message"):
-            return
-
-        try:
-            message = await channel.fetch_message(payload.message_id)  # type: ignore[attr-defined]
-        except Exception:
-            return
-
-        try:
-            row = message_archive.from_discord_message(message)
-        except Exception:
-            return
-        message_archive.upsert_many([row])
-        log.debug(
-            "backread.live.raw_edit_stored",
-            extra={
-                "guild_id": row.guild_id,
-                "channel_id": row.channel_id,
-                "message_id": row.message_id,
-            },
-        )
-
-    @start.error
-    async def _on_start_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ):
-        if isinstance(error, app_commands.errors.MissingPermissions):
-            await interaction.response.send_message(
-                "You need **Manage Server** to run this.", ephemeral=True
-            )
-        else:
-            raise error
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(BackreadCog(bot))
+            extra={"guild_id": row.guild_id, "channel_id": row.channel_
