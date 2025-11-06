@@ -86,26 +86,23 @@ class ProgressReporter:
             except asyncio.TimeoutError:
                 self._task.cancel()
 
+group = property(lambda self: self.__dict__["group"])
 
 class BackreadCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._parent_group: app_commands.Group | None = None
-
-    # your full group and commands already exist; keep them
-    group = app_commands.Group(name="backread", description="Archive server message history")
+        # was: class-level `group = app_commands.Group(...)`
+        self.group = app_commands.Group(name="backread", description="Archive server message history")
 
     async def cog_load(self) -> None:
-        """Attach /backread under /admin if AdminCog is present; else add to root."""
         admin_cog = self.bot.get_cog("AdminCog")
         if isinstance(admin_cog, AdminCog):
-            # ensure no duplicate
             try: admin_cog.group.remove_command(self.group.name)
             except (KeyError, AttributeError): pass
             admin_cog.group.add_command(self.group)
             self._parent_group = admin_cog.group
         else:
-            # root fallback
             try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (KeyError, AttributeError): pass
             self.bot.tree.add_command(self.group)
@@ -118,6 +115,7 @@ class BackreadCog(commands.Cog):
         else:
             try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (KeyError, AttributeError): pass
+
     # ------------------------
     # /backread start
     # ------------------------

@@ -19,13 +19,16 @@ from ..utils.cleanup import (
 log = logging.getLogger(__name__)
 
 
+_CLEANUP_GROUP = app_commands.Group(name="cleanup", description="Mod cleanup utilities")
+group = property(lambda self: self.__dict__["group"])
+
 class CleanupCog(commands.Cog):
-    """Mod cleanup utilities."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._parent_group: app_commands.Group | None = None
-
-    group = app_commands.Group(name="cleanup", description="Mod cleanup utilities")
+        self.group = app_commands.Group(name="cleanup", description="Mod cleanup utilities")
+        for cmd in _CLEANUP_GROUP.commands:
+            self.group.add_command(cmd)
 
     async def cog_load(self) -> None:
         admin_cog = self.bot.get_cog("AdminCog")
@@ -47,7 +50,6 @@ class CleanupCog(commands.Cog):
         else:
             try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (KeyError, AttributeError): pass
-
 
     @group.command(
         name="mupurge",

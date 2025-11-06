@@ -39,13 +39,15 @@ def read_csv(attachment: discord.Attachment):
     return csv.reader(io.StringIO(text))
 
 
+_MAINT_GROUP = app_commands.Group(name="maint", description="Admin: activity maintenance")
+
 class MaintActivityCog(commands.Cog):
-    """Admin: activity maintenance (CSV import, rebuild, replay)."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._parent_group: app_commands.Group | None = None
-
-    group = app_commands.Group(name="maint", description="Admin: activity maintenance")
+        self.group = app_commands.Group(name="maint", description="Admin: activity maintenance")
+        for cmd in _MAINT_GROUP.commands:
+            self.group.add_command(cmd)
 
     async def cog_load(self) -> None:
         admin_cog = self.bot.get_cog("AdminCog")
@@ -67,7 +69,7 @@ class MaintActivityCog(commands.Cog):
         else:
             try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (KeyError, AttributeError): pass
-
+            
     @app_commands.command(
         name="activity_report",
         description="ADMIN: Generate a full activity analytics report from the archive.",
