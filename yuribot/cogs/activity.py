@@ -476,8 +476,8 @@ class ActivityCog(commands.Cog):
             return await interaction.followup.send("Use YYYY-MM for month.", ephemeral=not post)
 
         # RPG
-        rpg = rpg.get_rpg_progress(gid, uid)
-        lvl, cur, need = rpg.xp_progress(rpg["xp"])
+        progress = rpg.get_rpg_progress(gid, uid)
+        lvl, cur, need = rpg.xp_progress(progress["xp"])
 
         # Totals helper
         def tot(metric: str) -> int:
@@ -522,16 +522,16 @@ class ActivityCog(commands.Cog):
         embed = _build_profile_embed(
             target=target,
             level=lvl,
-            total_xp=rpg["xp"],
+            total_xp=progress["xp"],
             progress_current=cur,
             progress_needed=need,
             stats={
-                "str": rpg["str"],
-                "dex": rpg["dex"],
-                "int": rpg["int"],
-                "wis": rpg["wis"],
-                "cha": rpg["cha"],
-                "vit": rpg["vit"],
+                "str": progress["str"],
+                "dex": progress["dex"],
+                "int": progress["int"],
+                "wis": progress["wis"],
+                "cha": progress["cha"],
+                "vit": progress["vit"],
             },
             engagement_ratio=engagement_ratio,
             reply_density=reply_density,
@@ -590,11 +590,11 @@ class ActivityCog(commands.Cog):
                 return int(row[0]) if row else 0
 
         for uid in sorted(users):
-            rpg = rpg.get_rpg_progress(gid, uid)
+            progress = rpg.get_rpg_progress(gid, uid)
             ch_id = activity.prime_channel_total(gid, uid) or 0
             w.writerow([
-                gid, uid, rpg["level"], rpg["xp"],
-                rpg["str"], rpg["dex"], rpg["int"], rpg["wis"], rpg["cha"], rpg["vit"],
+                gid, uid, progress["level"], progress["xp"],
+                progress["str"], progress["dex"], progress["int"], progress["wis"], progress["cha"], progress["vit"],
                 _tot(uid,"messages"), _tot(uid,"words"), _tot(uid,"mentions"), _tot(uid,"mentions_sent"),
                 _tot(uid,"emoji_chat"), _tot(uid,"emoji_react"), _tot(uid,"reactions_received"),
                 _tot(uid,"voice_minutes"), _tot(uid,"voice_stream_minutes"), _tot(uid,"activity_minutes"), _tot(uid,"activity_joins"),
