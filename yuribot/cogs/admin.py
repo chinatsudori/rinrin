@@ -16,11 +16,18 @@ log = logging.getLogger(__name__)
 
 
 class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
-    """Admin commands: per-club configuration and maintenance."""
+    """
+    Top-level /admin group.
+
+    Other cogs (Backread, MaintActivity, Cleanup) will register their own groups
+    under this one at runtime, e.g. /admin backread …, /admin maint …, etc.
+    """
 
     def __init__(self, bot: commands.Bot):
         super().__init__()
         self.bot = bot
+
+    # ---------------------------- Commands ----------------------------
 
     @app_commands.command(name="club_config", description="Show configured club IDs and assets.")
     @app_commands.describe(post="If true, post publicly in this channel")
@@ -106,3 +113,4 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
+    log.info("Loaded AdminCog")

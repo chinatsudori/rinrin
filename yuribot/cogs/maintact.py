@@ -19,7 +19,6 @@ from .admin import AdminCog
 
 log = logging.getLogger(__name__)
 
-
 def require_manage_guild() -> app_commands.Check:
     async def predicate(interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -29,24 +28,24 @@ def require_manage_guild() -> app_commands.Check:
             await interaction.response.send_message(S("common.need_manage_server"), ephemeral=True)
             return False
         return True
-
     return app_commands.check(predicate)
 
+# Placeholder group for decorators
+_MAINT_GROUP = app_commands.Group(
+    name="maint",
+    description="Admin: activity maintenance",
+)
 
-def read_csv(attachment: discord.Attachment):
-    raw = attachment.read()
-    text = raw.decode("utf-8", errors="replace")
-    return csv.reader(io.StringIO(text))
-
-
-_MAINT_GROUP = app_commands.Group(name="maint", description="Admin: activity maintenance")
 
 class MaintActivityCog(commands.Cog):
+    """Admin tools to import day/month CSVs and rebuild aggregates."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._parent_group: app_commands.Group | None = None
+        self._parent_group: Optional[app_commands.Group] = None
+
         self.group = app_commands.Group(name="maint", description="Admin: activity maintenance")
-        for cmd in _MAINT_GROUP.commands:
+        for cmd in list(_MAINT_GROUP.commands):
             self.group.add_command(cmd)
 
     async def cog_load(self) -> None:
@@ -69,8 +68,10 @@ class MaintActivityCog(commands.Cog):
         else:
             try: self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (KeyError, AttributeError): pass
-            
-    @app_commands.command(
+
+    # ---------------- Commands ----------------
+
+    @_MAINT_GROUP.command(
         name="activity_report",
         description="ADMIN: Generate a full activity analytics report from the archive.",
     )
@@ -110,7 +111,6 @@ class MaintActivityCog(commands.Cog):
 
         json_payload = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
         buffer = io.BytesIO(json_payload.encode("utf-8"))
-        buffer.seek(0)
         filename = f"activity_report_{guild_id}.json"
 
         if apply_rpg_stats:
@@ -134,7 +134,7 @@ class MaintActivityCog(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="import_day_csv", description="ADMIN: import day-scope CSV and rebuild months.")
+    @_MAINT_GROUP.command(name="import_day_csv", description="ADMIN: import day-scope CSV and rebuild months.")
     @app_commands.describe(
         file="CSV exported via /activity export scope=day",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
@@ -194,7 +194,7 @@ class MaintActivityCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="import_month_csv", description="ADMIN: import month-scope CSV (direct month upserts).")
+    @_MAINT_GROUP.command(name="import_month_csv", description="ADMIN: import month-scope CSV (direct month upserts).")
     @app_commands.describe(
         file="CSV exported via /activity export scope=month",
         month="Optional YYYY-MM filter; if set, only rows for this month are imported",
@@ -246,7 +246,7 @@ class MaintActivityCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="rebuild_month", description="ADMIN: rebuild a month aggregate from day table.")
+    @_MAINT_GROUP.command(name="rebuild_month", description="ADMIN: rebuild a month aggregate from day table.")
     @app_commands.describe(month="YYYY-MM")
     @require_manage_guild()
     async def rebuild_month(self, interaction: discord.Interaction, month: str):
@@ -258,7 +258,7 @@ class MaintActivityCog(commands.Cog):
             log.exception("maint.rebuild_month.failed", extra={"guild_id": interaction.guild_id, "month": month})
             await interaction.followup.send(S("common.error_generic"), ephemeral=True)
 
-    @app_commands.command(
+    @_MAINT_GROUP.command(
         name="replay_archive",
         description="ADMIN: Replay archived messages into activity metrics and RPG XP.",
     )
