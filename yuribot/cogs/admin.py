@@ -30,11 +30,16 @@ class AdminCog(commands.Cog):
         # what the library now uses internally.  Use it here so we can register a
         # per-instance copy of the group with the tree.
         group = type(self).group._copy_with(parent=None, binding=self)
-        existing = self.bot.tree.get_command(group.name)
+        existing = self.bot.tree.get_command(group.name, type=group.type)
         if existing is not None:
             self.bot.tree.remove_command(group.name, type=group.type)
 
-        self.bot.tree.add_command(group)
+        try:
+            self.bot.tree.add_command(group)
+        except app_commands.CommandAlreadyRegistered:
+            log.warning("admin.group.already_registered", extra={"name": group.name})
+            self.bot.tree.remove_command(group.name, type=group.type)
+            self.bot.tree.add_command(group)
         self._registered_group = group
 
     def cog_unload(self) -> None:
