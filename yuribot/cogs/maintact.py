@@ -41,14 +41,37 @@ def read_csv(attachment: discord.Attachment):
 class MaintActivityCog(commands.Cog):
     """Admin tools to import day/month CSVs and rebuild aggregates."""
 
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
     group = app_commands.Group(
         name="maint",
         description="Admin: activity maintenance",
-        parent=AdminCog.group,
     )
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self._parent_group: Optional[app_commands.Group] = None
+
+    async def cog_load(self) -> None:
+        admin_cog = self.bot.get_cog("AdminCog")
+        if isinstance(admin_cog, AdminCog):
+            admin_cog.group.remove_command(self.group.name)
+            admin_cog.group.add_command(self.group)
+            self._parent_group = admin_cog.group
+        else:
+            try:
+                self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (AttributeError, KeyError):
+                pass
+            self.bot.tree.add_command(self.group)
+            self._parent_group = None
+
+    async def cog_unload(self) -> None:
+        if self._parent_group is not None:
+            self._parent_group.remove_command(self.group.name)
+        else:
+            try:
+                self.bot.tree.remove_command(self.group.name, type=self.group.type)
+            except (AttributeError, KeyError):
+                pass
 
     @group.command(
         name="activity_report",
