@@ -9,6 +9,7 @@ from typing import Optional, Set
 
 import discord
 from discord import app_commands
+from discord.app_commands import errors as app_command_errors
 from discord.ext import commands
 
 from ..models import activity, activity_report, message_archive, rpg
@@ -54,14 +55,25 @@ class MaintActivityCog(commands.Cog):
         admin_cog = self.bot.get_cog("AdminCog")
         if isinstance(admin_cog, AdminCog):
             admin_cog.group.remove_command(self.group.name)
-            admin_cog.group.add_command(self.group)
+            try:
+                admin_cog.group.add_command(self.group)
+            except app_command_errors.CommandAlreadyRegistered:
+                # Discord.py caches commands on the parent group. If a prior
+                # load partially succeeded, make sure the stale command is
+                # removed before registering again.
+                admin_cog.group.remove_command(self.group.name)
+                admin_cog.group.add_command(self.group)
             self._parent_group = admin_cog.group
         else:
             try:
                 self.bot.tree.remove_command(self.group.name, type=self.group.type)
             except (AttributeError, KeyError):
                 pass
-            self.bot.tree.add_command(self.group)
+            try:
+                self.bot.tree.add_command(self.group)
+            except app_command_errors.CommandAlreadyRegistered:
+                self.bot.tree.remove_command(self.group.name, type=self.group.type)
+                self.bot.tree.add_command(self.group)
             self._parent_group = None
 
     async def cog_unload(self) -> None:
