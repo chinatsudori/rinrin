@@ -325,6 +325,31 @@ def ensure_db() -> None:
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_gif_usage_lookup ON gif_usage_monthly (guild_id, month, count DESC)")
 
+        # --- Message archive ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS message_archive (
+            message_id  INTEGER PRIMARY KEY,
+            guild_id    INTEGER NOT NULL,
+            channel_id  INTEGER NOT NULL,
+            author_id   INTEGER NOT NULL,
+            message_type TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL,
+            content     TEXT,
+            edited_at   TEXT,
+            attachments INTEGER NOT NULL DEFAULT 0,
+            embeds      INTEGER NOT NULL DEFAULT 0,
+            reactions   TEXT,
+            reply_to_id INTEGER
+        )""")
+        _ensure_column(con, "message_archive", "reactions", "TEXT")
+        _ensure_column(con, "message_archive", "reply_to_id", "INTEGER")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_archive_guild_channel ON message_archive (guild_id, channel_id, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_archive_author ON message_archive (guild_id, author_id, created_at)"
+        )
+
         # --- Member message activity (legacy mirrors) ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS member_activity_monthly (
