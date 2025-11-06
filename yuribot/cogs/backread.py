@@ -73,7 +73,18 @@ class BackreadCog(commands.Cog):
             targets.append(channel)
         else:
             targets.extend(guild.text_channels)
-            targets.extend(guild.forum_channels)
+
+            try:
+                forum_channels = list(guild.forum_channels)  # type: ignore[attr-defined]
+            except AttributeError:
+                forum_channels = []
+
+            if not forum_channels:
+                forum_channels = [
+                    ch for ch in guild.channels if isinstance(ch, discord.ForumChannel)
+                ]
+
+            targets.extend(forum_channels)
 
         stats = BackreadStats()
         for text_channel in targets:
