@@ -1,5 +1,5 @@
-from pathlib import Path
 from __future__ import annotations
+from pathlib import Path
 import os
 from dateutil import tz
 
