@@ -210,13 +210,6 @@ class YuriBot(commands.Bot):
 
         log.info("Shutdown initiated: stopping background tasks and closing bot.")
 
-        # Stop any tasks your cogs may have registered
-        with suppress(Exception):
-            if "discussion_poster_loop" in globals():
-                loop_obj = globals()["discussion_poster_loop"]
-                if getattr(loop_obj, "is_running", lambda: False)():
-                    loop_obj.stop()
-
         for t in self._bg_tasks:
             t.cancel()
         if self._bg_tasks:

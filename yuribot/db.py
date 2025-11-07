@@ -168,35 +168,6 @@ def ensure_db() -> None:
             """)
             cur.execute("DROP TABLE clubs_old")
 
-        # collections
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS collections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            club_id INTEGER,
-            opens_at TEXT,
-            closes_at TEXT,
-            status TEXT CHECK(status IN ('open','closed')) DEFAULT 'open'
-        )""")
-        _ensure_column(con, "collections", "club_id", "INTEGER")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_collections_guild_club_status ON collections (guild_id, club_id, status)")
-
-        # submissions
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            club_id INTEGER,
-            collection_id INTEGER,
-            author_id INTEGER,
-            title TEXT,
-            link TEXT,
-            thread_id INTEGER,
-            created_at TEXT
-        )""")
-        _ensure_column(con, "submissions", "club_id", "INTEGER")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_submissions_collection ON submissions (collection_id)")
-
         # polls
         cur.execute("""
         CREATE TABLE IF NOT EXISTS polls (
@@ -228,36 +199,6 @@ def ensure_db() -> None:
             option_id INTEGER,
             PRIMARY KEY (poll_id, user_id)
         )""")
-
-        # series
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS series (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            club_id INTEGER,
-            title TEXT,
-            link TEXT,
-            source_submission_id INTEGER,
-            status TEXT CHECK(status IN ('active','queued','completed')) DEFAULT 'active'
-        )""")
-        _ensure_column(con, "series", "club_id", "INTEGER")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_series_guild_club_status ON series (guild_id, club_id, status)")
-
-        # schedule_sections
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS schedule_sections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            series_id INTEGER,
-            label TEXT,
-            start_chapter INTEGER,
-            end_chapter INTEGER,
-            discussion_event_id INTEGER,
-            discussion_start TEXT
-        )""")
-        _ensure_column(con, "schedule_sections", "discussion_thread_id", "INTEGER")
-        _ensure_column(con, "schedule_sections", "posted", "INTEGER DEFAULT 0")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_series ON schedule_sections (series_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_due ON schedule_sections (posted, discussion_start)")
 
         # --- Guild-wide settings ---
         cur.execute("""
@@ -366,19 +307,6 @@ def ensure_db() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_archive_author ON message_archive (guild_id, author_id, created_at)"
         )
-
-        # --- Movie events ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS movie_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            club_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            link TEXT,
-            show_date TEXT NOT NULL,
-            event_id_morning INTEGER,
-            event_id_evening INTEGER
-        )""")
 
         # --- Role welcome (first-time DM tracking) ---
         cur.execute("""
