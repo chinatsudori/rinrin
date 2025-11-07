@@ -1,7 +1,5 @@
 """Modular database access layer for Yuribot."""
 
-from . import activity
-from . import activity_report
 from . import collections
 from . import common
 from . import emoji_stats
@@ -12,13 +10,10 @@ from . import mod_actions
 from . import movie
 from . import polls
 from . import role_welcome
-from . import rpg
 from . import series
 from . import settings
 
 __all__ = [
-    "activity",
-    "activity_report",
     "collections",
     "common",
     "emoji_stats",
@@ -29,7 +24,6 @@ __all__ = [
     "movie",
     "polls",
     "role_welcome",
-    "rpg",
     "series",
     "settings",
 ]

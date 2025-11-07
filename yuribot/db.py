@@ -52,9 +52,6 @@ def _is_fresh_db(path: str) -> bool:
         # If *any* of these have a row, it's not fresh.
         core_tables = (
             "guild_settings",
-            "member_metrics_total",
-            "member_rpg_progress",
-            "member_activity_total",
         )
         for t in core_tables:
             if _any_rows(con, t):
@@ -350,25 +347,6 @@ def ensure_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_message_archive_author ON message_archive (guild_id, author_id, created_at)"
         )
 
-        # --- Member message activity (legacy mirrors) ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_activity_monthly (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            month TEXT NOT NULL,
-            count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, month)
-        )""")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_activity_total (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        )""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_month ON member_activity_monthly (guild_id, month, count DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_activity_total ON member_activity_total (guild_id, count DESC)")
-
         # --- Movie events ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS movie_events (
@@ -391,52 +369,6 @@ def ensure_db() -> None:
             sent_at  TEXT    NOT NULL,
             PRIMARY KEY (guild_id, user_id, role_id)
         )""")
-
-        # --- Unified member metrics (daily + totals by metric) ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_metrics_daily (
-            guild_id INTEGER NOT NULL,
-            user_id  INTEGER NOT NULL,
-            metric   TEXT    NOT NULL,
-            day      TEXT    NOT NULL,
-            week     TEXT    NOT NULL,
-            month    TEXT    NOT NULL,
-            count    INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, metric, day)
-        )""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gwk ON member_metrics_daily (guild_id, metric, week)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gm ON member_metrics_daily (guild_id, metric, month)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_daily_gd ON member_metrics_daily (guild_id, metric, day)")
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_metrics_total (
-            guild_id INTEGER NOT NULL,
-            user_id  INTEGER NOT NULL,
-            metric   TEXT    NOT NULL,
-            count    INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, metric)
-        )""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_metrics_total_gm ON member_metrics_total (guild_id, metric, count DESC)")
-
-        # Hour histogram
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_hour_hist (
-            guild_id INTEGER NOT NULL,
-            user_id  INTEGER NOT NULL,
-            metric   TEXT    NOT NULL,
-            hour_utc INTEGER NOT NULL CHECK(hour_utc BETWEEN 0 AND 23),
-            count    INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, metric, hour_utc)
-        )""")
-
-        # Available months view
-        cur.execute("""
-        CREATE VIEW IF NOT EXISTS v_available_months AS
-        SELECT DISTINCT month FROM member_metrics_daily
-         WHERE metric='messages'
-        UNION
-        SELECT DISTINCT month FROM member_activity_monthly
-        """)
 
         # --- MangaUpdates ---
         cur.execute("""
@@ -514,49 +446,8 @@ def ensure_db() -> None:
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_series ON mu_thread_posts (series_id)")
 
-        # --- RPG progression (per member) ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_rpg_progress (
-            guild_id INTEGER NOT NULL,
-            user_id  INTEGER NOT NULL,
-            xp       INTEGER NOT NULL DEFAULT 0,
-            level    INTEGER NOT NULL DEFAULT 1,
-            str      INTEGER NOT NULL DEFAULT 5,
-            int      INTEGER NOT NULL DEFAULT 5,
-            cha      INTEGER NOT NULL DEFAULT 5,
-            vit      INTEGER NOT NULL DEFAULT 5,
-            dex      INTEGER NOT NULL DEFAULT 5,
-            wis      INTEGER NOT NULL DEFAULT 5,
-            last_level_up TEXT,
-            PRIMARY KEY (guild_id, user_id)
-        )""")
-
         # Polls convenience (optional)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_mu_thread_posts_lookup ON mu_thread_posts (guild_id, thread_id, series_id, release_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_poll_options_poll ON poll_options (poll_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes (poll_id)")
-
-        # --- Channel totals (for prime_channel & per-channel XP multipliers) ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_channel_totals (
-            guild_id  INTEGER NOT NULL,
-            user_id   INTEGER NOT NULL,
-            channel_id INTEGER NOT NULL,
-            messages  INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, channel_id)
-        )""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_member_channel_totals ON member_channel_totals (guild_id, user_id, messages DESC)")
-
-        # --- Member app usage per day (aux to activity_minutes) ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_activity_apps_daily (
-            guild_id INTEGER NOT NULL,
-            user_id  INTEGER NOT NULL,
-            app_name TEXT    NOT NULL,
-            day      TEXT    NOT NULL,
-            minutes  INTEGER NOT NULL DEFAULT 0,
-            launches INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id, app_name, day)
-        )""")
 
         con.commit()
