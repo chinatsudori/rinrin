@@ -469,20 +469,89 @@ def top_levels(guild_id: int, limit: int = 20) -> list[tuple[int, int, int]]:
         ).fetchall()
 
 # --- Chronological rebuild (per message) -------------------------------------
+# --- Add to yuribot/models/rpg.py -------------------------------------------
+
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    cur = con.cursor()
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,)
+    ).fetchone()
+    return bool(row)
+
+def _iter_daily_msgs_words(
+    con: sqlite3.Connection,
+    guild_id: int,
+    user_id: int,
+    since_day: str | None,
+    until_day: str | None,
+):
+    """
+    Yields (day_iso, msgs, words) in ascending day order using the *best available* source:
+      1) member_metrics_daily (metrics: 'messages', 'words')
+      2) member_messages_day (columns: messages, words?)  -- words optional
+    """
+    cur = con.cursor()
+
+    if _table_exists(con, "member_metrics_daily"):
+        q = """
+            SELECT day,
+                   SUM(CASE WHEN metric='messages' THEN count ELSE 0 END) AS msgs,
+                   SUM(CASE WHEN metric='words'    THEN count ELSE 0 END) AS words
+            FROM member_metrics_daily
+            WHERE guild_id=? AND user_id=?
+        """
+        params: list[object] = [guild_id, user_id]
+        if since_day:
+            q += " AND day>=?"
+            params.append(since_day)
+        if until_day:
+            q += " AND day<=?"
+            params.append(until_day)
+        q += " GROUP BY day ORDER BY day ASC"
+        for day_iso, msgs, words in cur.execute(q, params).fetchall():
+            yield day_iso, int(msgs or 0), int(words or 0)
+        return
+
+    if _table_exists(con, "member_messages_day"):
+        # words column may be absent in some deployments; guard it.
+        cols = dict(cur.execute("PRAGMA table_info(member_messages_day)").fetchall() or [])
+        has_words = any(str(c[1]).lower() == "words" for c in cur.execute("PRAGMA table_info(member_messages_day)"))
+
+        if has_words:
+            q = """
+                SELECT day, messages, words
+                FROM member_messages_day
+                WHERE guild_id=? AND user_id=?
+            """
+        else:
+            q = """
+                SELECT day, messages, 0 as words
+                FROM member_messages_day
+                WHERE guild_id=? AND user_id=?
+            """
+        params: list[object] = [guild_id, user_id]
+        if since_day:
+            q += " AND day>=?"
+            params.append(since_day)
+        if until_day:
+            q += " AND day<=?"
+            params.append(until_day)
+        q += " ORDER BY day ASC"
+        for day_iso, msgs, words in cur.execute(q, params).fetchall():
+            yield day_iso, int(msgs or 0), int(words or 0)
+        return
+
+    # Nothing? Fail closed (don’t silently give tiny XP).
+    return
 
 def rebuild_progress_chronological(
     guild_id: int,
     user_id: int | None = None,
     *,
-    since_day: str | None = None,   # 'YYYY-MM-DD'
-    until_day: str | None = None,   # 'YYYY-MM-DD'
+    since_day: str | None = None,
+    until_day: str | None = None,
     reset: bool = True,
 ) -> int:
-    """
-    Rebuilds XP/levels *per message* in chronological order.
-    On each level-up, allocates stats using the rolling 7d window ending at that day.
-    Returns number of users processed.
-    """
     processed = 0
     with connect() as con:
         _ensure_metric_tables(con)
@@ -491,7 +560,9 @@ def rebuild_progress_chronological(
         # Who to rebuild?
         if user_id is None:
             users = [r[0] for r in cur.execute(
-                "SELECT DISTINCT user_id FROM member_metrics_daily WHERE guild_id=?", (guild_id,)
+                "SELECT DISTINCT user_id FROM member_metrics_daily WHERE guild_id=? "
+                "UNION SELECT DISTINCT user_id FROM member_messages_day WHERE guild_id=?",
+                (guild_id, guild_id),
             ).fetchall()]
         else:
             users = [int(user_id)]
@@ -508,38 +579,19 @@ def rebuild_progress_chronological(
         for uid in users:
             level, total_xp = _ensure_member_row(con, guild_id, uid)
 
-            # Ascending days
-            q = """
-                SELECT day,
-                       SUM(CASE WHEN metric='messages' THEN count ELSE 0 END) AS msgs,
-                       SUM(CASE WHEN metric='words'    THEN count ELSE 0 END) AS words
-                FROM member_metrics_daily
-                WHERE guild_id=? AND user_id=?
-            """
-            params: List[object] = [guild_id, uid]
-            if since_day:
-                q += " AND day>=?"
-                params.append(since_day)
-            if until_day:
-                q += " AND day<=?"
-                params.append(until_day)
-            q += " GROUP BY day ORDER BY day ASC"
-
-            days = cur.execute(q, params).fetchall()
-            if not days:
-                continue
-
-            for day_iso, msgs, words in days:
-                msgs = int(msgs or 0)
-                words = int(words or 0)
+            had_rows = False
+            for day_iso, msgs, words in _iter_daily_msgs_words(con, guild_id, uid, since_day, until_day):
+                had_rows = True
                 if msgs <= 0:
                     continue
 
+                # Per-message XP: 5 + 2 per 20 avg words/message (floor)
                 wpm = (words / msgs) if msgs else 0.0
                 bonus_words = int(wpm // 20) * int(XP_RULES.get("words_per_20", 2))
                 per_msg_xp = int(XP_RULES.get("messages", 5)) + bonus_words
 
-                for _ in range(msgs):
+                # Award once per message; allocate on level-ups using the 7d window ending on day_iso
+                for _ in range(int(msgs)):
                     new_level, total_xp = _apply_xp(con, guild_id, uid, per_msg_xp)
                     if new_level > level:
                         _apply_levelup_stats_at_day(con, guild_id, uid, day_iso)
@@ -549,7 +601,8 @@ def rebuild_progress_chronological(
                         )
                         level = new_level
 
-            processed += 1
+            if had_rows:
+                processed += 1
 
         con.commit()
 

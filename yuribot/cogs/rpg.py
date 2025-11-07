@@ -128,6 +128,47 @@ class RPGCog(commands.GroupCog, name="rpg", description="RPG: levels, stats, reb
         await interaction.followup.send(
             f"Rebuilt RPG progress for **{processed}** member(s): {who}{suffix}.", ephemeral=True
         )
+# inside RPGCog
+
+    @app_commands.command(name="debug_feed", description="Show the message/word totals the rebuild will consume.")
+    @app_commands.describe(user="Member (defaults to you).", since_day="YYYY-MM-DD", until_day="YYYY-MM-DD")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def debug_feed(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+        since_day: Optional[str] = None,
+        until_day: Optional[str] = None,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        uid = (user or interaction.user).id
+        gid = interaction.guild_id
+
+        from ..models import rpg as rpg_model
+
+        total_msgs = 0
+        total_words = 0
+        days = 0
+        rows_preview = []
+
+        with connect() as con:
+            for day_iso, msgs, words in rpg_model._iter_daily_msgs_words(con, gid, uid, since_day, until_day):
+                days += 1
+                total_msgs += int(msgs or 0)
+                total_words += int(words or 0)
+                if len(rows_preview) < 10:
+                    rows_preview.append(f"{day_iso}: msgs {int(msgs or 0):,}, words {int(words or 0):,}")
+
+        if days == 0:
+            return await interaction.followup.send("No daily rows found for this member in any supported table.", ephemeral=True)
+
+        lines = [
+            f"Feed for <@{uid}> — days: **{days}**",
+            f"Messages: **{total_msgs:,}** · Words: **{total_words:,}**",
+            "First rows:",
+            *rows_preview,
+        ]
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
