@@ -100,6 +100,40 @@ def _archive_period_rows(
         f"SELECT author_id, content FROM message_archive WHERE {where}", params
     )
 
+# ---- Targeted totals rebuilds ----
+
+def rebuild_metric_totals_for_guild(guild_id: int, metrics: Iterable[str]) -> None:
+    """
+    Recompute member_metrics_total for the given metrics from member_metrics_daily.
+    Use when daily is correct but totals are stale/missing.
+    """
+    mets = tuple(set(str(m) for m in metrics))
+    if not mets:
+        return
+    placeholders = ",".join("?" for _ in mets)
+    with connect() as con:
+        cur = con.cursor()
+        # wipe only the metrics we’re rebuilding
+        cur.execute(f"DELETE FROM member_metrics_total WHERE guild_id=? AND metric IN ({placeholders})", (guild_id, *mets))
+        # write fresh totals from daily
+        cur.execute(
+            f"""
+            INSERT INTO member_metrics_total (guild_id, user_id, metric, count)
+            SELECT guild_id, user_id, metric, SUM(count)
+            FROM member_metrics_daily
+            WHERE guild_id=? AND metric IN ({placeholders})
+            GROUP BY guild_id, user_id, metric
+            """,
+            (guild_id, *mets),
+        )
+        con.commit()
+
+
+def rebuild_voice_totals_for_guild(guild_id: int) -> None:
+    """
+    Convenience wrapper: rebuild totals for voice_minutes and voice_stream_minutes.
+    """
+    rebuild_metric_totals_for_guild(guild_id, ("voice_minutes", "voice_stream_minutes"))
 
 def _archive_counts_by_user(
     con: sqlite3.Connection, guild_id: int, scope: str, key: str | None, metric: str

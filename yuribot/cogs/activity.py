@@ -874,6 +874,27 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
 
         file = discord.File(buf, filename=f"activity-{month}" + (f"-{user.id}" if user else "") + ( "-pretty" if pretty else "" ) + ".png")
         await interaction.followup.send(file=file, ephemeral=not post)
+    # ------- /activity admin_sync_voice_totals -------
+    @app_commands.command(name="admin_sync_voice_totals", description="Admin: rebuild voice totals from daily.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def admin_sync_voice_totals(self, interaction: discord.Interaction):
+        if not await _require_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        gid = interaction.guild_id
+        try:
+            activity.rebuild_voice_totals_for_guild(gid)
+        except Exception:
+            log.exception("admin.sync_voice_totals.failed", extra={"guild_id": gid})
+            return await interaction.followup.send("Failed to rebuild voice totals. Check logs.", ephemeral=True)
+        await interaction.followup.send("Voice totals rebuilt from daily ✅", ephemeral=True)
+
+    @admin_sync_voice_totals.error
+    async def _admin_sync_voice_totals_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("You need **Manage Server** to do that.", ephemeral=True)
+        else:
+            raise error
 
     # ------- /activity export -------
     @app_commands.command(name="export", description="Export a CSV for a metric and month.")

@@ -1,4 +1,3 @@
-# yuribot/models/rpg.py
 from __future__ import annotations
 import logging
 import sqlite3
@@ -34,6 +33,7 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
     cur = total_xp - _xp_for_level(lvl)
     nxt = _xp_for_level(lvl + 1) - _xp_for_level(lvl)
     return (lvl, cur, nxt)
+
 _WS = re.compile(r"\s+")
 def _count_words(text: Optional[str]) -> int:
     if not text:
@@ -51,6 +51,7 @@ def _date_range_clauses(since_day: Optional[str], until_day: Optional[str]) -> t
         clauses.append("day<=?")
         params.append(until_day)
     return (" AND ".join(clauses), params)
+
 # =========
 # XP rules
 # =========
