@@ -8,6 +8,22 @@ from typing import Dict, Optional
 import discord
 from discord.ext import commands
 
+from ..data.booly_defaults import (
+    EXCLUDED_CHANNEL_IDS,
+    ID_ADDI,
+    ID_BAGE,
+    ID_BLEP,
+    ID_L,
+    ID_MOM_1,
+    ID_MONKE,
+    ID_MUM,
+    ID_NAT,
+    ID_NOVANE,
+    ID_OOKAMI,
+    ID_VIVI,
+    SPECIAL_IDS,
+    SPECIAL_DEFAULT_POOL,
+)
 from .storage import resolve_data_file
 
 __all__ = [
@@ -27,6 +43,7 @@ __all__ = [
     "ID_BAGE",
     "EXCLUDED_CHANNEL_IDS",
     "SPECIAL_IDS",
+    "SPECIAL_DEFAULT_POOL",
     "GuildUserState",
     "StateType",
     "load_state",
@@ -44,53 +61,6 @@ PERSONAL_COOLDOWN = 24 * 60 * 60  # 24h
 
 # Mentions are rate-limited so people can't spam
 MENTION_COOLDOWN = 1200  # seconds (20 min)
-
-# IDs
-ID_MONKE = 994264143634907157
-ID_MOM_1 = 444390742266347535
-ID_MUM = 49670556760408064
-ID_NAT = 852192029085139004
-ID_NOVANE = 1275539727096741930
-ID_L = 234732044175933441
-ID_OOKAMI = 278958673835851777
-ID_BLEP = 251914689913683970
-ID_VIVI = 315694140480421889
-ID_ADDI = 1143394906606424165
-ID_BAGE = 1149355492456538185
-
-SPECIAL_IDS = {
-    ID_MONKE,
-    ID_MOM_1,
-    ID_MUM,
-    ID_NAT,
-    ID_NOVANE,
-    ID_L,
-    ID_OOKAMI,
-    ID_BLEP,
-    ID_VIVI,
-    ID_ADDI,
-    ID_BAGE,
-}
-
-# Channels where **personalized** auto-replies are disabled
-EXCLUDED_CHANNEL_IDS = {
-    1417965404004946141,
-    1417982528001933383,
-    1422486999671111711,
-    1417424779354574932,
-    1417960610569916416,
-    1428158868843921429,
-    1417981392561770497,
-    1417983743624220732,
-    1427744820863963230,
-    1420832231886422036,
-    1418204893629382757,
-    1427744882025300091,
-    1420832036469473422,
-    1419936079158579222,
-    1418226340880056380,
-    1417424779354574936,
-}
 
 
 @dataclass

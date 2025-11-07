@@ -14,9 +14,7 @@ from ..utils.stats import ensure_start_metadata, gather_botinfo, uptime_info
 log = logging.getLogger(__name__)
 
 
-class StatsCog(commands.Cog):
-    """Basic bot diagnostics: ping, uptime, stats."""
-
+class CmdCog(commands.GroupCog, name="cmd", description="System diagnostics"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         ensure_start_metadata(bot)
@@ -33,7 +31,7 @@ class StatsCog(commands.Cog):
             msg = S("stats.ping.message", gw_ms=f"{gw_ms:.0f}", rt_ms=f"{rt_ms:.0f}")
             await interaction.followup.send(msg, ephemeral=not post)
             log.info(
-                "stats.ping.used",
+                "cmd.ping.used",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -45,7 +43,7 @@ class StatsCog(commands.Cog):
             )
         except Exception:
             log.exception(
-                "stats.ping.failed",
+                "cmd.ping.failed",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -63,7 +61,7 @@ class StatsCog(commands.Cog):
             embed = build_uptime_embed(uptime_seconds, started_at)
             await interaction.followup.send(embed=embed, ephemeral=not post)
             log.info(
-                "stats.uptime.used",
+                "cmd.uptime.used",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -74,7 +72,7 @@ class StatsCog(commands.Cog):
             )
         except Exception:
             log.exception(
-                "stats.uptime.failed",
+                "cmd.uptime.failed",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -92,7 +90,7 @@ class StatsCog(commands.Cog):
             embed = build_botinfo_embed(metrics)
             await interaction.followup.send(embed=embed, ephemeral=not post)
             log.info(
-                "stats.botinfo.used",
+                "cmd.botinfo.used",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -108,7 +106,7 @@ class StatsCog(commands.Cog):
             )
         except Exception:
             log.exception(
-                "stats.botinfo.failed",
+                "cmd.botinfo.failed",
                 extra={
                     "guild_id": getattr(interaction, "guild_id", None),
                     "channel_id": getattr(interaction.channel, "id", None),
@@ -119,4 +117,4 @@ class StatsCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(StatsCog(bot))
+    await bot.add_cog(CmdCog(bot))

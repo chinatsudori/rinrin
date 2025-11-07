@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import random
-from typing import Optional
+from typing import Dict, List, Optional
 
 import discord
 from discord.ext import commands
 
 from ..strings import S
-from ..ui.booly import (
-    GENERAL_MENTION_POOL,
-    MOD_MENTION_POOL,
-    expand_emoji_tokens,
-    personal_pool_for,
-)
+from ..ui.booly import expand_emoji_tokens
+from ..models import booly as booly_model
 from ..utils.booly import (
     EXCLUDED_CHANNEL_IDS,
     MENTION_COOLDOWN,
@@ -39,6 +35,18 @@ class UserAutoResponder(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.state: StateType = load_state()
+        self.general_pool: List[str] = []
+        self.mod_pool: List[str] = []
+        self.personal_pools: Dict[int, List[str]] = {}
+        self.personal_default: List[str] = []
+        self.reload_messages()
+
+    def reload_messages(self) -> None:
+        general, mod, personal, personal_default = booly_model.fetch_all_pools()
+        self.general_pool = general
+        self.mod_pool = mod
+        self.personal_pools = personal
+        self.personal_default = personal_default
 
     def _st(self, gid: int, uid: int) -> GuildUserState:
         g = str(gid)
@@ -82,11 +90,7 @@ class UserAutoResponder(commands.Cog):
         if is_hard:
             if st.last_mention_ts and (now - st.last_mention_ts) < MENTION_COOLDOWN:
                 return
-            pool = (
-                MOD_MENTION_POOL
-                if (member and has_mod_perms(member))
-                else GENERAL_MENTION_POOL
-            )
+            pool = self.mod_pool if (member and has_mod_perms(member) and self.mod_pool) else self.general_pool
             line = random.choice(pool) if pool else ""
             text = str(S(line)).strip()
             await self._safe_reply(message, text)
@@ -100,7 +104,7 @@ class UserAutoResponder(commands.Cog):
                 return
             last = st.last_auto_ts or 0
             if (now - last) >= PERSONAL_COOLDOWN:
-                pool = personal_pool_for(uid)
+                pool = self.personal_pools.get(uid, self.personal_default)
                 line = random.choice(pool) if pool else ""
                 text = str(S(line)).strip()
                 await self._safe_reply(message, text)

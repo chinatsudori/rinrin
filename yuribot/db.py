@@ -4,6 +4,8 @@ import sqlite3
 import logging
 from typing import Optional
 
+from .data.booly_defaults import DEFAULT_BOOLY_ROWS
+
 log = logging.getLogger("yuribot.db")
 
 # ----------------------------
@@ -270,6 +272,24 @@ def ensure_db() -> None:
         _ensure_column(con, "guild_settings", "welcome_channel_id", "INTEGER")
         _ensure_column(con, "guild_settings", "welcome_image_filename", "TEXT")
         _ensure_column(con, "guild_settings", "mu_forum_channel_id", "INTEGER")
+
+        # --- Booly auto-response messages ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS booly_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            user_id INTEGER,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_booly_scope ON booly_messages (scope, user_id)")
+        existing_booly = cur.execute("SELECT COUNT(1) FROM booly_messages").fetchone()[0]
+        if not existing_booly:
+            cur.executemany(
+                "INSERT INTO booly_messages (scope, user_id, content) VALUES (?, ?, ?)",
+                DEFAULT_BOOLY_ROWS,
+            )
 
         # --- Moderation actions log ---
         cur.execute("""
