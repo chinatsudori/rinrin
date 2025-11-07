@@ -7,14 +7,17 @@ import io
 import json
 import logging
 import time
+import re
 import zipfile
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Set
-
+from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
+from ..db import connect   # <-- needed for voice_stats to query voice_minutes_day
 
+from ..models import voice as voice_model
 from ..models import activity, activity_report, message_archive, rpg
 from ..models.message_archive import ArchivedMessage  # type: ignore
 from ..strings import S
@@ -34,6 +37,46 @@ log = logging.getLogger(__name__)
 
 # ---------- helpers / checks ----------
 
+
+_JOIN_TITLES  = {"voice join",  "voice_join",  "join",  "voice connected"}
+_LEAVE_TITLES = {"voice leave", "voice_leave", "leave", "voice disconnected"}
+_ID_RE = re.compile(r"\((\d{10,})\)")
+
+def _first_id(text: str | None) -> int | None:
+    if not text: return None
+    m = _ID_RE.search(text)
+    return int(m.group(1)) if m else None
+
+def _parse_voice_embed(msg: discord.Message) -> tuple[str|None,int|None,int|None,datetime|None]:
+    """
+    Returns (kind, user_id, channel_id, timestamp) OR (None, None, None, None) if not a voice log embed.
+    We read: title, 'User' field, 'Channel' field, and use message.created_at as the time.
+    """
+    if not msg.embeds: return (None, None, None, None)
+    emb = msg.embeds[0]
+    title = (emb.title or "").strip().lower()
+    is_join  = title in _JOIN_TITLES
+    is_leave = title in _LEAVE_TITLES
+    if not (is_join or is_leave): return (None, None, None, None)
+
+    user_id = None
+    chan_id = None
+    # Prefer fields
+    for f in emb.fields:
+        name = (f.name or "").lower()
+        val  = f.value or ""
+        if "user" in name and user_id is None:
+            user_id = _first_id(val)
+        if "channel" in name and chan_id is None:
+            chan_id = _first_id(val)
+    # Fallback: description
+    if user_id is None:
+        user_id = _first_id(emb.description or "")
+    if chan_id is None:
+        chan_id = _first_id(emb.description or "")
+    kind = "join" if is_join else "leave"
+    ts = msg.created_at if msg.created_at.tzinfo else msg.created_at.replace(tzinfo=timezone.utc)
+    return (kind, user_id, chan_id, ts)
 def require_manage_guild() -> app_commands.Check:
     async def predicate(interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -414,6 +457,151 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
             "• Private threads (TextChannels): require **Manage Threads** to fetch archived ones.",
             "• Private forum threads are not retrievable on this discord.py version.",
         ]
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(
+        name="voice_import_log",
+        description="Parse Voice Join/Leave embeds in a log channel and store historical minutes per user."
+    )
+    @app_commands.describe(
+        log_channel="The bot-log channel that contains the voice join/leave embeds.",
+        since_message_id="Optional: start AFTER this message id.",
+        dry_run="If true, only report what would be inserted."
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def voice_import_log(
+        self,
+        interaction: discord.Interaction,
+        log_channel: discord.TextChannel,
+        since_message_id: Optional[int] = None,
+        dry_run: bool = False,
+    ):
+        if not await ensure_guild(interaction): return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        voice_model.ensure_schema()
+
+        guild = interaction.guild
+        gid = guild.id  # type: ignore[assignment]
+        after_obj = discord.Object(id=since_message_id) if since_message_id else None
+
+        await interaction.edit_original_response(content="Scanning log channel history…")
+
+        # Active sessions per user: user_id -> (channel_id, joined_at)
+        active: dict[int, tuple[int, datetime]] = {}
+        sessions: list[tuple[int,int,datetime,datetime]] = []  # (user_id, channel_id, join, leave)
+        scanned = 0
+        matched = 0
+
+        try:
+            async for m in log_channel.history(limit=None, oldest_first=True, after=after_obj):
+                scanned += 1
+                kind, user_id, channel_id, ts = _parse_voice_embed(m)
+                if kind is None:
+                    continue
+                if user_id is None or channel_id is None or ts is None:
+                    continue
+                matched += 1
+                if kind == "join":
+                    # If user already has an open session, close it at the new join time (switch case)
+                    if user_id in active:
+                        prev_ch, prev_ts = active.pop(user_id)
+                        if ts > prev_ts:
+                            sessions.append((user_id, prev_ch, prev_ts, ts))
+                    active[user_id] = (channel_id, ts)
+                else:  # leave
+                    if user_id in active:
+                        prev_ch, prev_ts = active.pop(user_id)
+                        if ts > prev_ts:
+                            sessions.append((user_id, prev_ch, prev_ts, ts))
+                    # else: stray leave; ignore
+        except discord.Forbidden:
+            return await interaction.edit_original_response(
+                content="Forbidden: I need **Read Message History** in that channel."
+            )
+
+        # Close any dangling sessions at "now" (optional). Safer to drop.
+        # If you prefer to close them, set end = discord.utils.utcnow()
+        dangling = len(active)
+        active.clear()
+
+        # Persist
+        total_sessions = len(sessions)
+        total_minutes  = 0
+        per_day_rollup: dict[tuple[int,int,str], int] = {}  # (gid, uid, day) -> minutes
+
+        if not dry_run:
+            for uid, cid, start, end in sessions:
+                dur = voice_model.add_session(gid, uid, cid, start, end)
+                mins = max(1, round(dur/60)) if dur else 0
+                total_minutes += mins
+                # explode across days
+                # cheap split: credit all to the start day if < 24h; for precision use explode_minutes_per_day
+                for day, m in voice_model.explode_minutes_per_day(gid, uid, start, end).items():
+                    per_day_rollup[(gid, uid, day)] = per_day_rollup.get((gid, uid, day), 0) + int(m)
+            # bulk upsert
+            items = [(g,u,d,m) for (g,u,d),m in per_day_rollup.items()]
+            voice_model.upsert_minutes_bulk(items)
+
+        summary = [
+            f"Scanned **{scanned:,}** messages.",
+            f"Matched **{matched:,}** voice embeds.",
+            f"Built **{total_sessions:,}** session(s).",
+            f"Dangling sessions ignored: **{dangling}**.",
+        ]
+        if not dry_run:
+            summary.append(f"Upserted **{len(per_day_rollup):,}** day-rows; ~**{total_minutes:,}** minutes total.")
+        else:
+            summary.append("DRY RUN — nothing written.")
+        await interaction.edit_original_response(content="\n".join(summary))
+    @app_commands.command(
+        name="voice_stats",
+        description="Show a user's total imported voice minutes (UTC days)."
+    )
+    @app_commands.describe(
+        user="Target user (default: you).",
+        limit="How many days to preview (default 10)."
+    )
+    async def voice_stats(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+        limit: int = 10,
+    ):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        gid = interaction.guild_id
+        uid = (user or interaction.user).id
+
+        with connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT day, minutes
+                FROM voice_minutes_day
+                WHERE guild_id=? AND user_id=?
+                ORDER BY day DESC
+                LIMIT ?
+                """,
+                (gid, uid, limit),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(minutes), 0)
+                FROM voice_minutes_day
+                WHERE guild_id=? AND user_id=?
+                """,
+                (gid, uid),
+            )
+            total = int(cur.fetchone()[0] or 0)
+        lines = [f"Voice minutes for <@{uid}> (total **{total:,}**):"]
+        for day, minutes in rows:
+            lines.append(f"• {day}: **{int(minutes):,}**")
+
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(
