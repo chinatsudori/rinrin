@@ -85,8 +85,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         minutes: app_commands.Range[int, 0, 59] = 0,
         seconds: app_commands.Range[int, 0, 59] = 0,
         reason: Optional[str] = None,
-        dm_user: bool = True,
-, post: bool = False):
+        dm_user: bool = True, post: bool = False):
         await interaction.response.defer(ephemeral=not post, thinking=True)
 
         if not interaction.guild:
@@ -192,8 +191,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         evidence: Optional[discord.Attachment] = None,
         timeout_minutes: Optional[app_commands.Range[int, 1, 40320]] = None,
         ban: Optional[bool] = False,
-        dm_user: bool = False,
-, post: bool = False):
+        dm_user: bool = False, post: bool = False):
         if not interaction.guild:
             return await interaction.response.send_message(S("common.guild_only"), ephemeral=not post)
         if not permission_ok(interaction.user):
@@ -362,8 +360,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
     @_require_mod()
     async def booly_list(self, interaction: discord.Interaction,
         scope: app_commands.Choice[str],
-        user: Optional[discord.Member] = None,
-, post: bool = False):
+        user: Optional[discord.Member] = None, post: bool = False):
         target_user_id: Optional[int] = None
         if scope.value == booly_model.SCOPE_PERSONAL:
             if user is not None:
@@ -477,8 +474,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         interaction: discord.Interaction,
         user: Optional[discord.Member] = None,
         extra_ids: Optional[str] = None,
-        scope: Optional[app_commands.Choice[str]] = None,
-, post: bool = False):
+        scope: Optional[app_commands.Choice[str]] = None, post: bool = False):
         await interaction.response.defer(ephemeral=not post, thinking=True)
         if not interaction.guild:
             return await interaction.followup.send(S("common.guild_only"), ephemeral=not post)
@@ -526,8 +522,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
     @app_commands.describe(message_id="ID of the message to delete")
     @_require_mod()
     async def booly_delete(self, interaction: discord.Interaction,
-        message_id: int,
-, post: bool = False):
+        message_id: int, post: bool = False):
         await interaction.response.defer(ephemeral=not post, thinking=False)
         deleted = booly_model.delete_message(message_id)
         if not deleted:
