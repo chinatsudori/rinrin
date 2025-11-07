@@ -121,3 +121,53 @@ __all__ = [
     "set_mu_forum_channel",
     "set_welcome_settings",
 ]
+
+
+# --- Added by automation: generic per-guild settings helpers ---
+import sqlite3
+
+def _conn():
+    # Simple local import to avoid circulars
+    import os
+    from pathlib import Path
+    try:
+        from .. import db as _db
+    except Exception:
+        from yuribot import db as _db  # fallback if package name is yuribot
+    return _db.connect()
+
+def ensure_table():
+    with _conn() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            PRIMARY KEY (guild_id, key)
+        )
+        """)
+        c.commit()
+
+def get_guild_setting(guild_id: int, key: str, default=None):
+    ensure_table()
+    with _conn() as c:
+        cur = c.execute("SELECT value FROM guild_settings WHERE guild_id=? AND key=?", (int(guild_id), str(key)))
+        row = cur.fetchone()
+        return row[0] if row else default
+
+def set_guild_setting(guild_id: int, key: str, value: str | None):
+    ensure_table()
+    with _conn() as c:
+        c.execute("INSERT INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?) ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
+                  (int(guild_id), str(key), None if value is None else str(value)))
+        c.commit()
+
+def get_channel_id(guild_id: int, key: str, fallback_id: int | None = None) -> int | None:
+    v = get_guild_setting(guild_id, key)
+    if v is not None:
+        try:
+            return int(v)
+        except ValueError:
+            return fallback_id
+    return fallback_id
+

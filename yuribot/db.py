@@ -1,3 +1,8 @@
+try:
+    from . import config
+except Exception:
+    import config
+
 from __future__ import annotations
 import os
 import sqlite3

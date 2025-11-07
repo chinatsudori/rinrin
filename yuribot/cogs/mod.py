@@ -381,17 +381,22 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
     )
     @app_commands.choices(scope=BOOLY_SCOPE_CHOICES)
     @_require_mod()
-    async def booly_list(
-        self,
-        interaction: discord.Interaction,
+    async def booly_list(self, interaction: discord.Interaction,
         scope: app_commands.Choice[str],
-        user: Optional[discord.Member] = None,
-    ):
-        target_user_id: Optional[int] = user.id if scope.value == booly_model.SCOPE_PERSONAL else None
+        user: Optional[discord.Member] = None,, post: bool = False):
+        target_user_id: Optional[int] = None
+        if scope.value == booly_model.SCOPE_PERSONAL:
+            if user is not None:
+                target_user_id = user.id
+            elif user_id:
+                try:
+                    target_user_id = int(user_id)
+                except ValueError:
+                    target_user_id = None
         if scope.value == booly_model.SCOPE_PERSONAL and not target_user_id:
-            return await interaction.response.send_message(S("mod.booly.need_user"), ephemeral=True)
+            return await interaction.response.send_message(S("mod.booly.need_user"), ephemeral=not post)
 
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        await interaction.response.defer(ephemeral=not post, thinking=False)
 
         messages = booly_model.fetch_messages(scope.value, target_user_id)
         lines = [f"`{msg.id}` • {msg.content}" for msg in messages]
@@ -407,7 +412,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
             else S("mod.booly.title.scope", scope=_SCOPE_LABELS.get(scope.value, scope.value))
         )
         embed = discord.Embed(title=title, description="\n".join(lines))
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=not post)
 
     @booly.command(name="add", description="Add a new booly message.")
     @app_commands.describe(
@@ -417,21 +422,58 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
     )
     @app_commands.choices(scope=BOOLY_SCOPE_CHOICES)
     @_require_mod()
-    async def booly_add(
-        self,
-        interaction: discord.Interaction,
+    async def booly_add(self, interaction: discord.Interaction,
         scope: app_commands.Choice[str],
         content: str,
         user: Optional[discord.Member] = None,
-    ):
-        target_user_id: Optional[int] = user.id if scope.value == booly_model.SCOPE_PERSONAL else None
+        user_id: Optional[str] = None,
+        post: bool = False):
+        target_user_id: Optional[int] = None
+        if scope.value == booly_model.SCOPE_PERSONAL:
+            if user is not None:
+                target_user_id = user.id
+            elif user_id:
+                try:
+                    target_user_id = int(user_id)
+                except ValueError:
+                    target_user_id = None
         if scope.value == booly_model.SCOPE_PERSONAL and not target_user_id:
-            return await interaction.response.send_message(S("mod.booly.need_user"), ephemeral=True)
+            return await interaction.response.send_message(S("mod.booly.need_user"), ephemeral=not post)
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
         message = booly_model.create_message(scope.value, content.strip(), target_user_id)
         self._reload_booly_cache()
-        await interaction.followup.send(S("mod.booly.added", id=message.id), ephemeral=True)
+        await interaction.followup.send(S("mod.booly.added", id=message.id), ephemeral=not post)
+        # Attempt immediate ping respecting personal cooldown
+        if target_user_id and interaction.guild:
+            try:
+                from ..utils.booly import load_state, save_state, GuildUserState, PERSONAL_COOLDOWN
+                import time, random
+                state = load_state()
+                gid = str(interaction.guild.id)
+                uid = str(target_user_id)
+                now = int(time.time())
+                g = state.setdefault(gid, {})
+                st = g.get(uid) or GuildUserState()
+                # If cooldown passed or never pinged, send one line from personal pool
+                if not st.last_auto_ts or (now - (st.last_auto_ts or 0)) >= PERSONAL_COOLDOWN:
+                    # fetch a random personal line for this user from DB
+                    from ..db import connect as _db_connect
+                    with _db_connect() as con:
+                        cur = con.execute("SELECT content FROM booly_messages WHERE scope=? AND user_id=?", (booly_model.SCOPE_PERSONAL, target_user_id))
+                        rows = [r[0] for r in cur.fetchall()]
+                    if rows:
+                        line = random.choice(rows)
+                        content_out = f"<@{target_user_id}> " + str(S(line)).strip()
+                        await interaction.followup.send(content_out, ephemeral=not post)
+                        st.last_auto_ts = now
+                        st.last_key = line
+                        g[uid] = st
+                        save_state(state)
+                # else: cooldown active, do nothing
+            except Exception:
+                pass
+
 
     @booly.command(name="edit", description="Edit an existing booly message.")
     @app_commands.describe(message_id="ID of the message to edit", content="Updated text")
@@ -442,7 +484,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         message_id: int,
         content: str,
     ):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
         updated = booly_model.update_message(message_id, content.strip())
         if not updated:
             return await interaction.followup.send(S("mod.booly.not_found", id=message_id), ephemeral=True)
@@ -450,14 +492,83 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         await interaction.followup.send(S("mod.booly.updated", id=message_id), ephemeral=True)
 
     @booly.command(name="delete", description="Delete a booly message.")
-    @app_commands.describe(message_id="ID of the message to delete")
+
+    @booly.command(name="ping", description="Ping one or more users using booly logic (personal -> general -> mod).")
+    @app_commands.describe(
+        user="Primary user to ping",
+        extra_ids="Comma-separated additional user IDs to ping (optional)",
+        scope="Pool to prefer when personal lines are missing (default: general)",
+        post="Post publicly (True) or respond ephemerally (False)",
+    )
+    @app_commands.choices(scope=BOOLY_SCOPE_CHOICES)
     @_require_mod()
-    async def booly_delete(
+    async def booly_ping(
         self,
         interaction: discord.Interaction,
-        message_id: int,
+        user: Optional[discord.Member] = None,
+        extra_ids: Optional[str] = None,
+        scope: Optional[app_commands.Choice[str]] = None,
+        post: bool = False,
     ):
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        await interaction.response.defer(ephemeral=not post, thinking=True)
+        if not interaction.guild:
+            return await interaction.followup.send(S("common.guild_only"), ephemeral=not post)
+
+        # Build target list from provided user and extra_ids
+        targets = []
+        if user is not None:
+            targets.append(user.id)
+        if extra_ids:
+            for tok in extra_ids.replace(",", " ").split():
+                try:
+                    sid = int(tok.strip())
+                    if sid not in targets:
+                        targets.append(sid)
+                except ValueError:
+                    continue
+
+        if not targets:
+            return await interaction.followup.send("No valid user IDs provided.", ephemeral=not post)
+
+        # Helper to choose a line for a user id
+        from ..db import connect as _db_connect
+        import random as _random
+
+        fallback_scope = scope.value if scope else booly_model.SCOPE_MENTION_GENERAL
+
+        lines = []
+        with _db_connect() as con:
+            cur = con.cursor()
+            for uid in targets:
+                # Try personal first
+                cur.execute("SELECT content FROM booly_messages WHERE scope=? AND user_id=?", (booly_model.SCOPE_PERSONAL, uid))
+                rows = [r[0] for r in cur.fetchall()]
+                line = None
+                if rows:
+                    line = _random.choice(rows)
+                else:
+                    # Fallback to selected scope (general or mod)
+                    cur.execute("SELECT content FROM booly_messages WHERE scope=? AND user_id IS NULL", (fallback_scope,))
+                    grows = [r[0] for r in cur.fetchall()]
+                    if grows:
+                        line = _random.choice(grows)
+                if not line:
+                    # Ultimate fallback: raw mention
+                    line = f"<@{uid}>"
+                else:
+                    line = f"<@{uid}> " + line
+                lines.append(line)
+
+        # Post the combined message
+        content = "\n".join(lines)
+        await interaction.followup.send(content, ephemeral=not post)
+
+
+    @app_commands.describe(message_id="ID of the message to delete")
+    @_require_mod()
+    async def booly_delete(self, interaction: discord.Interaction,
+        message_id: int,, post: bool = False):
+        await interaction.response.defer(ephemeral=not post, thinking=False)
         deleted = booly_model.delete_message(message_id)
         if not deleted:
             return await interaction.followup.send(S("mod.booly.not_found", id=message_id), ephemeral=True)
@@ -472,7 +583,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         interaction: discord.Interaction,
         message_id: int,
     ):
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        await interaction.response.defer(ephemeral=not post, thinking=False)
         message = booly_model.fetch_message(message_id)
         if not message:
             return await interaction.followup.send(S("mod.booly.not_found", id=message_id), ephemeral=True)
@@ -488,7 +599,7 @@ class ModCog(commands.GroupCog, name="mod", description="Moderation tools"):
         embed.add_field(name=S("mod.booly.view.scope"), value=scope_label, inline=True)
         embed.add_field(name=S("mod.booly.view.user"), value=user_text, inline=True)
         embed.set_footer(text=S("mod.booly.view.timestamps", created=message.created_at, updated=message.updated_at))
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=not post)
 
 
 async def setup(bot: commands.Bot):
