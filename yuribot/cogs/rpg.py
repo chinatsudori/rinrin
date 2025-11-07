@@ -1,139 +1,86 @@
 # yuribot/cogs/rpg.py
 from __future__ import annotations
-
 import logging
 from typing import Optional
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..models import rpg as rpg_model
+from ..utils.admin import ensure_guild
 from ..db import connect
+from ..models import rpg as rpg_model
 
 log = logging.getLogger(__name__)
 
-
-class RPGCog(commands.GroupCog, name="rpg", description="RPG: levels, stats, rebuilds"):
+class RPGCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # /rpg progress
-    @app_commands.command(name="progress", description="Show a member's RPG level, XP, and stats.")
-    @app_commands.describe(user="Member (defaults to you).")
-    async def progress(
-        self,
-        interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
-    ):
-        await interaction.response.defer(ephemeral=True)
-        if not interaction.guild_id:
-            return await interaction.followup.send("Run this in a server.", ephemeral=True)
-
-        target = user or interaction.user
-        data = rpg_model.get_rpg_progress(interaction.guild_id, target.id)
-        lvl, cur, nxt = rpg_model.xp_progress(data["xp"])
-
-        lines = [
-            f"**{target.mention}**",
-            f"Level **{data['level']}** (calc: {lvl}) · XP **{data['xp']:,}** · **{cur:,}/{nxt:,}** to next",
-            f"STR **{data['str']}**  INT **{data['int']}**  DEX **{data['dex']}**",
-            f"WIS **{data['wis']}**  CHA **{data['cha']}**  VIT **{data['vit']}**",
-        ]
-        if data.get("last_level_up"):
-            lines.append(f"Last level-up: `{data['last_level_up']}`")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-    # /rpg top
-    @app_commands.command(name="top", description="Show top RPG levels in this server.")
-    @app_commands.describe(limit="How many to list (default 20)")
-    async def top(
-        self,
-        interaction: discord.Interaction,
-        limit: int = 20,
-    ):
-        await interaction.response.defer(ephemeral=True)
-        if not interaction.guild_id:
-            return await interaction.followup.send("Run this in a server.", ephemeral=True)
-
-        limit = max(1, min(int(limit), 50))
-        rows = rpg_model.top_levels(interaction.guild_id, limit)
-        if not rows:
-            return await interaction.followup.send("No RPG data yet.", ephemeral=True)
-
-        out = ["**Top RPG**"]
-        for rank, (uid, level, xp) in enumerate(rows, 1):
-            member = interaction.guild.get_member(uid) if interaction.guild else None  # type: ignore[arg-type]
-            name = member.mention if member else f"<@{uid}>"
-            out.append(f"{rank:>2}. {name} — L{int(level)} · {int(xp):,} XP")
-        await interaction.followup.send("\n".join(out), ephemeral=True)
-
-    # /rpg respec_snapshot
     @app_commands.command(
-        name="respec_snapshot",
-        description="Re-allocate stats NOW from the current 7-day activity ranking (keeps XP/level).",
-    )
-    @app_commands.describe(user="Limit to one member (optional)")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def respec_snapshot(
-        self,
-        interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
-    ):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        if not interaction.guild_id:
-            return await interaction.followup.send("Run this in a server.", ephemeral=True)
-        count = rpg_model.respec_stats_to_formula(interaction.guild_id, user.id if user else None)
-        who = user.mention if user else "all members"
-        await interaction.followup.send(f"Respecced **{count}** member(s) ({who}).", ephemeral=True)
-
-    # /rpg rebuild_progress
-    @app_commands.command(
-        name="rebuild_progress",
-        description="Rebuild XP/levels per message chronologically (rolling 7-day stat allocation).",
+        name="rpg_rebuild_progress",
+        description="Rebuild RPG XP/levels/stats chronologically with 7-day rolling windows at each level up."
     )
     @app_commands.describe(
-        user="Limit to one member (optional)",
-        since_day="YYYY-MM-DD (inclusive), optional",
-        until_day="YYYY-MM-DD (inclusive), optional",
-        reset="If true, wipes RPG progress rows for the target(s) first (default: true)",
+        member="Only rebuild a single member (optional).",
+        since_day="Start at this day (YYYY-MM-DD). Leave blank to auto-detect first activity.",
+        until_day="Stop at this day (YYYY-MM-DD), inclusive.",
+        reset="If true, clear existing progress before rebuilding (default: true)."
     )
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def rebuild_progress(
+    async def rpg_rebuild_progress(
         self,
         interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
+        member: Optional[discord.Member] = None,
         since_day: Optional[str] = None,
         until_day: Optional[str] = None,
         reset: bool = True,
     ):
+        if not await ensure_guild(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not interaction.guild_id:
-            return await interaction.followup.send("Run this in a server.", ephemeral=True)
 
-        processed = rpg_model.rebuild_progress_chronological(
-            interaction.guild_id,
-            user_id=user.id if user else None,
+        gid = interaction.guild_id
+        uid = member.id if member else None
+
+        # Auto-detect since_day if not provided
+        if since_day is None:
+            with connect() as con:
+                cur = con.cursor()
+                row = cur.execute("""
+                    SELECT MIN(day)
+                      FROM (
+                        SELECT MIN(day) AS day FROM member_metrics_daily WHERE guild_id=? {flt}
+                        UNION
+                        SELECT MIN(day) AS day FROM member_messages_day WHERE guild_id=? {flt2}
+                      ) t
+                """.replace("{flt}",  "AND user_id=?" if uid else "")
+                  .replace("{flt2}","AND user_id=?" if uid else ""),
+                  (gid,) + ((uid,) if uid else ()) + (gid,) + ((uid,) if uid else ())
+                ).fetchone()
+                since_day = row[0] if row and row[0] else None
+
+        count = rpg_model.rebuild_progress_chronological(
+            guild_id=gid,
+            user_id=uid,
             since_day=since_day,
             until_day=until_day,
-            reset=bool(reset),
+            reset=reset,
         )
-        who = user.mention if user else "all members"
-        extras = []
-        if since_day:
-            extras.append(f"since `{since_day}`")
-        if until_day:
-            extras.append(f"until `{until_day}`")
-        suffix = f" ({', '.join(extras)})" if extras else ""
-        await interaction.followup.send(
-            f"Rebuilt RPG progress for **{processed}** member(s): {who}{suffix}.", ephemeral=True
-        )
-# inside RPGCog
 
-    @app_commands.command(name="debug_feed", description="Show the message/word totals the rebuild will consume.")
+        await interaction.followup.send(
+            f"Rebuilt RPG progress for **{count}** member(s). "
+            f"{'(reset applied)' if reset else '(no reset)'} "
+            f"{f'from {since_day} ' if since_day else ''}{f'to {until_day}' if until_day else ''}".strip(),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="rpg_debug_feed",
+        description="Preview the daily message/word rows the rebuild will read (first 10)."
+    )
     @app_commands.describe(user="Member (defaults to you).", since_day="YYYY-MM-DD", until_day="YYYY-MM-DD")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def debug_feed(
+    async def rpg_debug_feed(
         self,
         interaction: discord.Interaction,
         user: Optional[discord.Member] = None,
@@ -144,32 +91,28 @@ class RPGCog(commands.GroupCog, name="rpg", description="RPG: levels, stats, reb
         uid = (user or interaction.user).id
         gid = interaction.guild_id
 
-        from ..models import rpg as rpg_model
-
         total_msgs = 0
         total_words = 0
         days = 0
-        rows_preview = []
-
+        preview = []
         with connect() as con:
             for day_iso, msgs, words in rpg_model._iter_daily_msgs_words(con, gid, uid, since_day, until_day):
                 days += 1
                 total_msgs += int(msgs or 0)
                 total_words += int(words or 0)
-                if len(rows_preview) < 10:
-                    rows_preview.append(f"{day_iso}: msgs {int(msgs or 0):,}, words {int(words or 0):,}")
+                if len(preview) < 10:
+                    preview.append(f"{day_iso}: msgs {int(msgs or 0):,}, words {int(words or 0):,}")
 
         if days == 0:
-            return await interaction.followup.send("No daily rows found for this member in any supported table.", ephemeral=True)
+            return await interaction.followup.send("No daily rows found.", ephemeral=True)
 
         lines = [
             f"Feed for <@{uid}> — days: **{days}**",
             f"Messages: **{total_msgs:,}** · Words: **{total_words:,}**",
             "First rows:",
-            *rows_preview,
+            *preview,
         ]
         await interaction.followup.send("\n".join(lines), ephemeral=True)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RPGCog(bot))
