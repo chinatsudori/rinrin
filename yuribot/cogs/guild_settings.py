@@ -6,7 +6,7 @@ from discord.ext import commands
 try:
     from ..models import settings as ms
 except Exception:
-    from yuribot.models import settings as ms  # fallback
+    from yuribot.models import settings as ms
 
 class GuildSettings(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -20,7 +20,7 @@ class GuildSettings(commands.Cog):
             pass
 
     @app_commands.command(name="set_channel", description="Set a per-guild channel setting by key.")
-    @app_commands.describe(key="Setting key, e.g., log_channel, modlog_channel, welcome_channel", channel="Target channel")
+    @app_commands.describe(key="e.g., log_channel, modlog_channel, welcome_channel", channel="Target channel")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(self, interaction: discord.Interaction, key: str, channel: discord.abc.GuildChannel):
         ms.set_guild_setting(interaction.guild_id, key, str(channel.id))
@@ -33,19 +33,17 @@ class GuildSettings(commands.Cog):
         val = ms.get_guild_setting(interaction.guild_id, key, default="(not set)")
         await interaction.response.send_message(f"`{key}` = `{val}`", ephemeral=True)
 
-    @app_commands.command(name="list_settings", description="List all per-guild settings stored.")
+    @app_commands.command(name="list_settings", description="List all per-guild settings.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def list_settings(self, interaction: discord.Interaction):
-        # Naive dump
         try:
             conn = ms._conn()
             cur = conn.execute("SELECT key, value FROM guild_settings WHERE guild_id=? ORDER BY key", (interaction.guild_id,))
             rows = cur.fetchall()
-        except Exception as e:
+        except Exception:
             rows = []
         if not rows:
-            await interaction.response.send_message("No settings found for this guild.", ephemeral=True)
-            return
+            return await interaction.response.send_message("No settings found for this guild.", ephemeral=True)
         lines = [f"- **{k}**: `{v}`" for (k, v) in rows]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 

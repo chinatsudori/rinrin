@@ -1,16 +1,11 @@
-# Added by automation: channel resolver shim
 from __future__ import annotations
 
 def get_from_guild(guild, fallback_id: int, key: str | None = None):
-    """Return a channel from per-guild settings if defined, else fallback to the old hard-coded ID.
-    This is synchronous and uses the cache just like guild.get_channel.
-    """
     try:
         from ..models import settings as ms
     except Exception:
-        # fallback if relative import differs
         try:
-            from yuribot.models import settings as ms  # package name
+            from yuribot.models import settings as ms
         except Exception:
             ms = None
     channel_id = fallback_id
@@ -20,7 +15,6 @@ def get_from_guild(guild, fallback_id: int, key: str | None = None):
             if cid:
                 channel_id = int(cid)
         else:
-            # Without a key, we just honor fallback_id
             channel_id = int(fallback_id)
     ch = None
     if hasattr(guild, "get_channel"):
@@ -30,7 +24,6 @@ def get_from_guild(guild, fallback_id: int, key: str | None = None):
     return ch
 
 def get_from_bot(bot, fallback_id: int):
-    # Keep behavior as close to Client.get_channel as possible
     channel_id = int(fallback_id)
     if hasattr(bot, "get_channel"):
         return bot.get_channel(channel_id)

@@ -36,5 +36,3 @@ pytest_cache/
 
 ppkn-key.json
 ppkn-key.json
-*.pyc
-*.sqlite3

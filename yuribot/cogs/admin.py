@@ -1,5 +1,5 @@
-# /app/yuribot/cogs/admin.py
 from __future__ import annotations
+# /app/yuribot/cogs/admin.py
 
 import asyncio
 import logging

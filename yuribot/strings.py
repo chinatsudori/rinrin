@@ -1,5 +1,36 @@
 from __future__ import annotations
-from typing import Any, Mapping
+from typing import Any, Mapping, Dict
+import random
+
+# ===============================================================
+# Persona / flavor toggles
+# ===============================================================
+RIN_PERSONA_ENABLED = True     # master switch (False = fully neutral)
+RIN_FLAVOR_PROB = 0.0          # 0.0–1.0 chance to append a short quip
+
+# Eligible prefixes (light, SFW sass)
+_RIN_ALLOW_PREFIXES: tuple[str, ...] = (
+    "common.", "poll.",
+    "tools.", "welcome.", "fun.", "move_any.",
+    "mu.",
+)
+
+# Never flavor these (serious/audit)
+_RIN_DENY_PREFIXES: tuple[str, ...] = (
+    "botlog.", "modlog.", "timeout.", "admin.",
+)
+
+# Tiny quip pools
+_RIN_Q: Dict[str, list[str]] = {
+    "ok":   ["ok ok~", "kinda slayed ngl", "noted 💅", "heard ya", "mkay~"],
+    "oops": ["eep—my bad", "uhh yikes", "scuffed…", "whoopsies", "brb crying"],
+    "hint": ["you got this", "i believe in u", "pro gamer move time", "brain on pls", "tiny hint: read closely"],
+}
+
+def _rin_pick(kind: str) -> str:
+    pool = _RIN_Q.get(kind, [])
+    return random.choice(pool) if pool else ""
+
 
 # ===============================================================
 # Storage + formatting helpers
@@ -36,13 +67,36 @@ class _NeutralMap(dict[str, str]):
 _STRINGS: dict[str, str] = _NeutralMap()
 
 
+def _eligible_for_flavor(key: str) -> bool:
+    if not RIN_PERSONA_ENABLED:
+        return False
+    if any(key.startswith(p) for p in _RIN_DENY_PREFIXES):
+        return False
+    return any(key.startswith(p) for p in _RIN_ALLOW_PREFIXES)
+
+
+def _pepper(text: str, key: str) -> str:
+    """Append a tiny quip to eligible messages (never alters placeholders)."""
+    if not _eligible_for_flavor(key) or random.random() > RIN_FLAVOR_PROB:
+        return text
+    lower = text.lower()
+    if any(w in lower for w in ("error", "failed", "couldn’t", "couldn't", "invalid", "missing", "forbidden")):
+        quip = _rin_pick("oops")
+    elif any(w in lower for w in ("try", "hint", "help", "use", "provide", "format")):
+        quip = _rin_pick("hint")
+    else:
+        quip = _rin_pick("ok") or "ok~"
+    return f"{text} {quip}" if text.endswith((".", "!", "…")) else f"{text} — {quip}"
+
+
 def S(key: str, /, **fmt: Any) -> str:
-    """Lookup + format. Safe on format errors."""
+    """Lookup + format with optional persona quip. Safe on format errors."""
     template = _STRINGS.get(key, key)
     try:
-        return template.format(**fmt) if fmt else template
+        text = template.format(**fmt) if fmt else template
     except Exception:
-        return template
+        text = template
+    return _pepper(text, key)
 
 # Optional alias
 T = S
@@ -340,4 +394,3 @@ _STRINGS.update({
     "rolewelcome.footer": "{guild}",
 
 })
-

@@ -1,5 +1,5 @@
-# mangaupdates_cog.py
 from __future__ import annotations
+# mangaupdates_cog.py
 
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple

@@ -1,5 +1,5 @@
-# yuribot/models/voice.py
 from __future__ import annotations
+# yuribot/models/voice.py
 
 import logging
 from dataclasses import dataclass

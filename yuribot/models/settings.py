@@ -123,29 +123,19 @@ __all__ = [
 ]
 
 
-# --- Added by automation: generic per-guild settings helpers ---
-import sqlite3
-
+# Added helpers for per-guild settings
 def _conn():
-    # Simple local import to avoid circulars
-    import os
-    from pathlib import Path
-    try:
-        from .. import db as _db
-    except Exception:
-        from yuribot import db as _db  # fallback if package name is yuribot
+    from .. import db as _db
     return _db.connect()
 
 def ensure_table():
     with _conn() as c:
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS guild_settings (
+        c.execute("""CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER NOT NULL,
             key TEXT NOT NULL,
             value TEXT,
             PRIMARY KEY (guild_id, key)
-        )
-        """)
+        )""")
         c.commit()
 
 def get_guild_setting(guild_id: int, key: str, default=None):
@@ -170,4 +160,3 @@ def get_channel_id(guild_id: int, key: str, fallback_id: int | None = None) -> i
         except ValueError:
             return fallback_id
     return fallback_id
-
