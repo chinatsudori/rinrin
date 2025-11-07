@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from math import log1p, sqrt
 import re
 from typing import Dict, Optional, Iterator
+import re
+from typing import Dict, Optional, Iterator
 from ..db import connect
 
 log = logging.getLogger(__name__)
