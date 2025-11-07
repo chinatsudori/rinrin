@@ -22,13 +22,22 @@ from ..utils.booly import (
     save_state,
 )
 
+# Hard exception: always send this when that user mentions the bot
+ALWAYS_GIF_USER = 994264143634907157
+ALWAYS_GIF_URL = "https://tenor.com/view/sparkle-star-rail-laugh-gif-5535487387681154728"
+
 
 class UserAutoResponder(commands.Cog):
     """
     Behavior:
-    - Mentions (hard trigger): reply using general or mod pool; rate-limited by MENTION_COOLDOWN.
-    - Personalized auto-replies (soft trigger): for users that have *personal lines in DB*,
-      reply at most once per 24h (PERSONAL_COOLDOWN), skipping excluded channels.
+    - Mentions (hard trigger):
+        * If user has personal lines in DB -> use MOD pool
+        * Else -> use GENERAL pool
+        * Exception: user 994264143634907157 → always post the GIF above
+      Mentions are rate-limited by MENTION_COOLDOWN per-user.
+    - Personalized auto-replies (soft trigger):
+        * For users that have personal lines in DB (not a static list)
+        * Once per 24h (PERSONAL_COOLDOWN), skipping EXCLUDED_CHANNEL_IDS
     """
 
     def __init__(self, bot: commands.Bot):
@@ -46,7 +55,8 @@ class UserAutoResponder(commands.Cog):
         general, mod, personal, personal_default = booly_model.fetch_all_pools()
         self.general_pool = general
         self.mod_pool = mod
-        self.personal_pools = personal
+        # Ensure keys are ints (defensive)
+        self.personal_pools = {int(k): v for k, v in personal.items()}
         self.personal_default = personal_default
 
     def _st(self, gid: int, uid: int) -> GuildUserState:
@@ -57,6 +67,17 @@ class UserAutoResponder(commands.Cog):
         if u not in self.state[g]:
             self.state[g][u] = GuildUserState()
         return self.state[g][u]
+
+    def _has_personal_cached(self, uid: int) -> bool:
+        return bool(self.personal_pools.get(uid))
+
+    def _ensure_personal_loaded(self, uid: int) -> bool:
+        """If the user isn't in the in-memory map, query DB once and cache it."""
+        if uid in self.personal_pools:
+            return bool(self.personal_pools[uid])
+        rows = booly_model.fetch_messages(booly_model.SCOPE_PERSONAL, uid)
+        self.personal_pools[uid] = [m.content for m in rows] if rows else []
+        return bool(self.personal_pools[uid])
 
     async def _safe_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
         if not content:
@@ -84,27 +105,41 @@ class UserAutoResponder(commands.Cog):
         now = current_timestamp()
         is_hard = mentioned_me(self.bot, message)
 
-        # Mentions (hard trigger) – general/mod only
+        # Mentions (hard trigger)
         if is_hard:
+            # Special-case GIF user
+            if uid == ALWAYS_GIF_USER:
+                if not st.last_mention_ts or (now - st.last_mention_ts) >= MENTION_COOLDOWN:
+                    await self._safe_reply(message, ALWAYS_GIF_URL)
+                    st.last_mention_ts = now
+                    save_state(self.state)
+                return
+
             if st.last_mention_ts and (now - st.last_mention_ts) < MENTION_COOLDOWN:
                 return
-            pool = self.mod_pool if (member and has_mod_perms(member) and self.mod_pool) else self.general_pool
+
+            # Choose pool based on whether user has personal lines in DB
+            is_personal = self._has_personal_cached(uid) or self._ensure_personal_loaded(uid)
+            use_mod_pool = is_personal and bool(self.mod_pool)
+
+            pool = self.mod_pool if use_mod_pool else self.general_pool
+            # For moderators, your original code forced mod pool; we keep the new rule you asked for:
+            # pool selection is DB-driven, not role-driven.
+
             line = random.choice(pool) if pool else ""
             await self._safe_reply(message, str(S(line)).strip())
             st.last_mention_ts = now
             save_state(self.state)
             return
 
-        # Personalized auto-reply (soft trigger): user must have personal lines in DB
-        # NOTE: no static SPECIAL_IDS; this is fully DB-driven.
-        personal_pool = self.personal_pools.get(uid)
-        if personal_pool:  # user is "special" if they have rows in booly_messages (scope=personal, user_id=uid)
+        # Personalized auto-replies (soft trigger, 24h)
+        # Qualify purely by DB presence (not a static SPECIAL_IDS list)
+        if (self._has_personal_cached(uid) or self._ensure_personal_loaded(uid)):
             if cid in EXCLUDED_CHANNEL_IDS:
                 return
             last = st.last_auto_ts or 0
             if (now - last) >= PERSONAL_COOLDOWN:
-                # fallback to global personal default pool if their user-specific pool exists but is empty
-                pool = personal_pool if personal_pool else self.personal_default
+                pool = self.personal_pools.get(uid) or self.personal_default
                 line = random.choice(pool) if pool else ""
                 await self._safe_reply(message, str(S(line)).strip())
                 st.last_auto_ts = now
