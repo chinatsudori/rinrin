@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from math import log1p, sqrt
-from typing import Dict, Iterable, Mapping, Tuple, Optional
+from typing import Dict, Iterable, Mapping, Tuple, Optional, Iterator
 
 from ..db import connect
 
@@ -41,12 +41,13 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
 
 XP_RULES: Dict[str, float] = {
     "messages": 5,               # per message
-    "words_per_20": 2,           # +2 per 20 words (floor)
+    "words_per_20": 2,           # +2 per 20 words (floor, applied via WPM bonus)
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
     "reactions_received": 1,
+    "reactions_sent": 0.5,       # ADDED: +0.5 for reactions sent
     "emoji_chat": 0.5,
-    "emoji_react": 0.5,
+    "emoji_react": 0.5,          # legacy alias for reactions_sent in some pipelines
     "mentions_received": 3,
     "mentions_sent": 1,
     "sticker_use": 2,
@@ -60,12 +61,20 @@ XP_RULES: Dict[str, float] = {
 # Internal table helpers
 # =======================
 
-def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+def _table_or_view_exists(con: sqlite3.Connection, name: str) -> bool:
     cur = con.cursor()
     row = cur.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,)
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=? LIMIT 1",
+        (name,),
     ).fetchone()
     return bool(row)
+
+def _column_exists(con: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = con.cursor()
+    for _, col_name, *_ in cur.execute(f"PRAGMA table_info({table})"):
+        if str(col_name).lower() == column.lower():
+            return True
+    return False
 
 def _ensure_member_row(con: sqlite3.Connection, guild_id: int, user_id: int) -> tuple[int, int]:
     cur = con.cursor()
@@ -82,38 +91,38 @@ def _ensure_member_row(con: sqlite3.Connection, guild_id: int, user_id: int) -> 
         (guild_id, user_id),
     )
     return 1, 0
+
 def _metrics_for_day(
     con: sqlite3.Connection, guild_id: int, user_id: int, day_iso: str
 ) -> Dict[str, int]:
     """
     Return counts for the XP-bearing metrics for a single day from member_metrics_daily.
-    Missing metrics return 0. Compatible fallbacks included (e.g. reactions_sent vs emoji_react).
+    Missing metrics return 0. Handles legacy aliases.
     """
     wanted = {
         "mentions_sent",
         "mentions",                 # received
         "emoji_chat",
         "reactions_received",
+        "reactions_sent",           # if stored explicitly
+        "emoji_react",              # legacy alias for reactions_sent
         "sticker_use",
         "voice_minutes",
         "voice_stream_minutes",
         "activity_joins",
         "gifs",
         "gif_use",
-        "reactions_sent",           # if you store this explicitly
-        "emoji_react",              # fallback alias for reactions sent
     }
     cur = con.cursor()
     rows = cur.execute(
-        """
+        f"""
         SELECT metric, SUM(count)
           FROM member_metrics_daily
-         WHERE guild_id=? AND user_id=? AND day=?
-           AND metric IN ({})
+         WHERE guild_id=? AND user_id=? AND day=? AND metric IN ({",".join("?" for _ in wanted)})
          GROUP BY metric
-        """.format(",".join("?" for _ in wanted)),
+        """,
         (guild_id, user_id, day_iso, *wanted),
-    ).fetchall()
+    )
     acc: Dict[str, int] = {k: 0 for k in wanted}
     for m, c in rows:
         acc[str(m)] = int(c or 0)
@@ -127,61 +136,6 @@ def _metrics_for_day(
 # =====================================
 # Chronological data feed (messages/words)
 # =====================================
-def _apply_increments_across_levels(
-    con: sqlite3.Connection,
-    guild_id: int,
-    user_id: int,
-    per_inc_xp: int,
-    count: int,
-    end_day_for_snapshot: str,
-) -> None:
-    """
-    Apply `count` increments of `per_inc_xp`, crossing level boundaries correctly.
-    On every level-up, snapshot stats using the 7-day window ending at `end_day_for_snapshot`.
-    """
-    if count <= 0 or per_inc_xp <= 0:
-        return
-    cur = con.cursor()
-    row = cur.execute(
-        "SELECT xp, level FROM member_rpg_progress WHERE guild_id=? AND user_id=?",
-        (guild_id, user_id),
-    ).fetchone()
-    if not row:
-        cur.execute(
-            "INSERT INTO member_rpg_progress (guild_id, user_id, xp, level, str, int, cha, vit, dex, wis) VALUES (?, ?, 0, 1, 5,5,5,5,5,5)",
-            (guild_id, user_id),
-        )
-        xp, level = 0, 1
-    else:
-        xp, level = int(row[0]), int(row[1])
-
-    while count > 0:
-        need = _xp_for_level(level + 1) - xp
-        if need <= 0:
-            # already beyond next threshold (shouldn’t happen, but guard)
-            level += 1
-            continue
-        # how many increments until the next level?
-        steps = (need + per_inc_xp - 1) // per_inc_xp
-        if steps <= count:
-            # cross the boundary exactly at this chunk
-            xp += steps * per_inc_xp
-            level += 1
-            count -= steps
-            # write and snapshot level-up
-            cur.execute("UPDATE member_rpg_progress SET level=?, xp=? WHERE guild_id=? AND user_id=?",
-                        (level, xp, guild_id, user_id))
-            _apply_levelup_stats_at_day(con, guild_id, user_id, end_day_for_snapshot)
-            cur.execute(
-                "UPDATE member_rpg_progress SET last_level_up=? WHERE guild_id=? AND user_id=?",
-                (f"{end_day_for_snapshot} 12:00:00", guild_id, user_id),
-            )
-        else:
-            # we won't reach the next level with remaining increments
-            xp += count * per_inc_xp
-            cur.execute("UPDATE member_rpg_progress SET xp=? WHERE guild_id=? AND user_id=?",
-                        (xp, guild_id, user_id))
-            count = 0
 
 def _iter_daily_msgs_words(
     con: sqlite3.Connection,
@@ -189,60 +143,77 @@ def _iter_daily_msgs_words(
     user_id: int,
     since_day: Optional[str],
     until_day: Optional[str],
-):
+) -> Iterator[tuple[str, int, int]]:
     """
     Yields (day_iso, msgs, words) ascending.
     Source priority:
       1) member_metrics_daily (metrics 'messages','words')
-      2) member_messages_day (columns: messages, words?)  [words → 0 if absent]
+      2) member_messages_day (table/view: columns messages, words?)  [words→0 if absent]
     """
     cur = con.cursor()
 
-    if _table_exists(con, "member_metrics_daily"):
-        q = """
+    # Preferred: unified metrics
+    if _table_or_view_exists(con, "member_metrics_daily"):
+        clauses = ["guild_id=?","user_id=?"]
+        params: list[object] = [guild_id, user_id]
+        if since_day:
+            clauses.append("day>=?")
+            params.append(since_day)
+        if until_day:
+            clauses.append("day<=?")
+            params.append(until_day)
+
+        q = f"""
             SELECT day,
                    SUM(CASE WHEN metric='messages' THEN count ELSE 0 END) AS msgs,
                    SUM(CASE WHEN metric='words'    THEN count ELSE 0 END) AS words
               FROM member_metrics_daily
-             WHERE guild_id=? AND user_id=?
+             WHERE {' AND '.join(clauses)}
+             GROUP BY day
+             ORDER BY day ASC
         """
-        params: list[object] = [guild_id, user_id]
-        if since_day:
-            q += " AND day>=?"
-            params.append(since_day)
-        if until_day:
-            q += " AND day<=?"
-            params.append(until_day)
-        q += " GROUP BY day ORDER BY day ASC"
-        for day_iso, msgs, words in cur.execute(q, params).fetchall():
-            yield day_iso, int(msgs or 0), int(words or 0)
+        for day_iso, msgs, words in cur.execute(q, params):
+            yield str(day_iso), int(msgs or 0), int(words or 0)
         return
 
-    if _table_exists(con, "member_messages_day"):
-        # Detect words column
-        info = cur.execute("PRAGMA table_info(member_messages_day)").fetchall()
-        has_words = any(str(col[1]).lower() == "words" for col in info)
+    # Legacy: member_messages_day (table or view)
+    if _table_or_view_exists(con, "member_messages_day"):
+        has_words = _column_exists(con, "member_messages_day", "words")
 
-        if has_words:
-            q = "SELECT day, messages, words FROM member_messages_day WHERE guild_id=? AND user_id=?"
-        else:
-            q = "SELECT day, messages, 0 as words FROM member_messages_day WHERE guild_id=? AND user_id=?"
+        clauses = ["guild_id=?","user_id=?"]
         params = [guild_id, user_id]
         if since_day:
-            q += " AND day>=?"
+            clauses.append("day>=?")
             params.append(since_day)
         if until_day:
-            q += " AND day<=?"
+            clauses.append("day<=?")
             params.append(until_day)
-        q += " ORDER BY day ASC"
-        for day_iso, msgs, words in cur.execute(q, params).fetchall():
-            yield day_iso, int(msgs or 0), int(words or 0)
 
+        if has_words:
+            q = f"""
+                SELECT day, messages, words
+                  FROM member_messages_day
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY day ASC
+            """
+        else:
+            q = f"""
+                SELECT day, messages, 0 AS words
+                  FROM member_messages_day
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY day ASC
+            """
+        for day_iso, msgs, words in cur.execute(q, params):
+            yield str(day_iso), int(msgs or 0), int(words or 0)
+        return
+
+    # Neither table/view exists; nothing to yield.
+    return
 # ======================================
 # 7-day window scoring at a point in time
 # ======================================
 
-# Tunables (kept pragmatic/light)
+# Tunables
 K_STR_BASE = 3.0
 STR_DAYS_EXP = 0.15
 STR_MIN_ACTIVITY_FACTOR = 0.65
@@ -278,11 +249,11 @@ def _sum_window(cur: sqlite3.Cursor, q: str, params: tuple) -> int:
 def _scores_window(con: sqlite3.Connection, guild_id: int, user_id: int, end_day: str) -> Dict[str, float]:
     """
     Compute stat scores using [end_day-6, end_day] inclusive.
-    Pulls from member_metrics_daily for metrics; falls back smartly if missing.
+    Pulls from member_metrics_daily; falls back smartly via aliases where needed.
     """
     cur = con.cursor()
     start_q = "date(?, '-6 day')"  # computed by sqlite
-    # messages/words/emoji/etc from member_metrics_daily
+
     def msum(metric: str) -> int:
         return _sum_window(
             cur,
@@ -493,6 +464,62 @@ def reset_progress(guild_id: int, user_id: int | None = None) -> int:
 # Chronological rebuild (correct)
 # ==============================
 
+def _apply_increments_across_levels(
+    con: sqlite3.Connection,
+    guild_id: int,
+    user_id: int,
+    per_inc_xp: int,
+    count: int,
+    end_day_for_snapshot: str,
+) -> None:
+    """
+    Apply `count` increments of `per_inc_xp`, crossing level boundaries correctly.
+    On every level-up, snapshot stats using the 7-day window ending at `end_day_for_snapshot`.
+    """
+    if count <= 0 or per_inc_xp <= 0:
+        return
+    cur = con.cursor()
+    row = cur.execute(
+        "SELECT xp, level FROM member_rpg_progress WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id),
+    ).fetchone()
+    if not row:
+        cur.execute(
+            "INSERT INTO member_rpg_progress (guild_id, user_id, xp, level, str, int, cha, vit, dex, wis) VALUES (?, ?, 0, 1, 5,5,5,5,5,5)",
+            (guild_id, user_id),
+        )
+        xp, level = 0, 1
+    else:
+        xp, level = int(row[0]), int(row[1])
+
+    while count > 0:
+        need = _xp_for_level(level + 1) - xp
+        if need <= 0:
+            # shouldn't happen, but guard
+            level += 1
+            continue
+        # how many increments until the next level?
+        steps = (need + per_inc_xp - 1) // per_inc_xp
+        if steps <= count:
+            # cross the boundary exactly at this chunk
+            xp += steps * per_inc_xp
+            level += 1
+            count -= steps
+            # write and snapshot level-up
+            cur.execute("UPDATE member_rpg_progress SET level=?, xp=? WHERE guild_id=? AND user_id=?",
+                        (level, xp, guild_id, user_id))
+            _apply_levelup_stats_at_day(con, guild_id, user_id, end_day_for_snapshot)
+            cur.execute(
+                "UPDATE member_rpg_progress SET last_level_up=? WHERE guild_id=? AND user_id=?",
+                (f"{end_day_for_snapshot} 12:00:00", guild_id, user_id),
+            )
+        else:
+            # we won't reach the next level with remaining increments
+            xp += count * per_inc_xp
+            cur.execute("UPDATE member_rpg_progress SET xp=? WHERE guild_id=? AND user_id=?",
+                        (xp, guild_id, user_id))
+            count = 0
+
 def rebuild_progress_chronological(
     guild_id: int,
     user_id: int | None = None,
@@ -503,22 +530,27 @@ def rebuild_progress_chronological(
 ) -> int:
     """
     Rebuild XP & stats *chronologically*:
-    - Award per message in day order.
-    - On each level-up, compute a 7-day window ending at that day for stat allocation.
+    - Apply message XP day-by-day; level-ups snapshot stats using the 7-day window ending that day.
+    - Apply all other XP rules chronologically per day as integral “batches” that still respect level boundaries.
     """
     processed = 0
     with connect() as con:
         cur = con.cursor()
 
-        # choose who to rebuild
-        if user_id is None:
-            users = [r[0] for r in cur.execute(
-                "SELECT DISTINCT user_id FROM member_metrics_daily WHERE guild_id=? "
-                "UNION SELECT DISTINCT user_id FROM member_messages_day WHERE guild_id=?",
-                (guild_id, guild_id),
-            ).fetchall()]
-        else:
+        # choose who to rebuild; tolerate only one source existing
+        users: list[int] = []
+        if _table_or_view_exists(con, "member_metrics_daily"):
+            users.extend(int(u) for (u,) in cur.execute(
+                "SELECT DISTINCT user_id FROM member_metrics_daily WHERE guild_id=?", (guild_id,)
+            ))
+        if _table_or_view_exists(con, "member_messages_day"):
+            users.extend(int(u) for (u,) in cur.execute(
+                "SELECT DISTINCT user_id FROM member_messages_day WHERE guild_id=?", (guild_id,)
+            ))
+        if user_id is not None:
             users = [int(user_id)]
+        else:
+            users = sorted(set(users))
 
         if reset:
             if user_id is None:
@@ -528,60 +560,54 @@ def rebuild_progress_chronological(
             con.commit()
 
         for uid in users:
-            level, xp = _ensure_member_row(con, guild_id, uid)
-
+            _ensure_member_row(con, guild_id, uid)
             had_any = False
+
             for day_iso, msgs, words in _iter_daily_msgs_words(con, guild_id, uid, since_day, until_day):
                 had_any = True
 
-                # 1) Messages (+ words-per-20 bonus baked into per-message XP)
+                # 1) Messages (+ words-per-20 bonus via daily WPM)
                 if msgs > 0:
                     wpm = (words / msgs) if msgs else 0.0
                     bonus_words = int(wpm // 20) * int(XP_RULES.get("words_per_20", 2))
                     per_msg_xp = max(0, int(XP_RULES.get("messages", 5)) + bonus_words)
                     _apply_increments_across_levels(con, guild_id, uid, per_msg_xp, int(msgs), day_iso)
 
-                # 2) Other daily metrics — apply on the same day, boundary-aware
+                # 2) Other daily metrics — apply as same-day “batches”, but still boundary-aware
                 m = _metrics_for_day(con, guild_id, uid, day_iso)
 
-                # helpers to add integer (batched) or fractional totals
-                def add_units(metric_name: str, unit_xp: float, count_val: int) -> None:
+                def add_units(unit_xp: float, count_val: int) -> None:
                     if count_val <= 0 or unit_xp <= 0:
                         return
                     total_xp = int(round(count_val * unit_xp))
                     if total_xp <= 0:
                         return
-                    # apply as one big batch that still respects multi-level crossing
                     _apply_increments_across_levels(con, guild_id, uid, total_xp, 1, day_iso)
 
                 # mentions / replies
-                add_units("mentions_sent",       float(XP_RULES.get("mentions_sent", 1.0)),      int(m.get("mentions_sent", 0)))
-                add_units("mentions_received",   float(XP_RULES.get("mentions_received", 3.0)),  int(m.get("mentions", 0)))
+                add_units(float(XP_RULES.get("mentions_sent", 1.0)),      int(m.get("mentions_sent", 0)))
+                add_units(float(XP_RULES.get("mentions_received", 3.0)),  int(m.get("mentions", 0)))
 
                 # emoji in chat (+0.5 each)
-                add_units("emoji_chat",          float(XP_RULES.get("emoji_chat", 0.5)),         int(m.get("emoji_chat", 0)))
+                add_units(float(XP_RULES.get("emoji_chat", 0.5)),         int(m.get("emoji_chat", 0)))
 
                 # reactions
-                add_units("reactions_received",  float(XP_RULES.get("reactions_received", 1.0)), int(m.get("reactions_received", 0)))
-                # reactions sent (fallback to emoji_react if you store that instead)
-                add_units("reactions_sent",      float(XP_RULES.get("reactions_sent", 0.5)),     int(m.get("reactions_sent", 0)))
+                add_units(float(XP_RULES.get("reactions_received", 1.0)), int(m.get("reactions_received", 0)))
+                add_units(float(XP_RULES.get("reactions_sent", 0.5)),     int(m.get("reactions_sent", 0)))
 
                 # stickers
-                add_units("sticker_use",         float(XP_RULES.get("sticker_use", 2.0)),        int(m.get("sticker_use", 0)))
+                add_units(float(XP_RULES.get("sticker_use", 2.0)),        int(m.get("sticker_use", 0)))
 
                 # voice / streaming minutes
-                add_units("voice_minutes",       float(XP_RULES.get("voice_minutes", 1.0)),      int(m.get("voice_minutes", 0)))
-                add_units("voice_stream_minutes",float(XP_RULES.get("voice_stream_minutes", 2.0)),int(m.get("voice_stream_minutes", 0)))
+                add_units(float(XP_RULES.get("voice_minutes", 1.0)),      int(m.get("voice_minutes", 0)))
+                add_units(float(XP_RULES.get("voice_stream_minutes", 2.0)),int(m.get("voice_stream_minutes", 0)))
 
                 # activity joins
-                add_units("activity_joins",      float(XP_RULES.get("activity_joins", 5.0)),     int(m.get("activity_joins", 0)))
+                add_units(float(XP_RULES.get("activity_joins", 5.0)),     int(m.get("activity_joins", 0)))
 
-                # gifs
-                # (support both 'gifs' and 'gif_use' for compatibility; whichever exists in your pipeline)
+                # gifs (support both names)
                 gifs_total = int(m.get("gifs", 0) or m.get("gif_use", 0))
-                add_units("gifs",                float(XP_RULES.get("gifs", 1.0)),               gifs_total)
-
-
+                add_units(float(XP_RULES.get("gifs", 1.0)),               gifs_total)
 
             if had_any:
                 processed += 1
