@@ -13,7 +13,6 @@ from ..utils.booly import (
     EXCLUDED_CHANNEL_IDS,
     MENTION_COOLDOWN,
     PERSONAL_COOLDOWN,
-    SPECIAL_IDS,
     GuildUserState,
     StateType,
     current_timestamp,
@@ -26,10 +25,10 @@ from ..utils.booly import (
 
 class UserAutoResponder(commands.Cog):
     """
-    - Personalized replies (special users) fire once per 24h after any message
-      (skips excluded channels).
-    - Mentions (any user, any channel) always use general or mod quips (never personalized),
-      and are rate-limited by MENTION_COOLDOWN.
+    Behavior:
+    - Mentions (hard trigger): reply using general or mod pool; rate-limited by MENTION_COOLDOWN.
+    - Personalized auto-replies (soft trigger): for users that have *personal lines in DB*,
+      reply at most once per 24h (PERSONAL_COOLDOWN), skipping excluded channels.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -37,7 +36,9 @@ class UserAutoResponder(commands.Cog):
         self.state: StateType = load_state()
         self.general_pool: List[str] = []
         self.mod_pool: List[str] = []
+        # user_id -> list[str]
         self.personal_pools: Dict[int, List[str]] = {}
+        # global personal defaults (scope=personal, user_id is NULL)
         self.personal_default: List[str] = []
         self.reload_messages()
 
@@ -57,12 +58,9 @@ class UserAutoResponder(commands.Cog):
             self.state[g][u] = GuildUserState()
         return self.state[g][u]
 
-    async def _safe_reply(
-        self, src: discord.Message, content: str
-    ) -> Optional[discord.Message]:
+    async def _safe_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
         if not content:
             return None
-        # Expand our emoji tokens before sending
         content = expand_emoji_tokens(content)
         try:
             return await src.reply(content, mention_author=False)
@@ -86,28 +84,29 @@ class UserAutoResponder(commands.Cog):
         now = current_timestamp()
         is_hard = mentioned_me(self.bot, message)
 
-        # Mentions (hard trigger) - any user, any channel; rate-limited
+        # Mentions (hard trigger) – general/mod only
         if is_hard:
             if st.last_mention_ts and (now - st.last_mention_ts) < MENTION_COOLDOWN:
                 return
             pool = self.mod_pool if (member and has_mod_perms(member) and self.mod_pool) else self.general_pool
             line = random.choice(pool) if pool else ""
-            text = str(S(line)).strip()
-            await self._safe_reply(message, text)
+            await self._safe_reply(message, str(S(line)).strip())
             st.last_mention_ts = now
             save_state(self.state)
             return
 
-        # Personalized auto-replies for special users (24h)
-        if uid in SPECIAL_IDS:
+        # Personalized auto-reply (soft trigger): user must have personal lines in DB
+        # NOTE: no static SPECIAL_IDS; this is fully DB-driven.
+        personal_pool = self.personal_pools.get(uid)
+        if personal_pool:  # user is "special" if they have rows in booly_messages (scope=personal, user_id=uid)
             if cid in EXCLUDED_CHANNEL_IDS:
                 return
             last = st.last_auto_ts or 0
             if (now - last) >= PERSONAL_COOLDOWN:
-                pool = self.personal_pools.get(uid, self.personal_default)
+                # fallback to global personal default pool if their user-specific pool exists but is empty
+                pool = personal_pool if personal_pool else self.personal_default
                 line = random.choice(pool) if pool else ""
-                text = str(S(line)).strip()
-                await self._safe_reply(message, text)
+                await self._safe_reply(message, str(S(line)).strip())
                 st.last_auto_ts = now
                 st.last_key = line
                 save_state(self.state)
