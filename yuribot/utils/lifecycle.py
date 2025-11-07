@@ -21,9 +21,7 @@ def configure_signal_handlers(bot: discord.Client, handler: Callable[[str], None
 
 
 def build_shutdown_message(sig_name: str) -> str:
-    from ..strings import S
-
-    return f"?? {S('stats.botinfo.title')} - rebooting (signal: {sig_name})"
+    return f"?? Bot rebooting (signal: {sig_name})"
 
 
 def botlog_channels(bot: discord.Client):
