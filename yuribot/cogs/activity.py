@@ -678,7 +678,7 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
         await interaction.followup.send(embed=embed, ephemeral=not post)
 
         if details:
-            detail = await asyncio.to_thread(compute_user_activity_details, gid, uid)
+            detail = compute_user_activity_details(gid, uid)
             if not detail:
                 await interaction.followup.send(
                     "Detailed analytics require archived messages.",
