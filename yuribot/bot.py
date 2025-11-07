@@ -150,6 +150,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.booly",
             "yuribot.cogs.polls",
             "yuribot.cogs.lifecycle",
+            "yuribot.cogs.rpg",
         )
         await self._load_extensions(extensions)
 
