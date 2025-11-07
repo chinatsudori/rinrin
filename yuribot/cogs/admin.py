@@ -43,12 +43,37 @@ _LEAVE_TITLES = {"voice leave", "voice_leave", "leave", "voice disconnected"}
 _ID_IN_PARENS = re.compile(r"\((?:\s*)(\d{15,25})(?:\s*)\)\s*$", re.S | re.M)
 
 
-def _extract_last_id(text: str) -> Optional[int]:
-    """Return the last numeric ID found in parentheses in the string."""
-    m = None
-    for m in _ID_IN_PARENS.finditer(text or ""):
+# replace the old patterns + _extract_last_id with this
+
+_PARENS_ANY = re.compile(r"\(([^()]*)\)\s*$", re.S | re.M)
+_DIGITS_10P = re.compile(r"(\d{10,})")
+
+def _extract_last_id(text: str | None) -> Optional[int]:
+    """Get the last snowflake-like number from the LAST (...) group; be tolerant of whitespace/newlines."""
+    if not text:
+        return None
+
+    # Try the last (...) group first
+    m = _PARENS_ANY.search(text)
+    if m:
+        inside = re.sub(r"\D+", "", m.group(1))  # keep only digits (handles splits / spaces / newlines)
+        if len(inside) >= 10:
+            try:
+                return int(inside)
+            except ValueError:
+                pass
+
+    # Fallback: last 10+ digit run anywhere in the string
+    m2 = None
+    for m2 in _DIGITS_10P.finditer(text):
         pass
-    return int(m.group(1)) if m else None
+    if m2:
+        try:
+            return int(m2.group(1))
+        except ValueError:
+            return None
+    return None
+
 
 
 def require_manage_guild() -> app_commands.Check:
@@ -65,25 +90,25 @@ def require_manage_guild() -> app_commands.Check:
     return app_commands.check(predicate)
 
 
-def _parse_voice_embed(
-    msg: discord.Message,
-) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[datetime]]:
-    """
-    Return (kind, user_id, channel_id, timestamp_utc) from a 'Voice Join'/'Voice Leave' embed.
-    If no match, returns (None, None, None, None).
-    """
+def _parse_voice_embed(msg: discord.Message) -> tuple[Optional[str], Optional[int], Optional[int], Optional[datetime]]:
     if not msg.embeds:
         return (None, None, None, None)
 
     for emb in msg.embeds:
         title = (emb.title or "").strip().lower()
-        if title not in ("voice join", "voice leave"):
+
+        kind: Optional[str] = None
+        if title in _JOIN_TITLES:
+            kind = "join"
+        elif title in _LEAVE_TITLES:
+            kind = "leave"
+        else:
             continue
 
-        ts = emb.timestamp or msg.created_at  # aware UTC
+        ts = emb.timestamp or msg.created_at  # both are aware UTC
+
         user_id: Optional[int] = None
         channel_id: Optional[int] = None
-
         for f in emb.fields or []:
             name = (f.name or "").strip().lower()
             val = f.value or ""
@@ -92,11 +117,11 @@ def _parse_voice_embed(
             elif name == "channel":
                 channel_id = _extract_last_id(val)
 
-        kind = "join" if "join" in title else "leave"
-        if user_id and channel_id and ts:
+        if kind and user_id and channel_id and ts:
             return (kind, user_id, channel_id, ts)
 
     return (None, None, None, None)
+
 
 
 BATCH_SIZE = 100
