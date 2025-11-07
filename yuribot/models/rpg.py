@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from math import log1p, sqrt
-from typing import Dict, Iterable, Mapping, Tuple, Optional, Iterator
+from typing import Dict, Optional, Iterator
 
 from ..db import connect
 
@@ -45,13 +45,13 @@ XP_RULES: Dict[str, float] = {
     "voice_minutes": 1,
     "voice_stream_minutes": 2,
     "reactions_received": 1,
-    "reactions_sent": 0.5,       # ADDED: +0.5 for reactions sent
+    "reactions_sent": 0.5,       # +0.5 for reactions sent
     "emoji_chat": 0.5,
     "emoji_react": 0.5,          # legacy alias for reactions_sent in some pipelines
     "mentions_received": 3,
     "mentions_sent": 1,
     "sticker_use": 2,
-    "activity_minutes": 1,
+    "activity_minutes": 1,       # kept for compatibility
     "activity_joins": 5,
     "gifs": 1,
     "gif_use": 1,
@@ -209,6 +209,7 @@ def _iter_daily_msgs_words(
 
     # Neither table/view exists; nothing to yield.
     return
+
 # ======================================
 # 7-day window scoring at a point in time
 # ======================================
@@ -495,17 +496,13 @@ def _apply_increments_across_levels(
     while count > 0:
         need = _xp_for_level(level + 1) - xp
         if need <= 0:
-            # shouldn't happen, but guard
             level += 1
             continue
-        # how many increments until the next level?
         steps = (need + per_inc_xp - 1) // per_inc_xp
         if steps <= count:
-            # cross the boundary exactly at this chunk
             xp += steps * per_inc_xp
             level += 1
             count -= steps
-            # write and snapshot level-up
             cur.execute("UPDATE member_rpg_progress SET level=?, xp=? WHERE guild_id=? AND user_id=?",
                         (level, xp, guild_id, user_id))
             _apply_levelup_stats_at_day(con, guild_id, user_id, end_day_for_snapshot)
@@ -514,7 +511,6 @@ def _apply_increments_across_levels(
                 (f"{end_day_for_snapshot} 12:00:00", guild_id, user_id),
             )
         else:
-            # we won't reach the next level with remaining increments
             xp += count * per_inc_xp
             cur.execute("UPDATE member_rpg_progress SET xp=? WHERE guild_id=? AND user_id=?",
                         (xp, guild_id, user_id))
@@ -573,7 +569,7 @@ def rebuild_progress_chronological(
                     per_msg_xp = max(0, int(XP_RULES.get("messages", 5)) + bonus_words)
                     _apply_increments_across_levels(con, guild_id, uid, per_msg_xp, int(msgs), day_iso)
 
-                # 2) Other daily metrics — apply as same-day “batches”, but still boundary-aware
+                # 2) Other daily metrics — apply as same-day “batches”, boundary-aware
                 m = _metrics_for_day(con, guild_id, uid, day_iso)
 
                 def add_units(unit_xp: float, count_val: int) -> None:

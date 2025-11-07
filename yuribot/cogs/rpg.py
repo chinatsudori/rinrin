@@ -16,6 +16,40 @@ class RPGCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # ---------- helpers ----------
+    def _min_day_from_sources(self, gid: int, uid: int | None) -> Optional[str]:
+        """Safely find earliest day from whichever source(s) exist."""
+        with connect() as con:
+            cur = con.cursor()
+
+            def exists(name: str) -> bool:
+                row = cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=? LIMIT 1",
+                    (name,),
+                ).fetchone()
+                return bool(row)
+
+            mins: list[str] = []
+            if exists("member_metrics_daily"):
+                row = cur.execute(
+                    "SELECT MIN(day) FROM member_metrics_daily WHERE guild_id=? " +
+                    ("AND user_id=?" if uid else ""),
+                    (gid,) + ((uid,) if uid else ()),
+                ).fetchone()
+                if row and row[0]:
+                    mins.append(str(row[0]))
+            if exists("member_messages_day"):
+                row = cur.execute(
+                    "SELECT MIN(day) FROM member_messages_day WHERE guild_id=? " +
+                    ("AND user_id=?" if uid else ""),
+                    (gid,) + ((uid,) if uid else ()),
+                ).fetchone()
+                if row and row[0]:
+                    mins.append(str(row[0]))
+            return min(mins) if mins else None
+
+    # ---------- commands ----------
+
     @app_commands.command(
         name="rpg_rebuild_progress",
         description="Rebuild RPG XP/levels/stats chronologically with 7-day rolling windows at each level up."
@@ -42,22 +76,8 @@ class RPGCog(commands.Cog):
         gid = interaction.guild_id
         uid = member.id if member else None
 
-        # Auto-detect since_day if not provided
         if since_day is None:
-            with connect() as con:
-                cur = con.cursor()
-                row = cur.execute("""
-                    SELECT MIN(day)
-                      FROM (
-                        SELECT MIN(day) AS day FROM member_metrics_daily WHERE guild_id=? {flt}
-                        UNION
-                        SELECT MIN(day) AS day FROM member_messages_day WHERE guild_id=? {flt2}
-                      ) t
-                """.replace("{flt}",  "AND user_id=?" if uid else "")
-                  .replace("{flt2}","AND user_id=?" if uid else ""),
-                  (gid,) + ((uid,) if uid else ()) + (gid,) + ((uid,) if uid else ())
-                ).fetchone()
-                since_day = row[0] if row and row[0] else None
+            since_day = self._min_day_from_sources(gid, uid)
 
         count = rpg_model.rebuild_progress_chronological(
             guild_id=gid,
