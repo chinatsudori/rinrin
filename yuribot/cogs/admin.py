@@ -12,11 +12,12 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 from datetime import datetime, timezone
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-from ..db import connect   # <-- needed for voice_stats to query voice_minutes_day
 
+from ..db import connect
 from ..models import voice as voice_model
 from ..models import activity, activity_report, message_archive, rpg
 from ..models.message_archive import ArchivedMessage  # type: ignore
@@ -37,20 +38,13 @@ log = logging.getLogger(__name__)
 
 # ---------- helpers / checks ----------
 
-
-_JOIN_TITLES  = {"voice join",  "voice_join",  "join",  "voice connected"}
+_JOIN_TITLES = {"voice join", "voice_join", "join", "voice connected"}
 _LEAVE_TITLES = {"voice leave", "voice_leave", "leave", "voice disconnected"}
-_ID_RE = re.compile(r"\((\d{10,})\)")
-
-def _first_id(text: str | None) -> int | None:
-    if not text: return None
-    m = _ID_RE.search(text)
-    return int(m.group(1)) if m else None
-
 _ID_IN_PARENS = re.compile(r"\((?:\s*)(\d{15,25})(?:\s*)\)\s*$", re.S | re.M)
 
+
 def _extract_last_id(text: str) -> Optional[int]:
-    """Find the last numeric ID inside parentheses anywhere in the string."""
+    """Return the last numeric ID found in parentheses in the string."""
     m = None
     for m in _ID_IN_PARENS.finditer(text or ""):
         pass
@@ -59,19 +53,21 @@ def _extract_last_id(text: str) -> Optional[int]:
 
 def require_manage_guild() -> app_commands.Check:
     async def predicate(interaction: discord.Interaction) -> bool:
-        # Must be in a guild
         if not interaction.guild:
             await interaction.response.send_message("Run this in a server.", ephemeral=True)
             return False
-        # Must have Manage Server/Guild
         perms = getattr(interaction.user, "guild_permissions", None)
         if not perms or not perms.manage_guild:
             await interaction.response.send_message("You need **Manage Server** to run this.", ephemeral=True)
             return False
         return True
+
     return app_commands.check(predicate)
 
-def _parse_voice_embed(msg: discord.Message) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[datetime]]:
+
+def _parse_voice_embed(
+    msg: discord.Message,
+) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[datetime]]:
     """
     Return (kind, user_id, channel_id, timestamp_utc) from a 'Voice Join'/'Voice Leave' embed.
     If no match, returns (None, None, None, None).
@@ -84,9 +80,7 @@ def _parse_voice_embed(msg: discord.Message) -> Tuple[Optional[str], Optional[in
         if title not in ("voice join", "voice leave"):
             continue
 
-        # Pull timestamp (embed first, fallback to message)
-        ts = emb.timestamp or msg.created_at  # both are already aware-UTC in discord.py
-
+        ts = emb.timestamp or msg.created_at  # aware UTC
         user_id: Optional[int] = None
         channel_id: Optional[int] = None
 
@@ -103,8 +97,11 @@ def _parse_voice_embed(msg: discord.Message) -> Tuple[Optional[str], Optional[in
             return (kind, user_id, channel_id, ts)
 
     return (None, None, None, None)
+
+
 BATCH_SIZE = 100
 DELAY_BETWEEN_CHANNELS = 0.5
+
 
 @dataclass(slots=True)
 class BackreadStats:
@@ -114,11 +111,10 @@ class BackreadStats:
     skipped: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
+
 # ---------- unified /admin GroupCog ----------
 
 class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
-    group = app_commands.Group(name="admin", description="Admin tools")
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -131,6 +127,7 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
     @app_commands.describe(post="If true, post publicly in this channel")
     async def club_config(self, interaction: discord.Interaction, post: bool = False):
         from ..models import guilds
+
         if not await ensure_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
@@ -160,19 +157,23 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
         post: bool = False,
     ):
         from ..models import guilds
+
         if not await ensure_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
+
         name = filename or image.filename
         valid_name = validate_image_filename(name)
         if not valid_name:
             return await interaction.followup.send(S("admin.set_image.invalid_name"), ephemeral=not post)
+
         try:
             data = await image.read()
             guilds.store_club_image(interaction.guild_id, club_slug, valid_name, data)
         except Exception:
             log.exception("admin.set_image.store_failed", extra={"gid": interaction.guild_id, "club": club_slug})
             return await interaction.followup.send(S("admin.set_image.error"), ephemeral=not post)
+
         await interaction.followup.send(S("admin.set_image.ok"), ephemeral=not post)
 
     @app_commands.command(name="set_link", description="Set an external link for a club.")
@@ -183,14 +184,17 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
     )
     async def set_link(self, interaction: discord.Interaction, club_slug: str, url: str, post: bool = False):
         from ..models import guilds
+
         if not await ensure_guild(interaction):
             return
         await interaction.response.defer(ephemeral=not post)
+
         try:
             guilds.store_club_link(interaction.guild_id, club_slug, url)
         except Exception:
             log.exception("admin.set_link.store_failed", extra={"gid": interaction.guild_id, "club": club_slug})
             return await interaction.followup.send(S("admin.set_link.error"), ephemeral=not post)
+
         await interaction.followup.send(S("admin.set_link.ok"), ephemeral=not post)
 
     # ===== Sync helpers =====
@@ -236,6 +240,168 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
                         for sub2 in sub.commands:
                             lines.append(f"/{cmd.name} {sub.name} {sub2.name}")
         await interaction.followup.send("\n".join(lines[:200]) or "(no commands registered locally)", ephemeral=True)
+
+    # ===== Voice log import / stats =====
+
+    @app_commands.command(
+        name="voice_import_log",
+        description="Parse Voice Join/Leave embeds in a log channel and store historical minutes per user.",
+    )
+    @app_commands.describe(
+        log_channel="The bot-log channel that contains the voice join/leave embeds.",
+        since_message_id="Optional: start AFTER this message id.",
+        dry_run="If true, only report what would be inserted.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def voice_import_log(
+        self,
+        interaction: discord.Interaction,
+        log_channel: discord.TextChannel,
+        since_message_id: Optional[int] = None,
+        dry_run: bool = False,
+    ):
+        if not await ensure_guild(interaction):
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        voice_model.ensure_schema()
+
+        guild = interaction.guild
+        gid = guild.id  # type: ignore[assignment]
+        after_obj = discord.Object(id=since_message_id) if since_message_id else None
+
+        # Progress message (we edit it as we go, but rate-limit edits)
+        progress = await interaction.edit_original_response(content="Scanning log channel history…")
+        last_edit = 0.0
+
+        def _maybe_edit(stage: str, scanned: int, matched: int, sessions: int) -> None:
+            nonlocal last_edit
+            now = discord.utils.utcnow().timestamp()
+            if now - last_edit < 1.0:
+                return
+            last_edit = now
+            content = (
+                f"Scanning **#{log_channel.name}**…\n"
+                f"• {stage}\n"
+                f"• Messages scanned: **{scanned:,}**\n"
+                f"• Voice embeds matched: **{matched:,}**\n"
+                f"• Sessions built: **{sessions:,}**"
+            )
+            try:
+                asyncio.create_task(progress.edit(content=content))
+            except Exception:
+                pass
+
+        # Active sessions per user_id -> (channel_id, joined_at)
+        active: dict[int, tuple[int, datetime]] = {}
+        built: list[voice_model.Session] = []
+        scanned = 0
+        matched = 0
+
+        try:
+            async for m in log_channel.history(limit=None, oldest_first=True, after=after_obj):
+                scanned += 1
+                kind, user_id, channel_id, ts = _parse_voice_embed(m)
+                if kind is None or user_id is None or channel_id is None or ts is None:
+                    continue
+
+                matched += 1
+
+                if kind == "join":
+                    # Close an existing session (switch) at this join time.
+                    if user_id in active:
+                        prev_cid, prev_ts = active.pop(user_id)
+                        if ts > prev_ts:
+                            built.append(voice_model.Session(user_id, prev_cid, prev_ts, ts))
+                    active[user_id] = (channel_id, ts)
+                else:  # leave
+                    if user_id in active:
+                        prev_cid, prev_ts = active.pop(user_id)
+                        if ts > prev_ts:
+                            built.append(voice_model.Session(user_id, prev_cid, prev_ts, ts))
+                    # else: stray leave → ignore
+
+                if scanned % 500 == 0:
+                    _maybe_edit("Parsing…", scanned, matched, len(built))
+
+        except discord.Forbidden:
+            return await interaction.edit_original_response(
+                content="Forbidden: I need **Read Message History** in that channel."
+            )
+
+        # Historical import: drop dangling sessions
+        dangling = len(active)
+        active.clear()
+
+        total_sessions = len(built)
+        total_minutes = 0
+        upsert_rows = 0
+
+        if not dry_run and built:
+            rows, minutes_added = voice_model.upsert_sessions_minutes(gid, built)
+            upsert_rows += rows
+            total_minutes += minutes_added
+
+        lines = [
+            f"Scanned **{scanned:,}** messages.",
+            f"Matched **{matched:,}** voice embeds.",
+            f"Built **{total_sessions:,}** session(s).",
+            f"Dangling sessions ignored: **{dangling}**.",
+        ]
+        if dry_run:
+            lines.append("DRY RUN — nothing written.")
+        else:
+            lines.append(f"Upserted **{upsert_rows:,}** day-row(s); ~**{total_minutes:,}** minutes total.")
+
+        await interaction.edit_original_response(content="\n".join(lines))
+
+    @app_commands.command(
+        name="voice_stats",
+        description="Show a user's total imported voice minutes (UTC days).",
+    )
+    @app_commands.describe(user="Target user (default: you).", limit="How many days to preview (default 10).")
+    async def voice_stats(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+        limit: int = 10,
+    ):
+        if not await ensure_guild(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        gid = interaction.guild_id
+        uid = (user or interaction.user).id
+
+        with connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT day, minutes
+                FROM voice_minutes_day
+                WHERE guild_id=? AND user_id=?
+                ORDER BY day DESC
+                LIMIT ?
+                """,
+                (gid, uid, limit),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(minutes), 0)
+                FROM voice_minutes_day
+                WHERE guild_id=? AND user_id=?
+                """,
+                (gid, uid),
+            )
+            total = int(cur.fetchone()[0] or 0)
+
+        lines = [f"Voice minutes for <@{uid}> (total **{total:,}**):"]
+        for day, minutes in rows:
+            lines.append(f"• {day}: **{int(minutes):,}**")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # ===== Backread (flattened under /admin) =====
 
@@ -316,7 +482,8 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
                     latest_seen = max(latest_seen or 0, batch[-1].message_id)
                     batch.clear()
         except discord.Forbidden:
-            stats.skipped.append(f"{label} (forbidden)"); return
+            stats.skipped.append(f"{label} (forbidden)")
+            return
         except discord.HTTPException as exc:
             stats.errors.append(f"{label}: HTTP {getattr(exc,'status','?')}")
         finally:
@@ -325,8 +492,10 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
                 latest_seen = max(latest_seen or 0, batch[-1].message_id)
 
         stats.messages_archived += stored
-        if is_thread: stats.threads_scanned += 1
-        else:         stats.channels_scanned += 1
+        if is_thread:
+            stats.threads_scanned += 1
+        else:
+            stats.channels_scanned += 1
 
     @app_commands.command(name="backread_start", description="Backread text channels into the message archive.")
     @app_commands.describe(
@@ -342,20 +511,24 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
         include_archived_threads: bool = True,
         include_private_threads: bool = False,
     ):
-        if not await ensure_guild(interaction): return
+        if not await ensure_guild(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
-        if guild is None: return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
 
         me = guild.me
         if not isinstance(me, discord.Member):
-            try: me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
+            try:
+                me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
             except Exception:
                 log.exception("backread.fetch_member_failed", extra={"gid": guild.id})
                 return await interaction.followup.send("Unable to resolve my member.", ephemeral=True)
 
         targets: List[discord.abc.GuildChannel] = []
-        if channel: targets.append(channel)
+        if channel:
+            targets.append(channel)
         else:
             targets.extend(guild.text_channels)
             try:
@@ -367,17 +540,26 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
         for parent in targets:
             ok, why = self._br_can(parent, me)
             if not ok:
-                stats.skipped.append(f"{self._br_label(parent)} ({why})"); continue
+                stats.skipped.append(f"{self._br_label(parent)} ({why})")
+                continue
             counted = False
             if isinstance(parent, discord.TextChannel):
-                await self._br_archive(parent, stats, is_thread=False); counted = True
-            threads = await self._br_threads(parent, include_private_threads, me) if (include_archived_threads or include_private_threads) else [t for t in getattr(parent,"threads",[]) if isinstance(t, discord.Thread)]
+                await self._br_archive(parent, stats, is_thread=False)
+                counted = True
+            threads = (
+                await self._br_threads(parent, include_private_threads, me)
+                if (include_archived_threads or include_private_threads)
+                else [t for t in getattr(parent, "threads", []) if isinstance(t, discord.Thread)]
+            )
             for t in threads:
                 ok, why = self._br_can(t, me)
-                if not ok: stats.skipped.append(f"{self._br_label(t)} ({why})"); continue
+                if not ok:
+                    stats.skipped.append(f"{self._br_label(t)} ({why})")
+                    continue
                 await self._br_archive(t, stats, is_thread=True)
                 await asyncio.sleep(DELAY_BETWEEN_CHANNELS)
-            if not counted: stats.channels_scanned += 1
+            if not counted:
+                stats.channels_scanned += 1
             await asyncio.sleep(DELAY_BETWEEN_CHANNELS)
 
         lines = [
@@ -396,18 +578,20 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
     @app_commands.command(name="backread_stats", description="Show archive stats for this server.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def backread_stats(self, interaction: discord.Interaction):
-        if not await ensure_guild(interaction): return
+        if not await ensure_guild(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         gid = interaction.guild_id
-        try: summary = message_archive.stats_summary(gid)
+        try:
+            summary = message_archive.stats_summary(gid)
         except Exception:
             log.exception("backread.stats.failed", extra={"gid": gid})
             return await interaction.followup.send("Archive stats unavailable.", ephemeral=True)
         lines = [
             f"Archive stats for **{interaction.guild.name}**",
-            f"• Messages: **{int(summary.get('messages',0)):,}**",
-            f"• Channels: **{int(summary.get('channels',0)):,}**",
-            f"• Unique users: **{int(summary.get('users',0)):,}**",
+            f"• Messages: **{int(summary.get('messages', 0)):,}**",
+            f"• Channels: **{int(summary.get('channels', 0)):,}**",
+            f"• Unique users: **{int(summary.get('users', 0)):,}**",
         ]
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
@@ -425,46 +609,70 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
         include_archived_threads: bool = True,
         include_private_threads: bool = True,
     ):
-        if not await ensure_guild(interaction): return
+        if not await ensure_guild(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
+
         guild = interaction.guild
-        if guild is None: return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
 
         me = guild.me
         if not isinstance(me, discord.Member):
             me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
 
         targets: List[discord.abc.GuildChannel] = []
-        if channel: targets.append(channel)
+        if channel:
+            targets.append(channel)
         else:
             targets.extend(guild.text_channels)
-            try: targets.extend(list(guild.forum_channels))  # type: ignore[attr-defined]
+            try:
+                targets.extend(list(guild.forum_channels))  # type: ignore[attr-defined]
             except AttributeError:
                 targets.extend(ch for ch in guild.channels if isinstance(ch, discord.ForumChannel))
 
-        readable_channels = 0; skipped_channels: List[str]=[]
-        total_threads=0; readable_threads=0; public_threads=0; private_threads=0; skipped_threads: List[str]=[]
+        readable_channels = 0
+        skipped_channels: List[str] = []
+        total_threads = 0
+        readable_threads = 0
+        public_threads = 0
+        private_threads = 0
+        skipped_threads: List[str] = []
 
         for parent in targets:
             ok, why = self._br_can(parent, me)
-            if not ok: skipped_channels.append(f"{self._br_label(parent)} ({why})"); continue
+            if not ok:
+                skipped_channels.append(f"{self._br_label(parent)} ({why})")
+                continue
+
             readable_channels += 1
-            threads = await self._br_threads(parent, include_private_threads, me) if (include_archived_threads or include_private_threads) else [t for t in getattr(parent,"threads",[]) if isinstance(t, discord.Thread)]
+
+            threads = (
+                await self._br_threads(parent, include_private_threads, me)
+                if (include_archived_threads or include_private_threads)
+                else [t for t in getattr(parent, "threads", []) if isinstance(t, discord.Thread)]
+            )
+
             for t in threads:
                 total_threads += 1
                 ttype = getattr(t, "type", None)
                 name = str(getattr(ttype, "name", ttype)).lower() if ttype else ""
-                (private_threads if "private" in name else public_threads).__iadd__(1)
+                if "private" in name:
+                    private_threads += 1
+                else:
+                    public_threads += 1
                 ok, why = self._br_can(t, me)
-                if ok: readable_threads += 1
-                else:  skipped_threads.append(f"{self._br_label(t)} ({why})")
+                if ok:
+                    readable_threads += 1
+                else:
+                    skipped_threads.append(f"{self._br_label(t)} ({why})")
 
         lines = [
             f"**Audit for `{guild.name}`**",
             f"• Channels readable: **{readable_channels:,}**",
         ]
         if skipped_channels:
-            prev = ", ".join(skipped_channels[:8]) + ("..." if len(skipped_channels)>8 else "")
+            prev = ", ".join(skipped_channels[:8]) + ("..." if len(skipped_channels) > 8 else "")
             lines += [f"• Channels skipped (perm): **{len(skipped_channels):,}**", f"  ↳ {prev}"]
         lines += [
             f"• Threads discovered: **{total_threads:,}** (public: **{public_threads:,}**, private: **{private_threads:,}**)",
@@ -472,173 +680,6 @@ class AdminCog(commands.GroupCog, name="admin", description="Admin tools"):
             "• Private threads (TextChannels): require **Manage Threads** to fetch archived ones.",
             "• Private forum threads are not retrievable on this discord.py version.",
         ]
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
-@app_commands.command(
-    name="voice_import_log",
-    description="Parse Voice Join/Leave embeds in a log channel and store historical minutes per user."
-)
-@app_commands.describe(
-    log_channel="The bot-log channel that contains the voice join/leave embeds.",
-    since_message_id="Optional: start AFTER this message id.",
-    dry_run="If true, only report what would be inserted."
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def voice_import_log(
-    self,
-    interaction: discord.Interaction,
-    log_channel: discord.TextChannel,
-    since_message_id: Optional[int] = None,
-    dry_run: bool = False,
-):
-    if not await ensure_guild(interaction):
-        return
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    voice_model.ensure_schema()
-
-    guild = interaction.guild
-    gid = guild.id  # type: ignore[assignment]
-    after_obj = discord.Object(id=since_message_id) if since_message_id else None
-
-    # Progress message (we edit it as we go, but rate-limit edits)
-    progress = await interaction.edit_original_response(content="Scanning log channel history…")
-    last_edit = 0.0
-
-    def _maybe_edit(stage: str, scanned: int, matched: int, sessions: int) -> None:
-        nonlocal last_edit
-        now = discord.utils.utcnow().timestamp()
-        if now - last_edit < 1.0:
-            return
-        last_edit = now
-        content = (
-            f"Scanning **#{log_channel.name}**…\n"
-            f"• {stage}\n"
-            f"• Messages scanned: **{scanned:,}**\n"
-            f"• Voice embeds matched: **{matched:,}**\n"
-            f"• Sessions built: **{sessions:,}**"
-        )
-        try:
-            # Fire and forget; if token expired we’ll handle at the end anyway.
-            asyncio.create_task(progress.edit(content=content))
-        except Exception:
-            pass
-
-    # Active sessions per user_id -> (channel_id, joined_at)
-    active: dict[int, tuple[int, datetime]] = {}
-    built: list[voice_model.Session] = []
-    scanned = 0
-    matched = 0
-
-    try:
-        async for m in log_channel.history(limit=None, oldest_first=True, after=after_obj):
-            scanned += 1
-            kind, user_id, channel_id, ts = _parse_voice_embed(m)
-            if kind is None:
-                continue
-            if user_id is None or channel_id is None or ts is None:
-                continue
-
-            matched += 1
-
-            if kind == "join":
-                # If user already active (maybe moved), close previous at this join time.
-                if user_id in active:
-                    prev_cid, prev_ts = active.pop(user_id)
-                    if ts > prev_ts:
-                        built.append(voice_model.Session(user_id, prev_cid, prev_ts, ts))
-                active[user_id] = (channel_id, ts)
-            else:  # leave
-                if user_id in active:
-                    prev_cid, prev_ts = active.pop(user_id)
-                    if ts > prev_ts:
-                        built.append(voice_model.Session(user_id, prev_cid, prev_ts, ts))
-                # else: stray leave → ignore
-
-            if scanned % 500 == 0:
-                _maybe_edit("Parsing…", scanned, matched, len(built))
-
-    except discord.Forbidden:
-        return await interaction.edit_original_response(
-            content="Forbidden: I need **Read Message History** in that channel."
-        )
-
-    # Optionally: close dangling at now; we’ll skip (historical import).
-    dangling = len(active)
-    active.clear()
-
-    # Persist (or dry-run)
-    total_sessions = len(built)
-    total_minutes = 0
-    upsert_rows = 0
-
-    if not dry_run and built:
-        # Write sessions & per-day minutes
-        rows, minutes_added = voice_model.upsert_sessions_minutes(gid, built)
-        upsert_rows += rows
-        total_minutes += minutes_added
-
-    # Final summary
-    lines = [
-        f"Scanned **{scanned:,}** messages.",
-        f"Matched **{matched:,}** voice embeds.",
-        f"Built **{total_sessions:,}** session(s).",
-        f"Dangling sessions ignored: **{dangling}**.",
-    ]
-    if dry_run:
-        lines.append("DRY RUN — nothing written.")
-    else:
-        lines.append(f"Upserted **{upsert_rows:,}** day-row(s); ~**{total_minutes:,}** minutes total.")
-
-    await interaction.edit_original_response(content="\n".join(lines))
-
-    @app_commands.command(
-        name="voice_stats",
-        description="Show a user's total imported voice minutes (UTC days)."
-    )
-    @app_commands.describe(
-        user="Target user (default: you).",
-        limit="How many days to preview (default 10)."
-    )
-    async def voice_stats(
-        self,
-        interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
-        limit: int = 10,
-    ):
-        if not await ensure_guild(interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-
-        gid = interaction.guild_id
-        uid = (user or interaction.user).id
-
-        with connect() as con:
-            cur = con.cursor()
-            cur.execute(
-                """
-                SELECT day, minutes
-                FROM voice_minutes_day
-                WHERE guild_id=? AND user_id=?
-                ORDER BY day DESC
-                LIMIT ?
-                """,
-                (gid, uid, limit),
-            )
-            rows = cur.fetchall()
-
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(minutes), 0)
-                FROM voice_minutes_day
-                WHERE guild_id=? AND user_id=?
-                """,
-                (gid, uid),
-            )
-            total = int(cur.fetchone()[0] or 0)
-        lines = [f"Voice minutes for <@{uid}> (total **{total:,}**):"]
-        for day, minutes in rows:
-            lines.append(f"• {day}: **{int(minutes):,}**")
-
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(
@@ -658,132 +699,212 @@ async def voice_import_log(
         fill_missing: bool = True,
         compress: bool = False,
     ):
-        if not await ensure_guild(interaction): return
+        if not await ensure_guild(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
 
         guild = interaction.guild
-        if guild is None: return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+        if guild is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
 
         target = channel
-        if target is None: return await interaction.followup.send("Pick a specific text channel or thread.", ephemeral=True)
+        if target is None:
+            return await interaction.followup.send("Pick a specific text channel or thread.", ephemeral=True)
         if isinstance(target, discord.ForumChannel):
-            return await interaction.followup.send("Export a **specific forum thread**, not the forum parent.", ephemeral=True)
+            return await interaction.followup.send(
+                "Export a **specific forum thread**, not the forum parent.", ephemeral=True
+            )
 
         me = guild.me
         if not isinstance(me, discord.Member):
             me = await guild.fetch_member(self.bot.user.id)  # type: ignore[arg-type]
         ok, why = self._br_can(target, me)
-        if not ok: return await interaction.followup.send(f"I can’t read {self._br_label(target)}: {why}.", ephemeral=True)
+        if not ok:
+            return await interaction.followup.send(f"I can’t read {self._br_label(target)}: {why}.", ephemeral=True)
 
-        label = self._br_label(target); gid=guild.id; cid=target.id
+        label = self._br_label(target)
+        gid = guild.id
+        cid = target.id
+
         progress = await interaction.followup.send(f"**Exporting {label}…**\nPreparing…", ephemeral=True)
-        deadline = time.monotonic() + 12*60; last_edit=0.0; editable=True
-        async def edit(stage:str,*,found:int=0,scanned:int=0,exported:int=0):
-            nonlocal last_edit,editable
-            if not editable or time.monotonic()>deadline: editable=False; return
-            now=time.monotonic()
-            if now-last_edit<1.0: return
-            parts=[f"**Exporting {label}…**", f"• {stage}"]
-            if fill_missing: parts.append(f"• Missing found this run: **{found:,}**")
-            if scanned:      parts.append(f"• Messages scanned: **{scanned:,}**")
-            if exported:     parts.append(f"• Rows written: **{exported:,}**")
-            try: await progress.edit(content="\n".join(parts)); last_edit=now
+        deadline = time.monotonic() + 12 * 60
+        last_edit = 0.0
+        editable = True
+
+        async def edit(stage: str, *, found: int = 0, scanned: int = 0, exported: int = 0):
+            nonlocal last_edit, editable
+            if not editable or time.monotonic() > deadline:
+                editable = False
+                return
+            now = time.monotonic()
+            if now - last_edit < 1.0:
+                return
+            parts = [f"**Exporting {label}…**", f"• {stage}"]
+            if fill_missing:
+                parts.append(f"• Missing found this run: **{found:,}**")
+            if scanned:
+                parts.append(f"• Messages scanned: **{scanned:,}**")
+            if exported:
+                parts.append(f"• Rows written: **{exported:,}**")
+            try:
+                await progress.edit(content="\n".join(parts))
+                last_edit = now
             except discord.HTTPException as e:
-                if getattr(e,"code",None)==50027 or e.status==401: editable=False
+                if getattr(e, "code", None) == 50027 or e.status == 401:
+                    editable = False
 
         # load existing ids
-        await edit("Loading existing IDs from DB…"); existing:set[int]=set()
+        await edit("Loading existing IDs from DB…")
+        existing: set[int] = set()
         try:
             con = message_archive.get_connection()
             with con:
-                cur=con.cursor()
-                cur.execute("SELECT message_id FROM message_archive WHERE guild_id=? AND channel_id=?", (gid, cid))
-                for (mid,) in cur.fetchall(): existing.add(int(mid))
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT message_id FROM message_archive WHERE guild_id=? AND channel_id=?",
+                    (gid, cid),
+                )
+                for (mid,) in cur.fetchall():
+                    existing.add(int(mid))
         except Exception:
-            log.exception("backread.export.load_existing_failed", extra={"gid":gid,"cid":cid})
-            try: await progress.edit(content=f"**Exporting {label}…**\nDB read failed while loading existing rows.")
-            except Exception: pass
+            log.exception("backread.export.load_existing_failed", extra={"gid": gid, "cid": cid})
+            try:
+                await progress.edit(content=f"**Exporting {label}…**\nDB read failed while loading existing rows.")
+            except Exception:
+                pass
             return
 
         # fill gaps
-        missing=0; scanned=0
-        if fill_missing and hasattr(target,"history"):
+        missing = 0
+        scanned = 0
+        if fill_missing and hasattr(target, "history"):
             await edit("Scanning Discord history for gaps…", found=missing, scanned=scanned)
-            batch:list[ArchivedMessage]=[]
+            batch: list[ArchivedMessage] = []
             try:
                 async for msg in target.history(limit=None, oldest_first=True):  # type: ignore[attr-defined]
-                    scanned+=1
+                    scanned += 1
                     if msg.id in existing:
-                        if scanned%250==0: await edit("Scanning Discord history for gaps…", found=missing, scanned=scanned)
+                        if scanned % 250 == 0:
+                            await edit("Scanning Discord history for gaps…", found=missing, scanned=scanned)
                         continue
-                    try: row = message_archive.from_discord_message(msg)
+                    try:
+                        row = message_archive.from_discord_message(msg)
                     except Exception:
-                        if scanned%250==0: await edit("Scanning Discord history for gaps…", found=missing, scanned=scanned)
+                        if scanned % 250 == 0:
+                            await edit("Scanning Discord history for gaps…", found=missing, scanned=scanned)
                         continue
-                    batch.append(row); existing.add(msg.id); missing+=1
-                    if len(batch)>=200:
-                        message_archive.upsert_many(batch); batch.clear()
+                    batch.append(row)
+                    existing.add(msg.id)
+                    missing += 1
+                    if len(batch) >= 200:
+                        message_archive.upsert_many(batch)
+                        batch.clear()
                         await edit("Filling gaps (writing batch)…", found=missing, scanned=scanned)
-                if batch: message_archive.upsert_many(batch); batch.clear(); await edit("Filling gaps (finalize)…", found=missing, scanned=scanned)
+                if batch:
+                    message_archive.upsert_many(batch)
+                    batch.clear()
+                    await edit("Filling gaps (finalize)…", found=missing, scanned=scanned)
             except discord.Forbidden:
-                try: await progress.edit(content=f"**Exporting {label}…**\nForbidden: need **Read Message History**.")
-                except Exception: pass
+                try:
+                    await progress.edit(content=f"**Exporting {label}…**\nForbidden: need **Read Message History**.")
+                except Exception:
+                    pass
                 return
             except discord.HTTPException as e:
-                log.exception("backread.export.history_http", extra={"status":getattr(e,'status','?')})
-                try: await progress.edit(content=f"**Exporting {label}…**\nDiscord API error (HTTP {getattr(e,'status','?')}).")
-                except Exception: pass
+                log.exception("backread.export.history_http", extra={"status": getattr(e, "status", "?")})
+                try:
+                    await progress.edit(
+                        content=f"**Exporting {label}…**\nDiscord API error (HTTP {getattr(e, 'status', '?')})."
+                    )
+                except Exception:
+                    pass
                 return
 
         # dump CSV
         await edit("Dumping rows from DB to CSV…", found=missing, scanned=scanned)
-        sbuf = io.StringIO(); w = csv.writer(sbuf, lineterminator="\n")
-        w.writerow(["message_id","guild_id","channel_id","author_id","message_type","created_at","content","edited_at","attachments","embeds","reactions_json","reply_to_id"])
-        exported=0
+        sbuf = io.StringIO()
+        w = csv.writer(sbuf, lineterminator="\n")
+        w.writerow(
+            [
+                "message_id",
+                "guild_id",
+                "channel_id",
+                "author_id",
+                "message_type",
+                "created_at",
+                "content",
+                "edited_at",
+                "attachments",
+                "embeds",
+                "reactions_json",
+                "reply_to_id",
+            ]
+        )
+        exported = 0
         try:
             con = message_archive.get_connection()
             with con:
-                cur=con.cursor()
-                cur.execute("""
+                cur = con.cursor()
+                cur.execute(
+                    """
                     SELECT message_id,guild_id,channel_id,author_id,message_type,created_at,content,edited_at,attachments,embeds,reactions,reply_to_id
-                    FROM message_archive WHERE guild_id=? AND channel_id=? ORDER BY created_at ASC, message_id ASC
-                """,(gid,cid))
-                rows=cur.fetchmany(1000)
+                    FROM message_archive
+                    WHERE guild_id=? AND channel_id=?
+                    ORDER BY created_at ASC, message_id ASC
+                    """,
+                    (gid, cid),
+                )
+                rows = cur.fetchmany(1000)
                 while rows:
-                    for row in rows: w.writerow(row); exported+=1
+                    for row in rows:
+                        w.writerow(row)
+                        exported += 1
                     await edit("Dumping rows from DB to CSV…", found=missing, scanned=scanned, exported=exported)
-                    rows=cur.fetchmany(1000)
+                    rows = cur.fetchmany(1000)
         except Exception:
-            log.exception("backread.export.dump_failed", extra={"gid":gid,"cid":cid})
-            try: await progress.edit(content=f"**Exporting {label}…**\nDB read failed during export.")
-            except Exception: pass
+            log.exception("backread.export.dump_failed", extra={"gid": gid, "cid": cid})
+            try:
+                await progress.edit(content=f"**Exporting {label}…**\nDB read failed during export.")
+            except Exception:
+                pass
             return
 
-        csv_bytes=sbuf.getvalue().encode("utf-8-sig")
-        base=f"{guild.name}-{getattr(target,'name',target.id)}".replace("/","_"); csv_name=f"{base}.csv"
-        if not compress and len(csv_bytes)<=int(7.5*1024*1024):
+        csv_bytes = sbuf.getvalue().encode("utf-8-sig")
+        base = f"{guild.name}-{getattr(target, 'name', target.id)}".replace("/", "_")
+        csv_name = f"{base}.csv"
+        if not compress and len(csv_bytes) <= int(7.5 * 1024 * 1024):
             out = discord.File(io.BytesIO(csv_bytes), filename=csv_name)
         else:
-            zbuf=io.BytesIO()
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z: z.writestr(csv_name, csv_bytes)
+            zbuf = io.BytesIO()
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr(csv_name, csv_bytes)
             out = discord.File(io.BytesIO(zbuf.getvalue()), filename=f"{base}.zip")
 
-        text = "\n".join([
-            f"**Export for {label}**",
-            f"• Rows exported: **{exported:,}**",
-            f"• Missing messages filled this run: **{missing:,}**" if fill_missing else "• Missing fill: skipped",
-        ])
-        try: await interaction.followup.send(text, file=out, ephemeral=True)
+        text = "\n".join(
+            [
+                f"**Export for {label}**",
+                f"• Rows exported: **{exported:,}**",
+                f"• Missing messages filled this run: **{missing:,}**" if fill_missing else "• Missing fill: skipped",
+            ]
+        )
+        try:
+            await interaction.followup.send(text, file=out, ephemeral=True)
         except discord.HTTPException as e:
-            if getattr(e,"code",None)==50027 or e.status==401:
-                try: await interaction.user.send(text, file=out)
-                except Exception: log.exception("backread.export.dm_failed")
-                try: await progress.edit(content=text+"\n_(Interaction expired; sent via DM.)_")
-                except Exception: pass
+            if getattr(e, "code", None) == 50027 or e.status == 401:
+                try:
+                    await interaction.user.send(text, file=out)
+                except Exception:
+                    log.exception("backread.export.dm_failed")
+                try:
+                    await progress.edit(content=text + "\n_(Interaction expired; sent via DM.)_")
+                except Exception:
+                    pass
             else:
                 log.exception("backread.export.final_send_failed")
-                try: await progress.edit(content=text+"\n_(Failed to send file.)_")
-                except Exception: pass
+                try:
+                    await progress.edit(content=text + "\n_(Failed to send file.)_")
+                except Exception:
+                    pass
 
     # ===== Maint (flattened) =====
 
@@ -802,79 +923,128 @@ async def voice_import_log(
         await interaction.response.defer(ephemeral=True, thinking=True)
         gid = interaction.guild_id
         guild = interaction.guild
-        if gid is None: return await interaction.followup.send("Guild not resolved.", ephemeral=True)
+        if gid is None:
+            return await interaction.followup.send("Guild not resolved.", ephemeral=True)
         bot_ids = {m.id for m in (guild.members if guild else []) if m.bot}
-        member_count = getattr(guild,"member_count",None)
+        member_count = getattr(guild, "member_count", None)
         try:
-            report = activity_report.generate_activity_report(gid, timezone_name=timezone or activity_report.DEFAULT_TIMEZONE, member_count=member_count, bot_user_ids=bot_ids)
+            report = activity_report.generate_activity_report(
+                gid,
+                timezone_name=timezone or activity_report.DEFAULT_TIMEZONE,
+                member_count=member_count,
+                bot_user_ids=bot_ids,
+            )
         except Exception:
-            log.exception("maint.activity_report.failed", extra={"gid":gid})
+            log.exception("maint.activity_report.failed", extra={"gid": gid})
             return await interaction.followup.send(S("common.error_generic"), ephemeral=True)
         payload = json.dumps(report.to_dict(), indent=2, ensure_ascii=False).encode("utf-8")
-        buf=io.BytesIO(payload); fname=f"activity_report_{gid}.json"
+        buf = io.BytesIO(payload)
+        fname = f"activity_report_{gid}.json"
         if apply_rpg_stats:
-            try: updated = rpg.apply_stat_snapshot(gid, activity_report.compute_rpg_stats_from_report(report))
-            except Exception: log.exception("maint.activity_report.apply_stats_failed", extra={"gid":gid}); updated=0
+            try:
+                updated = rpg.apply_stat_snapshot(gid, activity_report.compute_rpg_stats_from_report(report))
+            except Exception:
+                log.exception("maint.activity_report.apply_stats_failed", extra={"gid": gid})
+                updated = 0
             buf.seek(0)
-            return await interaction.followup.send(f"Generated report and updated stats for **{updated}** member(s).", files=[discord.File(buf, filename=fname)], ephemeral=True)
+            return await interaction.followup.send(
+                f"Generated report and updated stats for **{updated}** member(s).",
+                files=[discord.File(buf, filename=fname)],
+                ephemeral=True,
+            )
         buf.seek(0)
-        await interaction.followup.send("Generated archive analytics report.", files=[discord.File(buf, filename=fname)], ephemeral=True)
+        await interaction.followup.send(
+            "Generated archive analytics report.", files=[discord.File(buf, filename=fname)], ephemeral=True
+        )
 
     @app_commands.command(name="maint_import_day_csv", description="Import day-scope CSV and rebuild months.")
     @app_commands.describe(file="CSV exported via /activity export scope=day", month="Optional YYYY-MM filter")
     @require_manage_guild()
-    async def maint_import_day_csv(self, interaction: discord.Interaction, file: discord.Attachment, month: Optional[str]=None):
+    async def maint_import_day_csv(
+        self, interaction: discord.Interaction, file: discord.Attachment, month: Optional[str] = None
+    ):
         await interaction.response.defer(ephemeral=True, thinking=True)
         reader = csv.reader(io.StringIO((await file.read()).decode("utf-8", errors="replace")))
         header = next(reader, None) or []
         try:
-            idx_g=header.index("guild_id"); idx_d=header.index("day"); idx_u=header.index("user_id"); idx_c=header.index("messages")
+            idx_g = header.index("guild_id")
+            idx_d = header.index("day")
+            idx_u = header.index("user_id")
+            idx_c = header.index("messages")
         except ValueError:
-            return await interaction.followup.send("Bad CSV header. Expected: guild_id, day, user_id, messages.", ephemeral=True)
-        touched:Set[str]=set(); rows_imported=0
+            return await interaction.followup.send(
+                "Bad CSV header. Expected: guild_id, day, user_id, messages.", ephemeral=True
+            )
+        touched: Set[str] = set()
+        rows_imported = 0
         for row in reader:
             try:
-                gid=int(row[idx_g]); 
-                if gid!=interaction.guild_id: continue
-                day=row[idx_d]
-                if month and not day.startswith(month): continue
-                uid=int(row[idx_u]); cnt=int(row[idx_c])
-                if cnt<=0: continue
+                gid = int(row[idx_g])
+                if gid != interaction.guild_id:
+                    continue
+                day = row[idx_d]
+                if month and not day.startswith(month):
+                    continue
+                uid = int(row[idx_u])
+                cnt = int(row[idx_c])
+                if cnt <= 0:
+                    continue
                 activity.upsert_member_messages_day(interaction.guild_id, uid, day, cnt)
-                touched.add(month_from_day(day)); rows_imported+=1
+                touched.add(month_from_day(day))
+                rows_imported += 1
             except Exception:
                 log.exception("maint.import_day_csv.row_failed", extra={"gid": interaction.guild_id, "row": row})
-        rebuilt=0
+        rebuilt = 0
         for m in sorted(touched):
-            try: activity.rebuild_month_from_days(interaction.guild_id, m); rebuilt+=1
-            except Exception: log.exception("maint.rebuild_month.failed", extra={"gid": interaction.guild_id, "month": m})
-        await interaction.followup.send(f"Imported **{rows_imported}** day rows. Rebuilt **{rebuilt}** month aggregates.", ephemeral=True)
+            try:
+                activity.rebuild_month_from_days(interaction.guild_id, m)
+                rebuilt += 1
+            except Exception:
+                log.exception("maint.rebuild_month.failed", extra={"gid": interaction.guild_id, "month": m})
+        await interaction.followup.send(
+            f"Imported **{rows_imported}** day rows. Rebuilt **{rebuilt}** month aggregates.", ephemeral=True
+        )
 
     @app_commands.command(name="maint_import_month_csv", description="Import month-scope CSV (direct month upserts).")
     @app_commands.describe(file="CSV exported via /activity export scope=month", month="Optional YYYY-MM filter")
     @require_manage_guild()
-    async def maint_import_month_csv(self, interaction: discord.Interaction, file: discord.Attachment, month: Optional[str]=None):
+    async def maint_import_month_csv(
+        self, interaction: discord.Interaction, file: discord.Attachment, month: Optional[str] = None
+    ):
         await interaction.response.defer(ephemeral=True, thinking=True)
         reader = csv.reader(io.StringIO((await file.read()).decode("utf-8", errors="replace")))
         header = next(reader, None) or []
         try:
-            idx_g=header.index("guild_id"); idx_m=header.index("month"); idx_u=header.index("user_id"); idx_c=header.index("messages")
+            idx_g = header.index("guild_id")
+            idx_m = header.index("month")
+            idx_u = header.index("user_id")
+            idx_c = header.index("messages")
         except ValueError:
-            return await interaction.followup.send("Bad CSV header. Expected: guild_id, month, user_id, messages.", ephemeral=True)
-        rows_imported=0; months:Set[str]=set()
+            return await interaction.followup.send(
+                "Bad CSV header. Expected: guild_id, month, user_id, messages.", ephemeral=True
+            )
+        rows_imported = 0
+        months: Set[str] = set()
         for row in reader:
             try:
-                gid=int(row[idx_g]); 
-                if gid!=interaction.guild_id: continue
-                mon=row[idx_m]
-                if month and mon!=month: continue
-                uid=int(row[idx_u]); cnt=int(row[idx_c])
-                if cnt<=0: continue
+                gid = int(row[idx_g])
+                if gid != interaction.guild_id:
+                    continue
+                mon = row[idx_m]
+                if month and mon != month:
+                    continue
+                uid = int(row[idx_u])
+                cnt = int(row[idx_c])
+                if cnt <= 0:
+                    continue
                 activity.upsert_member_messages_month(interaction.guild_id, uid, mon, cnt)
-                months.add(mon); rows_imported+=1
+                months.add(mon)
+                rows_imported += 1
             except Exception:
                 log.exception("maint.import_month_csv.row_failed", extra={"gid": interaction.guild_id, "row": row})
-        await interaction.followup.send(f"Imported **{rows_imported}** month rows into {len(months)} month(s).", ephemeral=True)
+        await interaction.followup.send(
+            f"Imported **{rows_imported}** month rows into {len(months)} month(s).", ephemeral=True
+        )
 
     @app_commands.command(name="maint_rebuild_month", description="Rebuild a month aggregate from day table.")
     @app_commands.describe(month="YYYY-MM")
@@ -906,41 +1076,52 @@ async def voice_import_log(
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
         gid = interaction.guild_id
-        if gid is None: return await interaction.edit_original_response(content="Guild not resolved.")
+        if gid is None:
+            return await interaction.edit_original_response(content="Guild not resolved.")
 
         activity_cog = self.bot.get_cog("ActivityCog")
         if activity_cog is None or not hasattr(activity_cog, "replay_archived_messages"):
             return await interaction.edit_original_response(content="Activity cog is not loaded; cannot replay archive.")
 
-        if chunk_size <= 0: chunk_size = 1000
+        if chunk_size <= 0:
+            chunk_size = 1000
         await interaction.edit_original_response(content="Preparing archive replay…")
 
         if reset_metrics:
             try:
-                activity.reset_member_activity(gid,"all"); activity.reset_member_words(gid,"all")
-                activity.reset_member_mentions(gid,"all"); activity.reset_member_mentions_sent(gid,"all")
-                activity.reset_member_emoji_chat(gid,"all"); activity.reset_member_emoji_only(gid,"all")
-                activity.reset_member_emoji_react(gid,"all"); activity.reset_member_reactions_received(gid,"all")
+                activity.reset_member_activity(gid, "all")
+                activity.reset_member_words(gid, "all")
+                activity.reset_member_mentions(gid, "all")
+                activity.reset_member_mentions_sent(gid, "all")
+                activity.reset_member_emoji_chat(gid, "all")
+                activity.reset_member_emoji_only(gid, "all")
+                activity.reset_member_emoji_react(gid, "all")
+                activity.reset_member_reactions_received(gid, "all")
                 activity.reset_member_channel_totals(gid)
             except Exception:
-                log.exception("maint.replay_archive.reset_metrics_failed", extra={"gid":gid})
+                log.exception("maint.replay_archive.reset_metrics_failed", extra={"gid": gid})
                 return await interaction.edit_original_response(content="Failed to reset metrics. Check logs.")
 
-        cleared=0
+        cleared = 0
         if reset_xp:
-            try: cleared = rpg.reset_progress(gid)
+            try:
+                cleared = rpg.reset_progress(gid)
             except Exception:
-                log.exception("maint.replay_archive.reset_xp_failed", extra={"gid":gid})
+                log.exception("maint.replay_archive.reset_xp_failed", extra={"gid": gid})
                 return await interaction.edit_original_response(content="Failed to reset RPG progress. Check logs.")
 
-        summary = message_archive.stats_summary(gid); total=int(summary.get("messages",0))
+        summary = message_archive.stats_summary(gid)
+        total = int(summary.get("messages", 0))
         base = f"Replaying **{total:,}** archived messages…" if total else "Replaying archived messages…"
-        last=0.0
-        async def progress(n:int):
+
+        last = 0.0
+
+        async def progress(n: int):
             nonlocal last
-            now=time.monotonic()
-            if n and now-last<1.5 and n<total: return
-            last=now
+            now = time.monotonic()
+            if n and now - last < 1.5 and n < total:
+                return
+            last = now
             await interaction.edit_original_response(content="\n".join([base, f"Processed **{n:,}** message(s)…"]))
 
         await progress(0)
@@ -950,19 +1131,23 @@ async def voice_import_log(
             progress_cb=progress,
         )
 
-        redistributed=0
+        redistributed = 0
         if respec_stats:
-            try: redistributed = rpg.respec_stats_to_formula(gid)
+            try:
+                redistributed = rpg.respec_stats_to_formula(gid)
             except Exception:
-                log.exception("maint.replay_archive.respec_failed", extra={"gid":gid})
+                log.exception("maint.replay_archive.respec_failed", extra={"gid": gid})
                 return await interaction.edit_original_response(
                     content="Archive replay completed, but redistributing stat points failed. XP/metrics were updated."
                 )
 
-        lines=[f"Archive replay complete. Processed **{processed:,}** message(s)."]
-        if reset_metrics: lines.append("Activity metrics were reset before replaying.")
-        if reset_xp:      lines.append(f"Cleared **{cleared:,}** RPG progress row(s) before replay.")
-        if respec_stats:  lines.append(f"Redistributed stat points for **{redistributed:,}** member(s).")
+        lines = [f"Archive replay complete. Processed **{processed:,}** message(s)."]
+        if reset_metrics:
+            lines.append("Activity metrics were reset before replaying.")
+        if reset_xp:
+            lines.append(f"Cleared **{cleared:,}** RPG progress row(s) before replay.")
+        if respec_stats:
+            lines.append(f"Redistributed stat points for **{redistributed:,}** member(s).")
         await interaction.edit_original_response(content="\n".join(lines))
 
     # ===== Cleanup (flattened) =====
@@ -988,11 +1173,14 @@ async def voice_import_log(
         bot_author_id = bot_author_id or DEFAULT_BOT_AUTHOR_ID
         forum = await resolve_forum_channel(self.bot, interaction.guild, forum_id)
         if forum is None:
-            return await interaction.followup.send(f"Forum channel `{forum_id}` not found or not accessible.", ephemeral=True)
+            return await interaction.followup.send(
+                f"Forum channel `{forum_id}` not found or not accessible.", ephemeral=True
+            )
         me = forum.guild.me  # type: ignore[assignment]
         if not isinstance(me, discord.Member) or not has_purge_permissions(me, forum):
             return await interaction.followup.send(
-                "I need **View Channel**, **Read Message History**, and **Manage Messages** in that forum.", ephemeral=True
+                "I need **View Channel**, **Read Message History**, and **Manage Messages** in that forum.",
+                ephemeral=True,
             )
         scanned_threads, scanned_messages, matches, deleted = await purge_messages_from_threads(
             await collect_threads(forum, include_private_archived=include_private_archived),
@@ -1006,6 +1194,7 @@ async def voice_import_log(
             f"{'' if dry_run else f' Deleted **{deleted}**.'}"
         )
         await interaction.followup.send(msg, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
