@@ -777,32 +777,12 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
         except ValueError as e:
             return await interaction.followup.send(f"Bad {str(e).replace('_',' ')}.", ephemeral=not post)
 
+        # archive-aware leaderboards for messages/words; fall back for others
         rows: List[Tuple[int, int]] = []
-
-        with connect() as con:
-            cur = con.cursor()
-            if s == "all":
-                rows = cur.execute(
-                    """
-                    SELECT user_id, count
-                    FROM member_metrics_total
-                    WHERE guild_id=? AND metric=?
-                    ORDER BY count DESC
-                    LIMIT ?
-                    """, (gid, metric_name, int(limit))
-                ).fetchall()
-            else:
-                where_col = {"day": "day", "week": "week", "month": "month"}[s]
-                rows = cur.execute(
-                    f"""
-                    SELECT user_id, SUM(count) AS c
-                    FROM member_metrics_daily
-                    WHERE guild_id=? AND metric=? AND {where_col}=?
-                    GROUP BY user_id
-                    ORDER BY c DESC
-                    LIMIT ?
-                    """, (gid, metric_name, key, int(limit))
-                ).fetchall()
+        if s == "all":
+            rows = activity.top_members_total_merged(gid, metric_name, int(limit))
+        else:
+            rows = activity.top_members_period_merged(gid, metric_name, s, key, int(limit))
 
         if not rows:
             return await interaction.followup.send(S("activity.leaderboard.empty"), ephemeral=not post)
@@ -1020,12 +1000,6 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
         else:
             raise error
 
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(ActivityCog(bot))
-
-
-
-
-
-
-

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
@@ -44,24 +45,91 @@ def _upsert_metric_daily_and_total(
     )
 
 
-def _bump_hour_hist(
-    con: sqlite3.Connection,
-    guild_id: int,
-    user_id: int,
-    metric: str,
-    hour_utc: int,
-    inc: int = 1,
-) -> None:
+# --- archive merge helpers (messages/words) ---
+
+_WS = re.compile(r"\s+")
+
+
+def _archive_table_exists(con: sqlite3.Connection) -> bool:
     cur = con.cursor()
-    cur.execute(
-        """
-        INSERT INTO member_hour_hist (guild_id, user_id, metric, hour_utc, count)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(guild_id, user_id, metric, hour_utc) DO UPDATE SET
-          count = count + excluded.count
-        """,
-        (guild_id, user_id, metric, hour_utc, inc),
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='message_archive' LIMIT 1"
+    ).fetchone()
+    return bool(row)
+
+
+def _count_words_archive(text: str | None) -> int:
+    if not text:
+        return 0
+    return sum(1 for t in _WS.split(text.strip()) if t)
+
+
+def _iso_week_bounds(week_key: str) -> tuple[str, str]:
+    """week_key: 'YYYY-Www' -> (start_day_iso, end_day_iso) using ISO week (Mon..Sun) in UTC."""
+    if not week_key:
+        # defensive default: current ISO week
+        now = datetime.now(timezone.utc)
+        y, w, _ = now.isocalendar()
+        week_key = f"{y}-W{int(w):02d}"
+    year = int(week_key[:4])
+    wnum = int(week_key[-2:])
+    d = datetime.fromisocalendar(year, wnum, 1).replace(tzinfo=timezone.utc)  # Monday
+    start = d.date().isoformat()
+    end = (d + timedelta(days=6)).date().isoformat()
+    return start, end
+
+
+def _archive_period_rows(
+    con: sqlite3.Connection, guild_id: int, scope: str, key: str | None
+):
+    cur = con.cursor()
+    params = [guild_id]
+    where = "guild_id=?"
+    if scope == "day":
+        where += " AND DATE(created_at)=?"
+        params.append(key)
+    elif scope == "month":
+        where += " AND strftime('%Y-%m', created_at)=?"
+        params.append(key)
+    elif scope == "week":
+        s, e = _iso_week_bounds(key or "")
+        where += " AND DATE(created_at) BETWEEN ? AND ?"
+        params.extend([s, e])
+    # scope == "all" -> no date filter
+    return cur.execute(
+        f"SELECT author_id, content FROM message_archive WHERE {where}", params
     )
+
+
+def _archive_counts_by_user(
+    con: sqlite3.Connection, guild_id: int, scope: str, key: str | None, metric: str
+) -> dict[int, int]:
+    """
+    Aggregate archive for messages/words by (author_id).
+    scope in {'all','day','week','month'}; key None for 'all'.
+    """
+    if not _archive_table_exists(con):
+        return {}
+    counts: dict[int, int] = {}
+    for uid, content in _archive_period_rows(con, guild_id, scope, key):
+        uid = int(uid)
+        if metric == "messages":
+            counts[uid] = counts.get(uid, 0) + 1
+        elif metric == "words":
+            counts[uid] = counts.get(uid, 0) + _count_words_archive(content)
+    return counts
+
+
+def _merge_and_rank(
+    base_rows: list[tuple[int, int]], extra: dict[int, int], limit: int
+) -> list[tuple[int, int]]:
+    acc: dict[int, int] = {}
+    for uid, c in base_rows:
+        acc[int(uid)] = acc.get(int(uid), 0) + int(c)
+    for uid, c in extra.items():
+        acc[int(uid)] = acc.get(int(uid), 0) + int(c)
+    return sorted(acc.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
 
 def bump_member_message(guild_id: int, user_id: int, when_iso: str | None = None, inc: int = 1) -> None:
     when_iso = when_iso or _now_iso_utc()
@@ -92,6 +160,26 @@ def bump_member_message(guild_id: int, user_id: int, when_iso: str | None = None
         _upsert_metric_daily_and_total(con, guild_id, user_id, "messages", day, week_key, month, inc)
         _bump_hour_hist(con, guild_id, user_id, "messages", hour_utc, inc)
         con.commit()
+
+
+def _bump_hour_hist(
+    con: sqlite3.Connection,
+    guild_id: int,
+    user_id: int,
+    metric: str,
+    hour_utc: int,
+    inc: int = 1,
+) -> None:
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO member_hour_hist (guild_id, user_id, metric, hour_utc, count)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id, metric, hour_utc) DO UPDATE SET
+          count = count + excluded.count
+        """,
+        (guild_id, user_id, metric, hour_utc, inc),
+    )
 
 
 def top_members_month(guild_id: int, month: str, limit: int = 20) -> List[Tuple[int, int]]:
@@ -931,6 +1019,37 @@ def rebuild_month_from_days(guild_id: int, month: str) -> None:
     rebuild_activity_totals_for_guild(guild_id)
 
 
+# ---- merged toppers (unified + message_archive) ----
+
+def top_members_period_merged(
+    guild_id: int, metric: str, scope: str, key: str, limit: int
+) -> List[Tuple[int, int]]:
+    """
+    Leaderboard for a period that includes counts from message_archive.
+    Currently supported metrics: 'messages', 'words'.
+    Other metrics fall back to the unified tables.
+    """
+    base = _top_members_by_period(guild_id, metric, scope, key, limit * 4)  # oversample before merge
+    if metric not in ("messages", "words"):
+        return base[:limit]
+    with connect() as con:
+        extra = _archive_counts_by_user(con, guild_id, scope, key, metric)
+    return _merge_and_rank(base, extra, limit)
+
+
+def top_members_total_merged(guild_id: int, metric: str, limit: int) -> List[Tuple[int, int]]:
+    """
+    All-time leaderboard including message_archive.
+    For non-supported metrics, returns the unified totals as-is.
+    """
+    base = _top_members_total(guild_id, metric, limit * 4)
+    if metric not in ("messages", "words"):
+        return base[:limit]
+    with connect() as con:
+        extra = _archive_counts_by_user(con, guild_id, "all", None, metric)
+    return _merge_and_rank(base, extra, limit)
+
+
 __all__ = [
     "available_months",
     "bump_activity_join",
@@ -974,10 +1093,11 @@ __all__ = [
     "top_members_mentions_total",
     "top_members_messages_period",
     "top_members_messages_total",
-    "top_members_month",
-    "top_members_total",
     "top_members_words_period",
     "top_members_words_total",
     "upsert_member_messages_day",
     "upsert_member_messages_month",
+    # merged
+    "top_members_period_merged",
+    "top_members_total_merged",
 ]
