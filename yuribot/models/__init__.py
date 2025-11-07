@@ -3,7 +3,6 @@
 from . import booly
 from . import collections
 from . import common
-from . import emoji_stats
 from . import guilds
 from . import mangaupdates
 from . import message_archive
@@ -18,7 +17,6 @@ __all__ = [
     "booly",
     "collections",
     "common",
-    "emoji_stats",
     "guilds",
     "mangaupdates",
     "message_archive",

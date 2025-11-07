@@ -10,8 +10,8 @@ RIN_FLAVOR_PROB = 0.0          # 0.0–1.0 chance to append a short quip
 
 # Eligible prefixes (light, SFW sass)
 _RIN_ALLOW_PREFIXES: tuple[str, ...] = (
-    "common.", "movie.", "music.", "poll.", "series.", "discuss.",
-    "stats.", "tools.", "welcome.", "fun.", "move_any.", "emoji.", "sticker.",
+    "common.", "movie.", "poll.", "series.", "discuss.",
+    "tools.", "welcome.", "fun.", "move_any.",
     "mu.",
 )
 
@@ -200,17 +200,6 @@ _STRINGS.update({
     "collection.common.no_link": "(no link)",
     "collection.thread.registered": "Registered this **{club_upper}** submission for the current collection.",
 
-    # ---------------- Emoji / Sticker stats ----------------
-    "emoji.title": "Emoji usage — {month}",
-    "emoji.none_for_month": "No emoji usage for **{month}**.",
-    "emoji.row": "{display} — **{count}** ({src})",
-    "emoji.src.message": "message",
-    "emoji.src.reaction": "reaction",
-
-    "sticker.title": "Sticker usage — {month}",
-    "sticker.none_for_month": "No sticker usage for **{month}**.",
-    "sticker.row": "{name} — **{count}**",
-
     # ---------------- Modlog ----------------
     "modlog.err.perms": "Insufficient permissions.",
     "modlog.err.no_channel": "Mod logs channel not set. Run `/set_mod_logs` first.",
@@ -287,27 +276,6 @@ _STRINGS.update({
     "movie.value.events_links": "[Morning]({am_url}) • [Evening]({pm_url})",
 
     # ---------------- Music ----------------
-    "music.duration.live": "live/unknown",
-    "music.error.join_first": "Join a voice channel first (or pass one).",
-    "music.error.resolve": "Failed to resolve audio: `{error}`",
-    "music.error.no_audio": "No playable audio found.",
-    "music.error.nothing_playing": "Nothing is playing.",
-    "music.error.nothing_to_resume": "Nothing to resume.",
-    "music.error.not_connected": "Not connected.",
-    "music.joined": "Joined **{name}**.",
-    "music.left": "Left voice. Queue cleared.",
-    "music.paused": "Paused.",
-    "music.resumed": "Resumed.",
-    "music.skipped": "Skipped.",
-    "music.stopped": "Stopped playback and cleared queue.",
-    "music.now": "**Now playing:** {title} ({duration})\n{url}",
-    "music.queue.empty": "Queue is empty.",
-    "music.queue.line": "{idx}. {title} ({duration})",
-    "music.queue.more": "\n…and {more} more.",
-    "music.queue.where_now": "now",
-    "music.queue.where_pos": "position **#{pos}**",
-    "music.queued.single": "Queued **{title}** ({duration}) — {where}.",
-    "music.queued.bulk": "Queued **{count}** tracks{more_text}.",
 
     # ---------------- Native Polls ----------------
     "poll.native.group_desc": "Create native Discord polls",
@@ -369,29 +337,6 @@ _STRINGS.update({
     "discuss.thread.body.header": "Discussion for **{title} {label}**.",
     "discuss.thread.body.ref": "Reference: {link}",
     "discuss.thread.body.event": "Event link: {url}",
-
-    # ---------------- Stats (/ping, /uptime, /botinfo) ----------------
-    "stats.ping.message": "🏓 **Ping**\n• Gateway: `{gw_ms} ms`\n• Round-trip: `{rt_ms} ms`",
-    "stats.uptime.title": "⏱️ Uptime",
-    "stats.uptime.field.uptime": "Uptime",
-    "stats.uptime.field.since": "Since (UTC)",
-    "stats.botinfo.title": "Bot Info",
-    "stats.botinfo.na": "n/a",
-    "stats.botinfo.field.guilds": "Guilds",
-    "stats.botinfo.field.members_cached": "Members (cached)",
-    "stats.botinfo.field.humans_bots": "Humans / Bots",
-    "stats.botinfo.value.humans_bots": "{humans} / {bots}",
-    "stats.botinfo.field.commands": "Commands",
-    "stats.botinfo.field.shard": "Shard",
-    "stats.botinfo.field.gateway_ping": "Gateway Ping",
-    "stats.botinfo.field.memory": "Memory",
-    "stats.botinfo.field.cpu": "CPU",
-    "stats.botinfo.field.runtime": "Runtime",
-    "stats.botinfo.value.runtime": "py {py} · discord.py {dpy}",
-    # legacy aliases kept for compatibility
-    "stats.common.na": "n/a",
-    "stats.botinfo.field.members": "Members (cached)",
-    "stats.botinfo.field.gateway": "Gateway Ping",
 
     # ---------------- Timeout (moderation) ----------------
     "timeout.error.self": "You can’t timeout yourself.",
