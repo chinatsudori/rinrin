@@ -141,7 +141,6 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.music",
             "yuribot.cogs.stats",
             "yuribot.cogs.emoji_stats",
-            "yuribot.cogs.activity",
             "yuribot.cogs.movebot",
             "yuribot.cogs.coin_dice",
             "yuribot.cogs.mangaupdates",
@@ -150,7 +149,6 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.booly",
             "yuribot.cogs.polls",
             "yuribot.cogs.lifecycle",
-            "yuribot.cogs.rpg",
         )
         await self._load_extensions(extensions)
 

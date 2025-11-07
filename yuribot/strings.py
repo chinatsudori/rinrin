@@ -10,7 +10,7 @@ RIN_FLAVOR_PROB = 0.0          # 0.0–1.0 chance to append a short quip
 
 # Eligible prefixes (light, SFW sass)
 _RIN_ALLOW_PREFIXES: tuple[str, ...] = (
-    "common.", "activity.", "movie.", "music.", "poll.", "series.", "discuss.",
+    "common.", "movie.", "music.", "poll.", "series.", "discuss.",
     "stats.", "tools.", "welcome.", "fun.", "move_any.", "emoji.", "sticker.",
     "mu.",
 )
@@ -112,20 +112,6 @@ _STRINGS.update({
     "common.need_manage_server": "You need **Manage Server** (or higher) permission.",
     "common.need_manage_server_v2": "You need **Manage Server** (or higher) permission.",
     "common.error_generic": "Something went wrong. Try again or ping a moderator.",
-
-    # ---------------- Activity ----------------
-    "activity.leaderboard.title": "Activity Leaderboard",
-    "activity.leaderboard.row": "{i}. {name} — **{count}**",
-    "activity.leaderboard.empty": "No data.",
-    "activity.leaderboard.footer_month": "Top {limit} — {month}",
-    "activity.leaderboard.footer_all": "Top {limit} — all time",
-    "activity.me.title": "Your activity — {user}",
-    "activity.me.month": "This month ({month})",
-    "activity.me.total": "Total",
-    "activity.me.recent": "Recent months",
-    "activity.none_yet": "No data.",
-    "activity.reset.need_month": "Provide `month` (YYYY-MM) for monthly reset.",
-    "activity.reset.done": "Stats wiped.",
 
     # ---------------- Admin ----------------
     "admin.welcome.set_ok": "Welcome messages will post in {channel} using image `{filename}`.",
@@ -528,13 +514,6 @@ _STRINGS.update({
         "introduce yourself, and check the channels unlocked for you."
     ),
     "rolewelcome.footer": "{guild}",
-    # --- Activity: profile (/activity me) ---
 
-    "activity.profile.title": "Activity profile — {user}",
-    "activity.profile.stats": "Stats",
-    "activity.profile.derived": "Signals",
-    "activity.profile.voice": "Voice",
-    "activity.profile.apps": "Activities",
-    "activity.profile.level_section": "Level & Progress",
 })
 

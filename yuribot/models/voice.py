@@ -217,21 +217,6 @@ def upsert_sessions_minutes(guild_id: int, sessions: Iterable[Session]) -> Tuple
     squashed = _squash(agg)
     rows = upsert_minutes_bulk((gid, uid, day, mins) for (gid, uid, day), mins in squashed.items())
 
-    if squashed:
-        # Mirror the historical minutes into the unified activity metrics so that
-        # "activity me"/"activity top" reflect imported voice history.
-        from . import activity as activity_model  # avoid circular import at module load
-
-        for (gid, uid, day), mins in squashed.items():
-            when_iso = f"{day}T00:00:00+00:00"
-            try:
-                activity_model.bump_voice_minutes(gid, uid, when_iso, int(mins), 0)
-            except Exception:
-                log.exception(
-                    "voice.sync_metrics_failed",
-                    extra={"guild_id": gid, "user_id": uid, "day": day, "minutes": mins},
-                )
-
     return rows, total_minutes
 
 
