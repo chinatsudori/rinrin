@@ -51,6 +51,7 @@ from ..utils.activity import (
     week_default as _week_default,
     xp_multiplier as _xp_mult,
 )
+from ..utils.activity_details import compute_user_activity_details
 
 ensure_matplotlib_environment()
 
@@ -581,7 +582,8 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
     @app_commands.describe(
         user="Whose profile to view (default: you)",
         month="Highlight YYYY-MM (optional)",
-        post="Post publicly?"
+        post="Post publicly?",
+        details="Include detailed analytics (uses archive data)",
     )
     @app_commands.autocomplete(month=_month_autocomplete)
     async def me(
@@ -590,6 +592,7 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
         user: Optional[discord.Member] = None,
         month: Optional[str] = None,
         post: bool = False,
+        details: bool = False,
     ):
         if not await _require_guild(interaction):
             return
@@ -673,6 +676,109 @@ class ActivityCog(commands.GroupCog, name="activity", description="Member activi
         )
 
         await interaction.followup.send(embed=embed, ephemeral=not post)
+
+        if details:
+            detail = await asyncio.to_thread(compute_user_activity_details, gid, uid)
+            if not detail:
+                await interaction.followup.send(
+                    "Detailed analytics require archived messages.",
+                    ephemeral=not post,
+                )
+                return
+
+            weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            hour_totals: list[tuple[str, int]] = []
+            for dow, hours in enumerate(detail.hourly_heatmap):
+                for hour, count in enumerate(hours):
+                    if count:
+                        hour_totals.append((f"{weekday_names[dow]} {hour:02d}h", count))
+            top_hours = ", ".join(
+                f"{label} — {count}" for label, count in sorted(hour_totals, key=lambda kv: kv[1], reverse=True)[:5]
+            ) or "No activity"
+
+            top_days = ", ".join(
+                f"{day}: {count}" for day, count in sorted(detail.daily_heatmap.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            ) or "No activity"
+
+            burst_lines = ", ".join(
+                f"{ts}: {cnt} (σ={std:.2f})" for ts, cnt, std in detail.bursts[:3]
+            ) or "None"
+            decay_lines = ", ".join(
+                f"{ts}: {hl:.2f}h" for ts, hl in detail.decay[:3]
+            ) or "None"
+
+            volume_field = (
+                f"Messages: **{detail.message_count:,}** over **{detail.active_days}/{detail.total_days}** active days\n"
+                f"Daily min/max/mean/std: {detail.distribution['min']:.0f}/{detail.distribution['max']:.0f}/"
+                f"{detail.distribution['mean']:.2f}/{detail.distribution['std']:.2f}"
+            )
+
+            activity_field = (
+                f"Top hours: {top_hours}\n"
+                f"Top days: {top_days}\n"
+                f"Bursts: {burst_lines}\n"
+                f"Decay half-life: {decay_lines}\n"
+                f"Silence (hour/day): {detail.silence_ratio_hourly:.2%} / {detail.silence_ratio_daily:.2%}"
+            )
+
+            threads_field = (
+                f"Median response latency: {detail.response_latency_seconds:.1f}s\n"
+                f"Avg thread lifespan: {detail.thread_lifespan_seconds/3600:.2f}h\n"
+                f"Reply depth / density: {detail.reply_depth:.2f} / {detail.reply_density:.2%}\n"
+                f"Attention ratio (≤10m): {detail.attention_ratio:.2%}"
+            )
+
+            reaction_field = (
+                f"Avg/Std/Min/Max: {detail.reaction_stats['average']:.2f}/"
+                f"{detail.reaction_stats['std']:.2f}/"
+                f"{detail.reaction_stats['min']:.0f}/"
+                f"{detail.reaction_stats['max']:.0f}\n"
+                f"Diversity: {detail.reaction_diversity}\n"
+                f"Top reactors received: {', '.join(f'<@{uid}> ({cnt})' for uid, cnt in detail.top_reactors_received) or 'None'}\n"
+                f"Top reactors given: {', '.join(f'<@{uid}> ({cnt})' for uid, cnt in detail.top_reactors_given) or 'None'}"
+            )
+
+            topic_lines = [", ".join(cluster) for cluster in detail.topics if any(cluster)]
+            topics_formatted = "; ".join(topic_lines[:3]) or "None"
+
+            content_field = (
+                f"Words/Unique/LexDiv: {detail.word_metrics['total_words']:.0f}/"
+                f"{detail.word_metrics['unique_tokens']:.0f}/"
+                f"{detail.word_metrics['lexical_diversity']:.3f}\n"
+                f"Sentiment mean/std: {detail.sentiment['mean']:.3f}/"
+                f"{detail.sentiment['std']:.3f}\n"
+                f"Topics: {topics_formatted}\n"
+                f"Embed richness: {detail.embed_richness:.2%}\n"
+                f"URLs per msg: {detail.url_metrics['url_frequency']:.2f} (domains: {int(detail.url_metrics['domain_diversity'])})"
+            )
+
+            inequality_field = (
+                f"Skewness/Kurtosis: {detail.inequality['skewness']:.2f}/"
+                f"{detail.inequality['kurtosis']:.2f}\n"
+                f"Gini: {detail.inequality['gini']:.2f}\n"
+                f"Entropy (h/d): {detail.inequality['entropy_hourly']:.2f} / {detail.inequality['entropy_daily']:.2f}"
+            )
+
+            derived_field = (
+                f"Engagement index: {detail.derived['engagement_index']:.3f}\n"
+                f"Retention: {detail.derived['retention']:.2%}\n"
+                f"Conversation depth: {detail.derived['conversation_depth']:.2f}\n"
+                f"Attention ratio: {detail.derived['attention_ratio']:.2%}\n"
+                f"Longevity index: {detail.derived['longevity_index']:.2%}"
+            )
+
+            detail_embed = discord.Embed(
+                title=f"Detailed analytics — {target.display_name}",
+                color=discord.Color.blurple(),
+            )
+            detail_embed.add_field(name="Volume", value=volume_field, inline=False)
+            detail_embed.add_field(name="Activity patterns", value=activity_field, inline=False)
+            detail_embed.add_field(name="Threads & responsiveness", value=threads_field, inline=False)
+            detail_embed.add_field(name="Reactions", value=reaction_field, inline=False)
+            detail_embed.add_field(name="Content", value=content_field, inline=False)
+            detail_embed.add_field(name="Inequality", value=inequality_field, inline=False)
+            detail_embed.add_field(name="Derived signals", value=derived_field, inline=False)
+            await interaction.followup.send(embed=detail_embed, ephemeral=not post)
 
     # ------- Master export (everything) -------
     @app_commands.command(name="export_master", description="Export a master report: totals, RPG, derived.")
