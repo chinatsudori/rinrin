@@ -4,7 +4,7 @@ import logging
 import sqlite3
 from math import log1p, sqrt
 from typing import Dict, Optional, Iterator
-
+import re
 from ..db import connect
 
 log = logging.getLogger(__name__)
@@ -34,7 +34,23 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
     cur = total_xp - _xp_for_level(lvl)
     nxt = _xp_for_level(lvl + 1) - _xp_for_level(lvl)
     return (lvl, cur, nxt)
+_WS = re.compile(r"\s+")
+def _count_words(text: Optional[str]) -> int:
+    if not text:
+        return 0
+    # Cheap and forgiving: split on whitespace; ignore empty tokens
+    return sum(1 for tok in _WS.split(text.strip()) if tok)
 
+def _date_range_clauses(since_day: Optional[str], until_day: Optional[str]) -> tuple[str, list]:
+    clauses = []
+    params: list[object] = []
+    if since_day:
+        clauses.append("day>=?")
+        params.append(since_day)
+    if until_day:
+        clauses.append("day<=?")
+        params.append(until_day)
+    return (" AND ".join(clauses), params)
 # =========
 # XP rules
 # =========
@@ -143,72 +159,92 @@ def _iter_daily_msgs_words(
     user_id: int,
     since_day: Optional[str],
     until_day: Optional[str],
-) -> Iterator[tuple[str, int, int]]:
+):
     """
     Yields (day_iso, msgs, words) ascending.
-    Source priority:
+
+    We MERGE three sources so older backread history is included:
       1) member_metrics_daily (metrics 'messages','words')
-      2) member_messages_day (table/view: columns messages, words?)  [words→0 if absent]
+      2) member_messages_day (columns: messages, words?)  [words→0 if absent]
+      3) message_archive (aggregate by DATE(created_at); words computed from content)
+    Later sources only *add* to earlier aggregates (no subtraction), so duplicates
+    are fine if you’ve replayed archive into metrics – totals will reflect all data.
     """
     cur = con.cursor()
+    totals: dict[str, tuple[int, int]] = {}  # day -> (msgs, words)
 
-    # Preferred: unified metrics
+    def _acc(day: str, add_msgs: int, add_words: int) -> None:
+        m, w = totals.get(day, (0, 0))
+        totals[day] = (m + int(add_msgs or 0), w + int(add_words or 0))
+
+    # 1) Unified metrics
     if _table_or_view_exists(con, "member_metrics_daily"):
-        clauses = ["guild_id=?","user_id=?"]
-        params: list[object] = [guild_id, user_id]
-        if since_day:
-            clauses.append("day>=?")
-            params.append(since_day)
-        if until_day:
-            clauses.append("day<=?")
-            params.append(until_day)
-
-        q = f"""
+        base = "guild_id=? AND user_id=?"
+        rng_sql, rng_params = _date_range_clauses(since_day, until_day)
+        where = f"{base} AND {rng_sql}" if rng_sql else base
+        for day, msgs, words in cur.execute(
+            f"""
             SELECT day,
                    SUM(CASE WHEN metric='messages' THEN count ELSE 0 END) AS msgs,
                    SUM(CASE WHEN metric='words'    THEN count ELSE 0 END) AS words
               FROM member_metrics_daily
-             WHERE {' AND '.join(clauses)}
+             WHERE {where}
              GROUP BY day
              ORDER BY day ASC
-        """
-        for day_iso, msgs, words in cur.execute(q, params):
-            yield str(day_iso), int(msgs or 0), int(words or 0)
-        return
+            """,
+            (guild_id, user_id, *rng_params),
+        ):
+            _acc(str(day), int(msgs or 0), int(words or 0))
 
-    # Legacy: member_messages_day (table or view)
+    # 2) Legacy daily table/view
     if _table_or_view_exists(con, "member_messages_day"):
         has_words = _column_exists(con, "member_messages_day", "words")
+        base = "guild_id=? AND user_id=?"
+        rng_sql, rng_params = _date_range_clauses(since_day, until_day)
+        where = f"{base} AND {rng_sql}" if rng_sql else base
+        cols = "day, messages, words" if has_words else "day, messages, 0 AS words"
+        for day, msgs, words in cur.execute(
+            f"SELECT {cols} FROM member_messages_day WHERE {where} ORDER BY day ASC",
+            (guild_id, user_id, *rng_params),
+        ):
+            _acc(str(day), int(msgs or 0), int(words or 0))
 
-        clauses = ["guild_id=?","user_id=?"]
-        params = [guild_id, user_id]
+    # 3) Archive fallback (covers deep history from backread)
+    if _table_or_view_exists(con, "message_archive"):
+        # Pull only needed rows and accumulate per day in Python to count words.
+        # We filter by date range if provided.
+        params: list[object] = [guild_id, user_id]
+        date_clause = ""
         if since_day:
-            clauses.append("day>=?")
+            date_clause += " AND DATE(created_at) >= ?"
             params.append(since_day)
         if until_day:
-            clauses.append("day<=?")
+            date_clause += " AND DATE(created_at) <= ?"
             params.append(until_day)
 
-        if has_words:
-            q = f"""
-                SELECT day, messages, words
-                  FROM member_messages_day
-                 WHERE {' AND '.join(clauses)}
-                 ORDER BY day ASC
-            """
-        else:
-            q = f"""
-                SELECT day, messages, 0 AS words
-                  FROM member_messages_day
-                 WHERE {' AND '.join(clauses)}
-                 ORDER BY day ASC
-            """
-        for day_iso, msgs, words in cur.execute(q, params):
-            yield str(day_iso), int(msgs or 0), int(words or 0)
-        return
+        # Stream rows in ascending time for cache friendliness
+        cur2 = con.cursor()
+        cur2.execute(
+            f"""
+            SELECT DATE(created_at) AS d, content
+              FROM message_archive
+             WHERE guild_id=? AND author_id=? {date_clause}
+             ORDER BY created_at ASC, message_id ASC
+            """,
+            params,
+        )
+        # Accumulate to avoid one huge dict pass when archives are large
+        for day, content in cur2:
+            _acc(str(day), 1, _count_words(content))
 
-    # Neither table/view exists; nothing to yield.
-    return
+    for day in sorted(totals.keys()):
+        msgs, words = totals[day]
+        # If caller asked a range, enforce it (defensive; already filtered above)
+        if since_day and day < since_day:
+            continue
+        if until_day and day > until_day:
+            continue
+        yield day, msgs, words
 
 # ======================================
 # 7-day window scoring at a point in time
