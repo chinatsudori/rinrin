@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from math import log1p, sqrt
+import re
 from typing import Dict, Optional, Iterator
 import re
 from ..db import connect
@@ -252,28 +253,32 @@ def _iter_daily_msgs_words(
 # ======================================
 
 # Tunables
-K_STR_BASE = 3.0
+K_STR_BASE = 2.4
 STR_DAYS_EXP = 0.15
 STR_MIN_ACTIVITY_FACTOR = 0.65
-K_STR_ECHAT = 0.03
+K_STR_ECHAT = 0.02
 
 WORDS_PER_INT_POINT = 30
 
-K_DEX_REACT = 3.0
-K_DEX_MENTIONS = 2.5
-K_DEX_EMOJI_ONLY = 1.5
-DEX_LOG_SCALE = 8.0
+K_DEX_REACT = 3.6
+K_DEX_MENTIONS = 3.2
+K_DEX_EMOJI_ONLY = 2.0
+DEX_LOG_SCALE = 9.5
 
-K_CHA_RECV = 3.5
-K_CHA_REACT = 3.0
-K_CHA_SENT = 1.5
-CHA_LOG_SCALE = 12.0
+K_CHA_RECV = 4.2
+K_CHA_REACT = 3.8
+K_CHA_SENT = 1.9
+CHA_LOG_SCALE = 15.0
 
-K_WIS_JOIN = 6.0
-K_WIS_WEEKS = 3.0
-K_WIS_DAYS = 0.5
-K_WIS_WPM  = 0.5
+K_WIS_JOIN = 3.5
+K_WIS_WEEKS = 3.5
+K_WIS_DAYS = 0.75
+K_WIS_WPM  = 0.0
+K_WIS_PRESENCE = 0.45
+K_WIS_LEXICON = 120.0
 WPM_CAP = 40.0
+
+_TOKEN_RE = re.compile(r"[\w']+")
 
 def _log_squash(value: float, scale: float) -> float:
     if value <= 0:
@@ -283,6 +288,50 @@ def _log_squash(value: float, scale: float) -> float:
 def _sum_window(cur: sqlite3.Cursor, q: str, params: tuple) -> int:
     row = cur.execute(q, params).fetchone()
     return int(row[0] or 0)
+
+
+def _lexical_diversity_window(
+    con: sqlite3.Connection,
+    guild_id: int,
+    user_id: int,
+    start_day: str,
+    end_day: str,
+) -> tuple[float, int, int]:
+    """Return (lexical_diversity, unique_tokens, total_tokens) for [start_day, end_day]."""
+    if not _table_or_view_exists(con, "message_archive"):
+        return 0.0, 0, 0
+
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT content
+          FROM message_archive
+         WHERE guild_id=? AND author_id=?
+           AND DATE(created_at) BETWEEN ? AND ?
+        """,
+        (guild_id, user_id, start_day, end_day),
+    ).fetchall()
+
+    if not rows:
+        return 0.0, 0, 0
+
+    total_tokens = 0
+    unique_tokens: set[str] = set()
+    for (content,) in rows:
+        if not content:
+            continue
+        tokens = _TOKEN_RE.findall(str(content))
+        if not tokens:
+            continue
+        total_tokens += len(tokens)
+        for token in tokens:
+            unique_tokens.add(token.lower())
+
+    if total_tokens <= 0:
+        return 0.0, 0, 0
+
+    diversity = float(len(unique_tokens)) / float(total_tokens)
+    return diversity, len(unique_tokens), total_tokens
 
 def _scores_window(con: sqlite3.Connection, guild_id: int, user_id: int, end_day: str) -> Dict[str, float]:
     """
@@ -310,6 +359,7 @@ def _scores_window(con: sqlite3.Connection, guild_id: int, user_id: int, end_day
     reacts_recv     = msum("reactions_received")
     voice_min       = msum("voice_minutes")
     stream_min      = msum("voice_stream_minutes")
+    activity_minutes = msum("activity_minutes")
     emoji_only      = msum("emoji_only")
 
     # activity joins
@@ -337,6 +387,13 @@ def _scores_window(con: sqlite3.Connection, guild_id: int, user_id: int, end_day
     # thoughtfulness
     wpm = words / max(messages, 1)
     wpm_score = min(float(wpm), WPM_CAP)
+
+    # lexical diversity and presence across the window
+    window_end = datetime.fromisoformat(end_day)
+    window_start = (window_end - timedelta(days=6)).date().isoformat()
+    lex_diversity, _, _ = _lexical_diversity_window(con, guild_id, user_id, window_start, end_day)
+    presence_minutes = float(activity_minutes + voice_min + stream_min)
+    avg_presence = presence_minutes / 7.0
 
     # STR
     if active_days > 0:
@@ -370,10 +427,12 @@ def _scores_window(con: sqlite3.Connection, guild_id: int, user_id: int, end_day
 
     # WIS
     wis_score = (
-        K_WIS_JOIN  * float(activity_joins) +
-        K_WIS_WEEKS * float(active_weeks)   +
-        K_WIS_DAYS  * float(active_days)    +
-        K_WIS_WPM   * float(wpm_score)
+        K_WIS_JOIN     * float(activity_joins) +
+        K_WIS_WEEKS    * float(active_weeks)   +
+        K_WIS_DAYS     * float(active_days)    +
+        K_WIS_WPM      * float(wpm_score)      +
+        K_WIS_PRESENCE * float(avg_presence)   +
+        K_WIS_LEXICON  * float(lex_diversity)
     )
 
     return {
