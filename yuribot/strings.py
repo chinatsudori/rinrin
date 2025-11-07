@@ -10,7 +10,7 @@ RIN_FLAVOR_PROB = 0.0          # 0.0–1.0 chance to append a short quip
 
 # Eligible prefixes (light, SFW sass)
 _RIN_ALLOW_PREFIXES: tuple[str, ...] = (
-    "common.", "movie.", "poll.", "series.", "discuss.",
+    "common.", "poll.",
     "tools.", "welcome.", "fun.", "move_any.",
     "mu.",
 )
@@ -182,24 +182,6 @@ _STRINGS.update({
     "botlog.change.channel_topic": "Topic changed",
     "botlog.change.channel_nsfw": "NSFW: {before} → {after}",
 
-    # ---------------- Collections ----------------
-    "collection.error.no_cfg_with_hint": "No config for club '{club}'. Run /club setup.",
-    "collection.error.no_cfg": "No config for club '{club}'.",
-    "collection.error.no_open": "No open collection.",
-    "collection.reply.opened": "{club} collection opened (#{id}).",
-    "collection.reply.closed": "{club} collection #{id} closed.",
-    "collection.announce.open": (
-        "**{club} submissions open** — closes <t:{closes_unix}:R>.\n"
-        "Post new entries in **{planning_name}**; the bot will auto-register them."
-    ),
-    "collection.embed.title": "{club} — Submissions (Collection #{id}: {status})",
-    "collection.embed.item_name": "{i}. {title}",
-    "collection.embed.item_value": "{link} • by <@{author_id}> • thread: <#{thread_id}>",
-    "collection.error.no_windows": "No collection windows yet.",
-    "collection.error.no_submissions": "No submissions in the current collection.",
-    "collection.common.no_link": "(no link)",
-    "collection.thread.registered": "Registered this **{club_upper}** submission for the current collection.",
-
     # ---------------- Modlog ----------------
     "modlog.err.perms": "Insufficient permissions.",
     "modlog.err.no_channel": "Mod logs channel not set. Run `/set_mod_logs` first.",
@@ -256,25 +238,6 @@ _STRINGS.update({
     "mod.booly.view.timestamps": "Created: {created} | Updated: {updated}",
     "mod.booly.scope.global": "Global",
 
-    # ---------------- Movie club ----------------
-    "movie.location.default": "Projection Booth",
-    "movie.error.perms": "You need **Manage Server** or **Manage Events** to schedule movie showings.",
-    "movie.error.forbidden": "I’m missing permission to create scheduled events in this server.",
-    "movie.error.http": "Discord API error while creating events: {error}",
-    "movie.event.name_morning": "{title} — Morning Showing",
-    "movie.event.name_evening": "{title} — Evening Showing",
-    "movie.desc.header": "Movie Night: {title}",
-    "movie.desc.link": "Link: {link}",
-    "movie.scheduled.title": "🎬 Movie Scheduled",
-    "movie.scheduled.desc": "**{title}**\nMorning: <t:{am}:F>\nEvening: <t:{pm}:F>",
-    "movie.field.venue": "Venue",
-    "movie.field.location": "Location",
-    "movie.field.duration": "Duration",
-    "movie.value.duration_min": "{minutes} min",
-    "movie.field.link": "Link",
-    "movie.field.events": "Events",
-    "movie.value.events_links": "[Morning]({am_url}) • [Evening]({pm_url})",
-
     # ---------------- Music ----------------
 
     # ---------------- Native Polls ----------------
@@ -293,50 +256,6 @@ _STRINGS.update({
     "poll.native.err.need_two": "Provide at least **2** options.",
     "poll.native.err.too_many": "Provide **{n}** options or fewer.",
     "poll.native.err.create_failed": "Couldn’t create the poll: {err}",
-
-    # ---------------- Polls (legacy/custom) ----------------
-    "poll.create.error.no_cfg": "No config for club '{club}'. Run /club setup.",
-    "poll.create.error.no_collection": "No collection found.",
-    "poll.create.error.no_valid_numbers": "No valid numbers.",
-    "poll.create.error.bad_channel": "Polls channel invalid.",
-    "poll.create.title": "📊 {club} Poll",
-    "poll.create.desc": "From collection #{cid}",
-    "poll.options_title": "Options",
-    "poll.option.bullet": "• {label}",
-    "poll.create.posted": "Poll #{id} posted in {channel}.",
-    "poll.close.not_found": "Poll not found.",
-    "poll.close.results_header": "**Results:**",
-    "poll.close.result_line": "{label}: **{count}**",
-    "poll.close.closed": "Poll #{id} closed.",
-
-    # ---------------- Series ----------------
-    "series.error.no_cfg": "No config for club '{club}'.",
-    "series.error.no_collection": "No collection found.",
-    "series.error.bad_number": "Invalid number.",
-    "series.set_from_number.ok": "{club}: Active series set to **{title}** (series #{id}).",
-    "series.set_manual.ok": "{club}: Active series set to **{title}** (series #{id}).",
-    "series.list.none": "No series yet.",
-    "series.list.title": "{club} — Series",
-    "series.list.row_title": "#{id} — {title} [{status}]",
-    "series.list.no_link": "(no link)",
-    "series.plan.error.not_found": "Series not found.",
-    "series.plan.error.no_active": "No active series.",
-    "series.plan.label": "Ch. {s}–{e}",
-    "series.plan.event_name": "{title} — {label} Discussion",
-    "series.plan.desc_with_link": "Discuss {title} {label}. Link: {link}",
-    "series.plan.desc_no_link": "Discuss {title} {label}.",
-    "series.plan.location": "YuriCafe",
-    "series.plan.summary": (
-        "{club}: Created {created}/{total} discussion events for **{title}** "
-        "starting <t:{first_ts}:F>, cadence every {cadence} day(s)."
-    ),
-    "series.plan.summary_fail_tail": " {fail} failed.",
-
-    # ---------------- Discuss thread auto-post ----------------
-    "discuss.thread.title": "{title} — {label} Discussion",
-    "discuss.thread.body.header": "Discussion for **{title} {label}**.",
-    "discuss.thread.body.ref": "Reference: {link}",
-    "discuss.thread.body.event": "Event link: {url}",
 
     # ---------------- Timeout (moderation) ----------------
     "timeout.error.self": "You can’t timeout yourself.",
