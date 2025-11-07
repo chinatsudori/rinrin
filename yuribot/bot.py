@@ -134,14 +134,12 @@ class YuriBot(commands.Bot):
         # 2) Load cogs to build the in-process command tree
         extensions: Sequence[str] = (
             "yuribot.cogs.admin",
-            "yuribot.cogs.modlog",
+            "yuribot.cogs.mod",
             "yuribot.cogs.botlog",
             "yuribot.cogs.welcome",
-            "yuribot.cogs.timeout",
+            "yuribot.cogs.cmd",
             "yuribot.cogs.music",
-            "yuribot.cogs.stats",
             "yuribot.cogs.emoji_stats",
-            "yuribot.cogs.movebot",
             "yuribot.cogs.coin_dice",
             "yuribot.cogs.mangaupdates",
             "yuribot.cogs.booked",

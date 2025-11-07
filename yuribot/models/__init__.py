@@ -1,5 +1,6 @@
 """Modular database access layer for Yuribot."""
 
+from . import booly
 from . import collections
 from . import common
 from . import emoji_stats
@@ -14,6 +15,7 @@ from . import series
 from . import settings
 
 __all__ = [
+    "booly",
     "collections",
     "common",
     "emoji_stats",
