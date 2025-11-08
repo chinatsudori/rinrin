@@ -56,13 +56,23 @@ class TimestampCog(commands.Cog):
                     "post": post,
                 },
             )
-            return await interaction.followup.send(S("tools.timestamp.invalid_dt"), ephemeral=not post)
+            return await interaction.followup.send(
+                S("tools.timestamp.invalid_dt"), ephemeral=not post
+            )
 
         tzinfo = coerce_timezone(tz)
         hh, mm, ss = parsed_time
 
         try:
-            local_dt = datetime(parsed_date.year, parsed_date.month, parsed_date.day, hh, mm, ss, tzinfo=tzinfo)
+            local_dt = datetime(
+                parsed_date.year,
+                parsed_date.month,
+                parsed_date.day,
+                hh,
+                mm,
+                ss,
+                tzinfo=tzinfo,
+            )
         except Exception:
             log.exception(
                 "tools.timestamp.build_failed",
@@ -75,11 +85,15 @@ class TimestampCog(commands.Cog):
                     "tz": tz,
                 },
             )
-            return await interaction.followup.send(S("tools.timestamp.build_failed"), ephemeral=not post)
+            return await interaction.followup.send(
+                S("tools.timestamp.build_failed"), ephemeral=not post
+            )
 
         try:
             epoch = to_epoch(local_dt)
-            embed = build_timestamp_embed(epoch=epoch, local_iso=local_dt.isoformat(), tzinfo=tzinfo)
+            embed = build_timestamp_embed(
+                epoch=epoch, local_iso=local_dt.isoformat(), tzinfo=tzinfo
+            )
             await interaction.followup.send(embed=embed, ephemeral=not post)
         except Exception:
             log.exception(

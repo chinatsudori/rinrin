@@ -31,10 +31,14 @@ def build_modlog_embed(
         inline=False,
     )
     embed.add_field(name=S("modlog.embed.rule"), value=rule, inline=True)
-    embed.add_field(name=S("modlog.embed.temperature"), value=str(temperature), inline=True)
+    embed.add_field(
+        name=S("modlog.embed.temperature"), value=str(temperature), inline=True
+    )
     embed.add_field(name=S("modlog.embed.reason"), value=reason[:1000], inline=False)
     if details:
-        embed.add_field(name=S("modlog.embed.details"), value=details[:1000], inline=False)
+        embed.add_field(
+            name=S("modlog.embed.details"), value=details[:1000], inline=False
+        )
     action_text = "\n".join(actions)[:1000] if actions else None
     if action_text:
         embed.add_field(name=S("modlog.embed.actions"), value=action_text, inline=False)
@@ -59,8 +63,12 @@ def build_dm_embed(
         color=color_for_temperature(temperature),
     )
     embed.add_field(name=S("modlog.dm.rule"), value=rule, inline=True)
-    embed.add_field(name=S("modlog.dm.status"), value=S("modlog.dm.status_open"), inline=False)
-    embed.add_field(name=S("modlog.dm.reason"), value=reason[:1000] if reason else "-", inline=False)
+    embed.add_field(
+        name=S("modlog.dm.status"), value=S("modlog.dm.status_open"), inline=False
+    )
+    embed.add_field(
+        name=S("modlog.dm.reason"), value=reason[:1000] if reason else "-", inline=False
+    )
     if details:
         embed.add_field(name=S("modlog.dm.detail"), value=details[:1000], inline=False)
     action_text = "\n".join(actions) if actions else S("modlog.dm.actions_warning")
@@ -76,9 +84,15 @@ def build_relay_embed(message: discord.Message) -> discord.Embed:
         timestamp=now_local(),
     )
     embed.set_footer(
-        text=S("modlog.relay.footer", author=str(message.author), author_id=message.author.id)
+        text=S(
+            "modlog.relay.footer",
+            author=str(message.author),
+            author_id=message.author.id,
+        )
     )
     if message.attachments:
         links = "\n".join(a.url for a in message.attachments)
-        embed.add_field(name=S("modlog.relay.attachments"), value=links[:1000], inline=False)
+        embed.add_field(
+            name=S("modlog.relay.attachments"), value=links[:1000], inline=False
+        )
     return embed

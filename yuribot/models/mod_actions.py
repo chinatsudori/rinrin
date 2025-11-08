@@ -41,7 +41,9 @@ def add_mod_action(
         return cur.lastrowid
 
 
-def list_mod_actions_for_user(guild_id: int, target_user_id: int, limit: int = 20) -> List[Tuple]:
+def list_mod_actions_for_user(
+    guild_id: int, target_user_id: int, limit: int = 20
+) -> List[Tuple]:
     with connect() as con:
         cur = con.cursor()
         return cur.execute(

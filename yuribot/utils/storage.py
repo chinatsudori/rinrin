@@ -33,7 +33,7 @@ def _candidate_dirs() -> list[Path]:
     tmp_root = os.getenv("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     candidates.append(Path(tmp_root) / "yuribot")
 
-    # Remove duplicates while preserving order
+    # Remove duplicates
     seen: set[Path] = set()
     unique: list[Path] = []
     for path in candidates:
@@ -89,12 +89,16 @@ def resolve_data_dir(*parts: str, force_temp: bool = False) -> Path:
         try:
             writable_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            log.warning("Failed to ensure temp data directory %s: %s", writable_dir, exc)
+            log.warning(
+                "Failed to ensure temp data directory %s: %s", writable_dir, exc
+            )
     else:
         candidates = _candidate_dirs()
         writable_dir = _first_writable_dir(candidates)
         if writable_dir is None:
-            log.warning("No persistent data directory writable; falling back to temp directory")
+            log.warning(
+                "No persistent data directory writable; falling back to temp directory"
+            )
             return resolve_data_dir(*parts, force_temp=True)
 
     target = writable_dir.joinpath(*parts) if parts else writable_dir
@@ -117,12 +121,12 @@ def resolve_data_file(filename: str) -> Path:
     """
     rel = Path(filename)
     if rel.is_absolute():
-        # Absolute paths are left untouched.
+        # Absolute paths are left untouched
         return rel
 
     candidates = _candidate_dirs()
 
-    # Look for an existing file we can seed from
+    # Look for an existing file to seed from
     source_path: Path | None = None
     for base in candidates:
         cand = base / rel
@@ -135,23 +139,38 @@ def resolve_data_file(filename: str) -> Path:
     if source_path and source_path != target and not target.exists():
         try:
             target.write_bytes(source_path.read_bytes())
-            log.info("Copied data file from %s to writable location %s", source_path, target)
+            log.info(
+                "Copied data file from %s to writable location %s", source_path, target
+            )
         except OSError as exc:
-            log.warning("Failed to copy data file from %s to %s: %s", source_path, target, exc)
+            log.warning(
+                "Failed to copy data file from %s to %s: %s", source_path, target, exc
+            )
 
     if _ensure_file_writable(target):
         return target
 
     # Fall back to temp directory
     temp_target = resolve_data_dir(force_temp=True) / rel
-    if source_path and source_path.exists() and source_path != temp_target and not temp_target.exists():
+    if (
+        source_path
+        and source_path.exists()
+        and source_path != temp_target
+        and not temp_target.exists()
+    ):
         try:
             temp_target.write_bytes(source_path.read_bytes())
             log.info("Copied data file to temp location %s", temp_target)
         except OSError as exc:
-            log.warning("Failed to copy data file to temp location %s: %s", temp_target, exc)
+            log.warning(
+                "Failed to copy data file to temp location %s: %s", temp_target, exc
+            )
 
     if not _ensure_file_writable(temp_target):
-        log.error("Unable to secure writable location for data file %s; using %s but writes may fail", rel, temp_target)
+        log.error(
+            "Unable to secure writable location for data file %s; using %s but writes may fail",
+            rel,
+            temp_target,
+        )
 
     return temp_target

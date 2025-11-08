@@ -74,14 +74,19 @@ class CoinDiceCog(commands.Cog):
         specs="One or more dice specs (e.g., d20, 2d6, 3d8+2)",
         post="If true, post publicly in this channel",
     )
-    async def roll(self, interaction: discord.Interaction, specs: str, post: bool = False):
+    async def roll(
+        self, interaction: discord.Interaction, specs: str, post: bool = False
+    ):
         await interaction.response.defer(ephemeral=not post)
         try:
             parsed = parse_specs(specs)
         except DiceSpecError as exc:
             bad = str(exc)
             return await interaction.followup.send(
-                S("fun.dice.invalid_spec", text=bad if bad != "empty" else specs or "."),
+                S(
+                    "fun.dice.invalid_spec",
+                    text=bad if bad != "empty" else specs or ".",
+                ),
                 ephemeral=not post,
             )
 

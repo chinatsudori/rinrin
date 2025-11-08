@@ -7,7 +7,9 @@ import discord
 from ..strings import S
 
 
-def build_club_config_embed(*, guild: discord.Guild, club_pairs: Iterable[Tuple[str, str]]) -> discord.Embed:
+def build_club_config_embed(
+    *, guild: discord.Guild, club_pairs: Iterable[Tuple[str, str]]
+) -> discord.Embed:
     embed = discord.Embed(
         title=S("admin.club_config.title", guild=guild.name),
         color=discord.Color.blue(),

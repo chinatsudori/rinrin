@@ -29,5 +29,7 @@ def build_timestamp_embed(*, epoch: int, local_iso: str, tzinfo) -> discord.Embe
         value="\n".join(copy_lines),
         inline=False,
     )
-    embed.set_footer(text=S("tools.timestamp.footer", local_iso=local_iso, tz=tz_display(tzinfo)))
+    embed.set_footer(
+        text=S("tools.timestamp.footer", local_iso=local_iso, tz=tz_display(tzinfo))
+    )
     return embed

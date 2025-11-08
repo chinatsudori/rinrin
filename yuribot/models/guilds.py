@@ -122,7 +122,9 @@ def get_club_cfg(guild_id: int, club_type: str) -> Optional[Dict[str, int]]:
     }
 
 
-def get_club_by_planning_forum(guild_id: int, forum_id: int) -> Optional[Tuple[int, str]]:
+def get_club_by_planning_forum(
+    guild_id: int, forum_id: int
+) -> Optional[Tuple[int, str]]:
     with connect() as con:
         cur = con.cursor()
         row = cur.execute(

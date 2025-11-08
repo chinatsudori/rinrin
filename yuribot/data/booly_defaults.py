@@ -228,5 +228,9 @@ PERSONAL_POOLS: Dict[int, List[str]] = {
 DEFAULT_BOOLY_ROWS: Tuple[Tuple[str, int | None, str], ...] = (
     *[("mention_general", None, msg) for msg in GENERAL_MENTION_MESSAGES],
     *[("mention_mod", None, msg) for msg in MOD_MENTION_MESSAGES],
-    *[("personal", user_id, msg) for user_id, pool in PERSONAL_POOLS.items() for msg in pool],
+    *[
+        ("personal", user_id, msg)
+        for user_id, pool in PERSONAL_POOLS.items()
+        for msg in pool
+    ],
 )

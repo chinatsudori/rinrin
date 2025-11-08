@@ -473,11 +473,15 @@ async def fetch_cover_image(
 
     for url in urls:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=12)
+            ) as resp:
                 if resp.status != 200:
                     continue
                 ctype = resp.headers.get("Content-Type", "").lower()
-                if not any(token in ctype for token in ("image/", "jpeg", "png", "webp")):
+                if not any(
+                    token in ctype for token in ("image/", "jpeg", "png", "webp")
+                ):
                     continue
                 raw = await resp.read()
                 if len(raw) > MAX_COVER_BYTES:
@@ -718,10 +722,8 @@ class MUClient:
                 "group": group or "",
                 "url": link or "",
                 "release_date": (
-                    datetime.utcfromtimestamp(ts).isoformat() + "Z"
-                )
-                if ts
-                else "",
+                    (datetime.utcfromtimestamp(ts).isoformat() + "Z") if ts else ""
+                ),
                 "release_ts": ts if ts is not None else -1,
                 "title": title or "",
                 "raw_title": title or "",

@@ -56,15 +56,11 @@ def format_release_bits(rel: dict) -> Tuple[str, str]:
     else:
         group = strip_text(str(group_raw))
 
-    url = strip_text(
-        rel.get("url") or rel.get("release_url") or rel.get("link") or ""
-    )
+    url = strip_text(rel.get("url") or rel.get("release_url") or rel.get("link") or "")
 
     extras = []
     if group:
-        extras.append(
-            S("mu.release.group", group=discord.utils.escape_markdown(group))
-        )
+        extras.append(S("mu.release.group", group=discord.utils.escape_markdown(group)))
 
     rdate = (
         rel.get("release_date")

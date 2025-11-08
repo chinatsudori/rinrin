@@ -26,7 +26,9 @@ class DiceSpecError(ValueError):
 def parse_specs(text: str) -> List[Tuple[int, int, int, str]]:
     if not text:
         raise DiceSpecError("empty")
-    tokens = [token.strip() for token in re.split(r"[, \u3000]+", text) if token.strip()]
+    tokens = [
+        token.strip() for token in re.split(r"[, \u3000]+", text) if token.strip()
+    ]
     parsed: List[Tuple[int, int, int, str]] = []
     for token in tokens:
         match = DICE_SPEC_RE.match(token)
@@ -38,7 +40,9 @@ def parse_specs(text: str) -> List[Tuple[int, int, int, str]]:
         modifier = int(mod_str) if mod_str else 0
         if count <= 0 or sides <= 0:
             raise DiceSpecError(token)
-        spec_repr = f"{count}d{sides}" + (f"+{modifier}" if modifier > 0 else f"{modifier}" if modifier < 0 else "")
+        spec_repr = f"{count}d{sides}" + (
+            f"+{modifier}" if modifier > 0 else f"{modifier}" if modifier < 0 else ""
+        )
         parsed.append((count, sides, modifier, spec_repr))
     return parsed
 

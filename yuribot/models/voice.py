@@ -1,5 +1,5 @@
 from __future__ import annotations
-# yuribot/models/voice.py
+
 
 import logging
 from dataclasses import dataclass
@@ -14,12 +14,14 @@ log = logging.getLogger(__name__)
 
 # ---------- time utils ----------
 
+
 def _utc(dt: datetime) -> datetime:
     """Ensure a timezone-aware UTC datetime."""
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # ---------- schema ----------
+
 
 def ensure_schema() -> None:
     with connect() as con:
@@ -51,14 +53,21 @@ def ensure_schema() -> None:
         )
 
         # Helpful indexes for scans / reporting
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_voice_sess_guild_user ON voice_sessions(guild_id, user_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_voice_sess_left ON voice_sessions(left_at)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_voice_min_user_day ON voice_minutes_day(user_id, day)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_voice_sess_guild_user ON voice_sessions(guild_id, user_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_voice_sess_left ON voice_sessions(left_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_voice_min_user_day ON voice_minutes_day(user_id, day)"
+        )
 
         con.commit()
 
 
 # ---------- writes ----------
+
 
 def add_session(
     guild_id: int,
@@ -78,7 +87,14 @@ def add_session(
             INSERT INTO voice_sessions (guild_id,user_id,channel_id,joined_at,left_at,duration_sec)
             VALUES (?,?,?,?,?,?)
             """,
-            (guild_id, user_id, channel_id, joined_at.isoformat(), left_at.isoformat(), dur),
+            (
+                guild_id,
+                user_id,
+                channel_id,
+                joined_at.isoformat(),
+                left_at.isoformat(),
+                dur,
+            ),
         )
         con.commit()
     return dur
@@ -110,6 +126,7 @@ def upsert_minutes_bulk(items: Iterable[Tuple[int, int, str, int]]) -> int:
 
 # ---------- session + bucketing helpers ----------
 
+
 @dataclass(frozen=True)
 class Session:
     user_id: int
@@ -119,8 +136,8 @@ class Session:
 
 
 def explode_minutes_per_day(
-    guild_id: int,       # kept for interface symmetry (not used in math)
-    user_id: int,        # kept for interface symmetry (not used in math)
+    guild_id: int,  # kept for interface symmetry (not used in math)
+    user_id: int,  # kept for interface symmetry (not used in math)
     start: datetime,
     end: datetime,
 ) -> Dict[str, int]:
@@ -136,7 +153,9 @@ def explode_minutes_per_day(
     out: Dict[str, int] = {}
     cur = start
     while True:
-        next_midnight = datetime(cur.year, cur.month, cur.day, tzinfo=timezone.utc) + timedelta(days=1)
+        next_midnight = datetime(
+            cur.year, cur.month, cur.day, tzinfo=timezone.utc
+        ) + timedelta(days=1)
         seg_end = min(end, next_midnight)
         secs = max(0, int((seg_end - cur).total_seconds()))
         if secs:
@@ -156,6 +175,7 @@ class SessionAccumulator:
     - end(uid, cid, ts)
     - materialize() -> List[Session]
     """
+
     def __init__(self) -> None:
         self._open: Dict[Tuple[int, int], datetime] = {}
         self._closed: List[Session] = []
@@ -195,7 +215,9 @@ class SessionAccumulator:
         return list(self._closed)
 
 
-def upsert_sessions_minutes(guild_id: int, sessions: Iterable[Session]) -> Tuple[int, int]:
+def upsert_sessions_minutes(
+    guild_id: int, sessions: Iterable[Session]
+) -> Tuple[int, int]:
     """
     Convert sessions -> day-minute aggregates -> upsert.
     Returns (rows_upserted, total_minutes_added).
@@ -215,7 +237,9 @@ def upsert_sessions_minutes(guild_id: int, sessions: Iterable[Session]) -> Tuple
 
     # Upsert aggregated minutes
     squashed = _squash(agg)
-    rows = upsert_minutes_bulk((gid, uid, day, mins) for (gid, uid, day), mins in squashed.items())
+    rows = upsert_minutes_bulk(
+        (gid, uid, day, mins) for (gid, uid, day), mins in squashed.items()
+    )
 
     return rows, total_minutes
 
@@ -226,6 +250,7 @@ def _squash(d: Dict[Tuple[int, int, str], int]) -> Dict[Tuple[int, int, str], in
 
 
 # ---------- reads / reporting ----------
+
 
 def total_minutes(guild_id: int, user_id: Optional[int] = None) -> int:
     """Total minutes from voice_minutes_day for a guild (or a single user)."""
@@ -244,7 +269,9 @@ def total_minutes(guild_id: int, user_id: Optional[int] = None) -> int:
     return int(row[0] or 0)
 
 
-def recent_user_days(guild_id: int, user_id: int, limit: int = 10) -> List[Tuple[str, int]]:
+def recent_user_days(
+    guild_id: int, user_id: int, limit: int = 10
+) -> List[Tuple[str, int]]:
     """
     Return [(YYYY-MM-DD, minutes)] newest-first for a user.
     """

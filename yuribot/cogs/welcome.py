@@ -9,7 +9,13 @@ from discord.ext import commands
 from ..models import settings
 from ..strings import S
 from ..ui.welcome import build_welcome_embed, welcome_content
-from ..utils.welcome import cfg_cache, has_perms, img_cache, ordinal, resolve_welcome_image
+from ..utils.welcome import (
+    cfg_cache,
+    has_perms,
+    img_cache,
+    ordinal,
+    resolve_welcome_image,
+)
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +41,9 @@ class WelcomeCog(commands.Cog):
             cfg_cache.set(member.guild.id, cfg)
 
         if not cfg:
-            log.debug("welcome.skip_not_configured", extra={"guild_id": member.guild.id})
+            log.debug(
+                "welcome.skip_not_configured", extra={"guild_id": member.guild.id}
+            )
             return
 
         channel_id: Optional[int] = cfg.get("welcome_channel_id")
@@ -48,11 +56,19 @@ class WelcomeCog(commands.Cog):
             return
 
         me = member.guild.me  # type: ignore[assignment]
-        can_send, missing = has_perms(me, ch) if isinstance(me, discord.Member) else (False, ["bot not member?"])
+        can_send, missing = (
+            has_perms(me, ch)
+            if isinstance(me, discord.Member)
+            else (False, ["bot not member?"])
+        )
         if not can_send:
             log.error(
                 "welcome.missing_permissions",
-                extra={"guild_id": member.guild.id, "channel_id": ch.id, "missing": missing},
+                extra={
+                    "guild_id": member.guild.id,
+                    "channel_id": ch.id,
+                    "missing": missing,
+                },
             )
             return
 
@@ -60,7 +76,11 @@ class WelcomeCog(commands.Cog):
             human_count = sum(1 for m in member.guild.members if not m.bot)
         except Exception:
             human_count = None
-        number = human_count if human_count and human_count > 0 else (member.guild.member_count or 0)
+        number = (
+            human_count
+            if human_count and human_count > 0
+            else (member.guild.member_count or 0)
+        )
         ordinal_str = ordinal(max(int(number), 1))
 
         embed = build_welcome_embed(member, ordinal_str)
@@ -76,7 +96,11 @@ class WelcomeCog(commands.Cog):
             except Exception as exc:
                 log.warning(
                     "welcome.attach_failed",
-                    extra={"guild_id": member.guild.id, "path": str(path), "error": str(exc)},
+                    extra={
+                        "guild_id": member.guild.id,
+                        "path": str(path),
+                        "error": str(exc),
+                    },
                 )
 
         content = welcome_content(member)
@@ -85,9 +109,16 @@ class WelcomeCog(commands.Cog):
         for attempt in (1, 2):
             try:
                 if file:
-                    await ch.send(content=content, embed=embed, file=file, allowed_mentions=allowed_mentions)
+                    await ch.send(
+                        content=content,
+                        embed=embed,
+                        file=file,
+                        allowed_mentions=allowed_mentions,
+                    )
                 else:
-                    await ch.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+                    await ch.send(
+                        content=content, embed=embed, allowed_mentions=allowed_mentions
+                    )
                 log.info(
                     "welcome.sent",
                     extra={
@@ -122,8 +153,7 @@ class WelcomeCog(commands.Cog):
                 )
                 if attempt == 1:
                     await discord.utils.sleep_until(
-                        discord.utils.utcnow()
-                        + discord.utils.timedelta(seconds=0.4)
+                        discord.utils.utcnow() + discord.utils.timedelta(seconds=0.4)
                     )
                 else:
                     log.exception(

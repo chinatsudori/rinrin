@@ -13,7 +13,9 @@ MAX_OPTIONS = 6
 MAX_HOURS = 168  # 7 days
 
 
-def create_poll(question: str, hours: int, allow_multi: bool) -> Tuple[discord.Poll, bool]:
+def create_poll(
+    question: str, hours: int, allow_multi: bool
+) -> Tuple[discord.Poll, bool]:
     duration = timedelta(hours=int(hours))
     try:
         params = inspect.signature(discord.Poll).parameters  # type: ignore[attr-defined]

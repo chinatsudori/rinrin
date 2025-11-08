@@ -52,11 +52,15 @@ class PollsCog(commands.Cog):
         ephemeral: bool = False,
     ):
         if not interaction.guild:
-            return await interaction.response.send_message(S("common.guild_only"), ephemeral=True)
+            return await interaction.response.send_message(
+                S("common.guild_only"), ephemeral=True
+            )
 
         options = [opt for opt in (opt1, opt2, opt3, opt4, opt5, opt6) if opt]
         if len(options) < 2:
-            return await interaction.response.send_message(S("poll.native.err.need_two"), ephemeral=True)
+            return await interaction.response.send_message(
+                S("poll.native.err.need_two"), ephemeral=True
+            )
         if len(options) > MAX_OPTIONS:
             return await interaction.response.send_message(
                 S("poll.native.err.too_many", n=MAX_OPTIONS), ephemeral=True

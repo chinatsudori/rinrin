@@ -58,6 +58,8 @@ def format_reply_header(author: discord.Member, jump_url: str, snippet: str) -> 
     )
 
 
-def format_move_header(author: discord.Member, created_at: discord.datetime, jump_url: str) -> str:
+def format_move_header(
+    author: discord.Member, created_at: discord.datetime, jump_url: str
+) -> str:
     ts = f"<t:{int(created_at.timestamp())}:F>"
     return S("move_any.header", author=author.display_name, ts=ts, jump=jump_url)

@@ -65,9 +65,11 @@ MENTION_COOLDOWN = 1200  # seconds (20 min)
 
 @dataclass
 class GuildUserState:
-    last_auto_ts: Optional[int] = None      # last time a personalized auto fired
-    last_key: Optional[str] = None          # last personalized line used
-    last_mention_ts: Optional[int] = None   # last time Rinrin replied to a mention from this user
+    last_auto_ts: Optional[int] = None  # last time a personalized auto fired
+    last_key: Optional[str] = None  # last personalized line used
+    last_mention_ts: Optional[int] = (
+        None  # last time Rinrin replied to a mention from this user
+    )
 
 
 # state[guild_id][user_id] = GuildUserState

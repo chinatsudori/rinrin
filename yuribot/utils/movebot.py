@@ -19,22 +19,30 @@ async def resolve_messageable_from_id(
 ) -> Optional[GuildTextish]:
     log.debug("movebot.resolve_messageable start gid=%s ident=%s", guild_id, ident)
     ch = bot.get_channel(ident)
-    if isinstance(ch, (discord.TextChannel, discord.ForumChannel)) and getattr(ch.guild, "id", None) == guild_id:
+    if (
+        isinstance(ch, (discord.TextChannel, discord.ForumChannel))
+        and getattr(ch.guild, "id", None) == guild_id
+    ):
         return ch
     if isinstance(ch, discord.Thread) and getattr(ch.guild, "id", None) == guild_id:
         return ch
     try:
         fetched = await bot.fetch_channel(ident)
-        if isinstance(fetched, (discord.TextChannel, discord.Thread, discord.ForumChannel)) and getattr(
-            fetched.guild, "id", None
-        ) == guild_id:
+        if (
+            isinstance(
+                fetched, (discord.TextChannel, discord.Thread, discord.ForumChannel)
+            )
+            and getattr(fetched.guild, "id", None) == guild_id
+        ):
             return fetched
     except Exception as exc:
         log.debug("movebot.resolve_messageable fetch_channel failed err=%r", exc)
     return None
 
 
-def parent_for_destination(dest: GuildTextish) -> Optional[Union[discord.TextChannel, discord.ForumChannel]]:
+def parent_for_destination(
+    dest: GuildTextish,
+) -> Optional[Union[discord.TextChannel, discord.ForumChannel]]:
     if isinstance(dest, discord.TextChannel):
         return dest
     if isinstance(dest, discord.Thread):
@@ -68,7 +76,9 @@ async def get_or_create_webhook(
 def attach_signature(message: discord.Message) -> str:
     if not getattr(message, "attachments", None):
         return ""
-    items = [f"{attachment.filename}:{attachment.size}" for attachment in message.attachments]
+    items = [
+        f"{attachment.filename}:{attachment.size}" for attachment in message.attachments
+    ]
     return "|".join(items)
 
 
@@ -117,10 +127,14 @@ async def send_copy(
     reply_prefix = ""
     try:
         if source_msg.reference and source_msg.reference.message_id:
-            ref: Optional[discord.Message] = getattr(source_msg.reference, "resolved", None)
+            ref: Optional[discord.Message] = getattr(
+                source_msg.reference, "resolved", None
+            )
             if ref is None:
                 try:
-                    ref = await source_msg.channel.fetch_message(source_msg.reference.message_id)
+                    ref = await source_msg.channel.fetch_message(
+                        source_msg.reference.message_id
+                    )
                 except Exception:
                     ref = None
             if ref is not None:
@@ -129,7 +143,9 @@ async def send_copy(
                     snippet = snippet[:137] + "..."
                 if not snippet and ref.attachments:
                     snippet = "Attachment"
-                reply_prefix = f">> {ref.author.display_name} ({ref.jump_url}) {snippet}"
+                reply_prefix = (
+                    f">> {ref.author.display_name} ({ref.jump_url}) {snippet}"
+                )
     except Exception:
         reply_prefix = ""
 

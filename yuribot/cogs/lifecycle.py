@@ -8,7 +8,11 @@ import discord
 from discord.ext import commands
 
 from ..strings import S
-from ..utils.lifecycle import botlog_channels, build_shutdown_message, configure_signal_handlers
+from ..utils.lifecycle import (
+    botlog_channels,
+    build_shutdown_message,
+    configure_signal_handlers,
+)
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +39,16 @@ class LifecycleCog(commands.Cog):
         sent_any = False
         for channel in botlog_channels(self.bot):
             try:
-                await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
+                await channel.send(
+                    message, allowed_mentions=discord.AllowedMentions.none()
+                )
                 sent_any = True
             except Exception:
                 continue
-        log.info("lifecycle.shutdown_notice", extra={"sent_any": sent_any, "signal": sig_name})
+        log.info(
+            "lifecycle.shutdown_notice",
+            extra={"sent_any": sent_any, "signal": sig_name},
+        )
 
 
 async def setup(bot: commands.Bot):

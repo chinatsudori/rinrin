@@ -38,7 +38,10 @@ def add_poll_option(poll_id: int, label: str, submission_id: int) -> None:
 def set_poll_message(poll_id: int, channel_id: int, message_id: int) -> None:
     with connect() as con:
         cur = con.cursor()
-        cur.execute("UPDATE polls SET channel_id=?, message_id=? WHERE id=?", (channel_id, message_id, poll_id))
+        cur.execute(
+            "UPDATE polls SET channel_id=?, message_id=? WHERE id=?",
+            (channel_id, message_id, poll_id),
+        )
         con.commit()
 
 
@@ -82,7 +85,9 @@ def close_poll(poll_id: int) -> None:
 def get_poll_channel_and_message(poll_id: int) -> Tuple[int, int, int] | None:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("SELECT channel_id, message_id, guild_id FROM polls WHERE id=?", (poll_id,)).fetchone()
+        row = cur.execute(
+            "SELECT channel_id, message_id, guild_id FROM polls WHERE id=?", (poll_id,)
+        ).fetchone()
         return row if row else None
 
 

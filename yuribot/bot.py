@@ -33,8 +33,8 @@ def build_intents() -> discord.Intents:
     """Privileged intents must also be enabled in the Developer Portal."""
     intents = discord.Intents.default()
     intents.guilds = True
-    intents.members = True                # privileged
-    intents.message_content = True        # privileged
+    intents.members = True  # privileged
+    intents.message_content = True  # privileged
     intents.emojis_and_stickers = True
     intents.voice_states = True
     intents.guild_messages = True
@@ -108,30 +108,30 @@ class YuriBot(commands.Bot):
 
     # ---- lifecycle ----
     async def setup_hook(self) -> None:
-        # 0) DB first
         ensure_db()
         log.info("Database ensured/connected.")
 
-        clear_once = (os.getenv("CLEAR_GLOBALS_ONCE") == "1")
+        clear_once = os.getenv("CLEAR_GLOBALS_ONCE") == "1"
         raw_guilds = os.getenv("SYNC_GUILDS") or os.getenv("DEV_GUILD_ID") or ""
         guild_ids = _parse_sync_guilds(raw_guilds)
         mode = _sync_mode()
 
         log.info(
             "sync env: clear_globals_once=%s, mode=%s, sync_guilds=%s",
-            clear_once, mode, guild_ids or "<none>",
+            clear_once,
+            mode,
+            guild_ids or "<none>",
         )
 
-        # 1) Optionally clear GLOBAL commands once (before loading cogs)
         if clear_once:
             try:
                 self.tree.clear_commands(guild=None)  # clear local GLOBAL table
-                await self.tree.sync()                # push deletion to Discord
+                await self.tree.sync()  # push deletion to Discord
                 log.warning("Cleared all GLOBAL commands.")
             except Exception:
                 log.exception("Failed clearing global commands")
 
-        # 2) Load cogs to build the in-process command tree
+        # Load cogs to build the in-process command tree
         extensions: Sequence[str] = (
             "yuribot.cogs.admin",
             "yuribot.cogs.mod",
@@ -147,13 +147,16 @@ class YuriBot(commands.Bot):
         )
         await self._load_extensions(extensions)
 
-        # 3) Sync commands
+        # Sync commands
         await self._sync_commands(guild_ids, mode)
 
-        # Log what commands the process actually registered (post-sync snapshot)
         try:
             names = [cmd.qualified_name for cmd in self.tree.get_commands()]
-            log.info("Command tree built: %d commands registered in-process: %s", len(names), names)
+            log.info(
+                "Command tree built: %d commands registered in-process: %s",
+                len(names),
+                names,
+            )
         except Exception:
             pass
 
@@ -204,7 +207,11 @@ class YuriBot(commands.Bot):
 
     async def close(self) -> None:
         # Post restart/shutdown notice before disconnecting
-        note = f"Rebooting… ({self._shutdown_signal})" if self._shutdown_signal else "Rebooting… (shutdown requested)"
+        note = (
+            f"Rebooting… ({self._shutdown_signal})"
+            if self._shutdown_signal
+            else "Rebooting… (shutdown requested)"
+        )
         with suppress(Exception):
             await self._post_botlog(note)
 

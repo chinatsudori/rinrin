@@ -38,7 +38,9 @@ def _row_to_message(row: sqlite3.Row) -> BoolyMessage:
     )
 
 
-def fetch_messages(scope: BoolyScope, user_id: Optional[int] = None) -> List[BoolyMessage]:
+def fetch_messages(
+    scope: BoolyScope, user_id: Optional[int] = None
+) -> List[BoolyMessage]:
     con = connect()
     con.row_factory = sqlite3.Row
     cur = con.cursor()
@@ -96,7 +98,9 @@ def fetch_message(message_id: int) -> Optional[BoolyMessage]:
     return _row_to_message(row) if row else None
 
 
-def create_message(scope: BoolyScope, content: str, user_id: Optional[int] = None) -> BoolyMessage:
+def create_message(
+    scope: BoolyScope, content: str, user_id: Optional[int] = None
+) -> BoolyMessage:
     con = connect()
     cur = con.cursor()
     cur.execute(
@@ -149,7 +153,9 @@ def ensure_seed_data() -> None:
     con.close()
 
 
-def bulk_replace(scope: BoolyScope, messages: Iterable[Tuple[Optional[int], str]]) -> None:
+def bulk_replace(
+    scope: BoolyScope, messages: Iterable[Tuple[Optional[int], str]]
+) -> None:
     con = connect()
     cur = con.cursor()
     if scope == SCOPE_PERSONAL:

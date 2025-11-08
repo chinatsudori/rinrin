@@ -12,6 +12,7 @@ from ..db import connect
 
 # ---- Public helpers expected by the cog ----
 
+
 def get_connection():
     """
     Return a *new* connection to the archive DB.
@@ -96,6 +97,7 @@ def iter_guild_messages(
 
 
 # ---- Existing archiver types & functions ----
+
 
 @dataclass(slots=True)
 class ArchivedMessage:
@@ -222,7 +224,9 @@ def from_discord_message(message: "discord.Message") -> ArchivedMessage:
         guild_id=guild.id,
         channel_id=channel.id,  # type: ignore[arg-type]
         author_id=author.id,  # type: ignore[arg-type]
-        message_type=str(message.type.name if hasattr(message.type, "name") else message.type),
+        message_type=str(
+            message.type.name if hasattr(message.type, "name") else message.type
+        ),
         created_at=_ensure_utc_iso(message.created_at) or "",
         content=message.content or None,
         edited_at=_ensure_utc_iso(message.edited_at),

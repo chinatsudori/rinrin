@@ -7,7 +7,10 @@ from typing import Iterable, List, Tuple
 from ..db import connect
 from .common import now_iso_utc as _now_iso_utc
 
-def mu_register_thread_series(guild_id: int, thread_id: int, series_id: str, series_title: str) -> None:
+
+def mu_register_thread_series(
+    guild_id: int, thread_id: int, series_id: str, series_title: str
+) -> None:
     """Associate a forum thread with an MU series; upsert series title."""
     now = _now_iso_utc()
     with connect() as con:
@@ -30,17 +33,21 @@ def mu_register_thread_series(guild_id: int, thread_id: int, series_id: str, ser
         )
         con.commit()
 
+
 def mu_get_thread_series(thread_id: int, guild_id: int | None = None) -> str | None:
     with connect() as con:
         cur = con.cursor()
         if guild_id is None:
-            row = cur.execute("SELECT series_id FROM mu_thread_series WHERE thread_id=?", (thread_id,)).fetchone()
+            row = cur.execute(
+                "SELECT series_id FROM mu_thread_series WHERE thread_id=?", (thread_id,)
+            ).fetchone()
         else:
             row = cur.execute(
                 "SELECT series_id FROM mu_thread_series WHERE guild_id=? AND thread_id=?",
                 (guild_id, thread_id),
             ).fetchone()
         return row[0] if row else None
+
 
 def mu_upsert_release(
     series_id: str,
@@ -87,6 +94,7 @@ def mu_upsert_release(
         except sqlite3.IntegrityError:
             return False
 
+
 def mu_bulk_upsert_releases(series_id: str, items: list[dict]) -> list[int]:
     """Upsert many releases; return newly inserted release_ids (ascending by release_ts)."""
     inserted: list[tuple[int, int]] = []
@@ -103,7 +111,9 @@ def mu_bulk_upsert_releases(series_id: str, items: list[dict]) -> list[int]:
             subchapter=str(r.get("subchapter") or ""),
             group_name=str(r.get("group") or r.get("group_name") or ""),
             url=str(r.get("url") or r.get("release_url") or r.get("link") or ""),
-            release_ts=int(r.get("release_ts") if r.get("release_ts") is not None else -1),
+            release_ts=int(
+                r.get("release_ts") if r.get("release_ts") is not None else -1
+            ),
         )
         if ok:
             ts = int(r.get("release_ts") if r.get("release_ts") is not None else -1)
@@ -111,13 +121,20 @@ def mu_bulk_upsert_releases(series_id: str, items: list[dict]) -> list[int]:
     inserted.sort(key=lambda x: x[0])  # oldest → newest
     return [rid for _, rid in inserted]
 
+
 def mu_latest_release_ts(series_id: str) -> int:
     with connect() as con:
         cur = con.cursor()
-        row = cur.execute("SELECT COALESCE(MAX(release_ts), -1) FROM mu_releases WHERE series_id=?", (str(series_id),)).fetchone()
+        row = cur.execute(
+            "SELECT COALESCE(MAX(release_ts), -1) FROM mu_releases WHERE series_id=?",
+            (str(series_id),),
+        ).fetchone()
         return int(row[0] if row and row[0] is not None else -1)
 
-def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *, english_only: bool = False) -> list[tuple]:
+
+def mu_list_unposted_for_thread(
+    guild_id: int, thread_id: int, series_id: str, *, english_only: bool = False
+) -> list[tuple]:
     """
     Return releases NOT yet posted in thread (ordered by release_ts asc, unknowns first).
     Columns: (release_id, title, raw_title, description, volume, chapter, subchapter, group_name, url, release_ts)
@@ -146,7 +163,14 @@ def mu_list_unposted_for_thread(guild_id: int, thread_id: int, series_id: str, *
 
         return [r for r in rows if _is_en(r[1], r[2], r[3])]
 
-def mu_mark_posted(guild_id: int, thread_id: int, series_id: str, release_id: int, when_iso: str | None = None) -> None:
+
+def mu_mark_posted(
+    guild_id: int,
+    thread_id: int,
+    series_id: str,
+    release_id: int,
+    when_iso: str | None = None,
+) -> None:
     with connect() as con:
         cur = con.cursor()
         cur.execute(
@@ -155,9 +179,16 @@ def mu_mark_posted(guild_id: int, thread_id: int, series_id: str, release_id: in
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, thread_id, release_id) DO NOTHING
             """,
-            (guild_id, thread_id, str(series_id), int(release_id), when_iso or _now_iso_utc()),
+            (
+                guild_id,
+                thread_id,
+                str(series_id),
+                int(release_id),
+                when_iso or _now_iso_utc(),
+            ),
         )
         con.commit()
+
 
 def mu_get_release(series_id: str, release_id: int) -> dict | None:
     with connect() as con:
@@ -185,6 +216,7 @@ def mu_get_release(series_id: str, release_id: int) -> dict | None:
             "series_id": str(series_id),
         }
 
+
 def mu_list_links_for_guild(guild_id: int) -> list[tuple[int, str, str]]:
     """Returns [(thread_id, series_id, series_title)] newest threads first when possible."""
     with connect() as con:
@@ -201,4 +233,15 @@ def mu_list_links_for_guild(guild_id: int) -> list[tuple[int, str, str]]:
         ).fetchall()
         return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
 
-__all__ = ["mu_register_thread_series", "mu_get_thread_series", "mu_upsert_release", "mu_bulk_upsert_releases", "mu_latest_release_ts", "mu_list_unposted_for_thread", "mu_mark_posted", "mu_get_release", "mu_list_links_for_guild"]
+
+__all__ = [
+    "mu_register_thread_series",
+    "mu_get_thread_series",
+    "mu_upsert_release",
+    "mu_bulk_upsert_releases",
+    "mu_latest_release_ts",
+    "mu_list_unposted_for_thread",
+    "mu_mark_posted",
+    "mu_get_release",
+    "mu_list_links_for_guild",
+]

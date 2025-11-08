@@ -5,7 +5,9 @@ import discord
 from ..strings import S
 
 
-def build_dm_embed(*, guild_name: str, reason: str, until_timestamp: int, duration_display: str) -> discord.Embed:
+def build_dm_embed(
+    *, guild_name: str, reason: str, until_timestamp: int, duration_display: str
+) -> discord.Embed:
     embed = discord.Embed(
         title=S("timeout.dm.title", guild=guild_name),
         description=reason,

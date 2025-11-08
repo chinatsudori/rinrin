@@ -17,8 +17,13 @@ def build_coin_embed(*, heads: int, tails: int, sequence: str) -> discord.Embed:
     return embed
 
 
-def build_dice_embed(spec_lines: Iterable[Tuple[str, str, str, int]], grand_total: int) -> discord.Embed:
-    lines = [S("fun.dice.rolls_line", spec=spec, rolls=rolls, mod_text=mod_text, total=total) for spec, rolls, mod_text, total in spec_lines]
+def build_dice_embed(
+    spec_lines: Iterable[Tuple[str, str, str, int]], grand_total: int
+) -> discord.Embed:
+    lines = [
+        S("fun.dice.rolls_line", spec=spec, rolls=rolls, mod_text=mod_text, total=total)
+        for spec, rolls, mod_text, total in spec_lines
+    ]
     embed = discord.Embed(
         title=S("fun.dice.title"),
         description="\n".join(lines),

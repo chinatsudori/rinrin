@@ -45,14 +45,20 @@ async def collect_threads(
         async for thread in forum.archived_threads(limit=None, private=False):
             threads.append(thread)
     except Exception as exc:
-        log.warning("cleanup.archived.public_failed", extra={"forum_id": forum.id, "error": str(exc)})
+        log.warning(
+            "cleanup.archived.public_failed",
+            extra={"forum_id": forum.id, "error": str(exc)},
+        )
 
     if include_private_archived:
         try:
             async for thread in forum.archived_threads(limit=None, private=True):
                 threads.append(thread)
         except Exception as exc:
-            log.warning("cleanup.archived.private_failed", extra={"forum_id": forum.id, "error": str(exc)})
+            log.warning(
+                "cleanup.archived.private_failed",
+                extra={"forum_id": forum.id, "error": str(exc)},
+            )
 
     uniq: List[discord.Thread] = []
     seen: set[int] = set()
@@ -95,12 +101,19 @@ async def purge_messages_from_threads(
                         except discord.Forbidden:
                             log.warning(
                                 "cleanup.delete.forbidden",
-                                extra={"thread_id": thread.id, "message_id": message.id},
+                                extra={
+                                    "thread_id": thread.id,
+                                    "message_id": message.id,
+                                },
                             )
                         except discord.HTTPException as exc:
                             log.warning(
                                 "cleanup.delete.http_error",
-                                extra={"thread_id": thread.id, "message_id": message.id, "error": str(exc)},
+                                extra={
+                                    "thread_id": thread.id,
+                                    "message_id": message.id,
+                                    "error": str(exc),
+                                },
                             )
                             await asyncio.sleep(1.0)
 
@@ -108,9 +121,15 @@ async def purge_messages_from_threads(
                     await asyncio.sleep(0)
 
         except discord.Forbidden:
-            log.info("cleanup.history.forbidden", extra={"thread_id": thread.id, "thread_name": thread.name})
+            log.info(
+                "cleanup.history.forbidden",
+                extra={"thread_id": thread.id, "thread_name": thread.name},
+            )
         except discord.HTTPException as exc:
-            log.warning("cleanup.history.http_error", extra={"thread_id": thread.id, "error": str(exc)})
+            log.warning(
+                "cleanup.history.http_error",
+                extra={"thread_id": thread.id, "error": str(exc)},
+            )
 
         await asyncio.sleep(0.1)
 
