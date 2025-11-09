@@ -8,7 +8,7 @@ import discord
 from discord.ext import tasks
 
 from .. import config
-from ..models import birthday as model
+from ..models import bday as model
 from ..ui.bday import select_birthday_message
 
 try:
