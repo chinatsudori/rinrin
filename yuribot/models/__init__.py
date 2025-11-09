@@ -9,7 +9,9 @@ from . import mod_actions
 from . import polls
 from . import role_welcome
 from . import settings
-from . import birthday
+
+# ---- Lazy exports to avoid circular imports ----
+from importlib import import_module as _import_module
 
 __all__ = [
     "booly",
@@ -21,5 +23,14 @@ __all__ = [
     "polls",
     "role_welcome",
     "settings",
-    "birthday",
+    "birthday",  # we expose the name…
 ]
+
+
+def __getattr__(name: str):
+    # …but only import the submodule on first access.
+    if name == "birthday":
+        mod = _import_module(f"{__name__}.birthday")
+        globals()[name] = mod
+        return mod
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
