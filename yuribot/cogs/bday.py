@@ -8,8 +8,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from .. import config
-from ..models import birthday as model
-from ..utils import birthday as utils
+from ..models import bday as model
+from ..utils import bday as utils
 from ..utils.booly import has_mod_perms
 from ..strings import S  # use centralized strings
 
