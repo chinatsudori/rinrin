@@ -9,6 +9,7 @@ from . import mod_actions
 from . import polls
 from . import role_welcome
 from . import settings
+from . import birthday
 
 __all__ = [
     "booly",
@@ -20,4 +21,5 @@ __all__ = [
     "polls",
     "role_welcome",
     "settings",
+    "birthday",
 ]
