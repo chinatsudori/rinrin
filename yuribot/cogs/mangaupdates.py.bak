@@ -848,7 +848,7 @@ class MUWatcher(commands.Cog):
     # Manual attach: link THIS thread to a MU series (no new post)
     # -------------------------------------------------------------------------
     @group.command(name="attach", description="Link THIS forum thread to a MangaUpdates series (no new post).")
-    @app_commands.describe(series="Series id or name. If a name, I’ll search and show choices if ambiguous.")
+    @app_commands.describe(series="Series id or name. If a name, I'll search and show choices if ambiguous.")
     async def attach(self, interaction: discord.Interaction, series: str):
         if not interaction.guild or not isinstance(interaction.channel, discord.Thread):
             return await interaction.response.send_message("Run this inside the forum thread you want to attach.", ephemeral=True)
@@ -1252,7 +1252,7 @@ class MUWatcher(commands.Cog):
 
             if not dry_run:
                 models.mu_bulk_upsert_releases(sid, items)
-                # Mark ALL as posted in this thread so the watcher won’t flood
+                # Mark ALL as posted in this thread so the watcher won't flood
                 max_ts = max(int(r.get("release_ts") or -1) for r in items)
                 for r in items:
                     rid = int(r.get("release_id"))

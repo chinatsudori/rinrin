@@ -18,10 +18,16 @@ except Exception:
 
 log = logging.getLogger(__name__)
 
-# --- Timezone normalization ---------------------------------------------------
+# === Target channel ===========================================================
+# Hard default per request; can be overridden in config.py:
+#   BIRTHDAY_CHANNEL_ID = 123456789012345678
+BIRTHDAY_CHANNEL_ID = int(getattr(config, "BIRTHDAY_CHANNEL_ID", 1417424779354574935))
+
+# === Timezone normalization ===================================================
 
 # Whatever the config provides (string, ZoneInfo, pytz tzfile, None)
 DEFAULT_TZ_RAW = getattr(config, "TZ", getattr(config, "LOCAL_TZ", "UTC"))
+
 
 def _tz_to_name(obj) -> str:
     """Best-effort: turn tz-like objects into an IANA tz string."""
@@ -37,19 +43,20 @@ def _tz_to_name(obj) -> str:
     zone = getattr(obj, "zone", None)
     if isinstance(zone, str) and zone:
         return zone
-    # last resort: tzname() (may need a datetime; try without)
+    # last resort: tzname() (may require a datetime; try without)
     try:
         tn = obj.tzname(None)  # type: ignore[arg-type]
         if isinstance(tn, str) and tn:
             return tn
     except Exception:
         pass
-    # fall back
     return "UTC"
+
 
 DEFAULT_TZ_NAME = _tz_to_name(DEFAULT_TZ_RAW)
 
-def coerce_tz(tzname: Optional[str]) -> str:
+
+def coerce_tz(tzname: Optional[str | object]) -> str:
     """
     Accepts str or tzinfo-like and returns a valid IANA tz string.
     Falls back to DEFAULT_TZ_NAME, then 'UTC'.
@@ -65,7 +72,6 @@ def coerce_tz(tzname: Optional[str]) -> str:
     return name
 
 
-
 def parse_mmdd(text: str) -> tuple[int, int]:
     t = (text or "").strip()
     if "-" not in t:
@@ -78,9 +84,8 @@ def parse_mmdd(text: str) -> tuple[int, int]:
         raise ValueError("birthday.err.mmdd_month")
     if not (1 <= d <= 31):
         raise ValueError("birthday.err.mmdd_day")
-    # validate against a leap year baseline
     try:
-        date(2000, m, d)
+        date(2000, m, d)  # leap-year baseline validation
     except Exception:
         raise ValueError("birthday.err.mmdd_invalid")
     return m, d
@@ -94,7 +99,7 @@ def today_in_tz(tzname: str) -> date:
 
 def is_users_birthday(today: date, month: int, day: int) -> bool:
     if month == 2 and day == 29:
-        # leap logic
+        # Leap handling: celebrate on 2/28 if not a leap year
         try:
             date(today.year, 2, 29)
             is_leap = True
@@ -111,7 +116,7 @@ def is_users_birthday(today: date, month: int, day: int) -> bool:
 
 class BirthdayService:
     """
-    Checks each guild every 30 minutes and DMs birthday messages.
+    Checks each guild every 30 minutes and posts birthday messages to a fixed channel.
     Message selection comes from ui.bday.select_birthday_message(user_id, closeness_level).
     """
 
@@ -142,6 +147,18 @@ class BirthdayService:
 
     async def _check_guild(self, guild: discord.Guild):
         entries = model.fetch_all_for_guild(guild.id)
+
+        # Resolve target channel once per guild
+        target_ch: Optional[discord.TextChannel] = None
+        ch = guild.get_channel(BIRTHDAY_CHANNEL_ID)
+        if isinstance(ch, discord.TextChannel):
+            target_ch = ch
+        fallback_ch = (
+            guild.system_channel
+            if isinstance(guild.system_channel, discord.TextChannel)
+            else None
+        )
+
         for b in entries:
             today = today_in_tz(b.tz)
             if not is_users_birthday(today, b.month, b.day):
@@ -149,41 +166,53 @@ class BirthdayService:
             if b.last_year == today.year:
                 continue
 
-            member: Optional[discord.Member] = guild.get_member(b.user_id)
-            if not member:
-                try:
-                    member = await guild.fetch_member(b.user_id)
-                except Exception:
-                    member = None
-
             level = (
                 b.closeness_level
                 if (b.closeness_level and 1 <= b.closeness_level <= 5)
                 else 2
             )
-            text = select_birthday_message(b.user_id, level)
+            content = select_birthday_message(b.user_id, level)
+            out = f"<@{b.user_id}> {content}"
 
             delivered = False
-            if member:
-                try:
-                    await member.send(text)
-                    delivered = True
-                except Exception:
-                    delivered = False
 
-            if not delivered:
-                ch = getattr(guild, "system_channel", None)
-                if isinstance(ch, discord.TextChannel):
-                    try:
-                        await ch.send(
-                            text,
-                            allowed_mentions=discord.AllowedMentions(
-                                users=True, roles=False, everyone=False
-                            ),
-                        )
-                        delivered = True
-                    except Exception:
-                        delivered = False
+            if target_ch:
+                try:
+                    await target_ch.send(
+                        out,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False
+                        ),
+                    )
+                    delivered = True
+                except Exception as exc:
+                    log.warning(
+                        "birthday.post_failed",
+                        extra={
+                            "guild_id": guild.id,
+                            "channel_id": target_ch.id,
+                            "error": str(exc),
+                        },
+                    )
+
+            if not delivered and fallback_ch:
+                try:
+                    await fallback_ch.send(
+                        out,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False
+                        ),
+                    )
+                    delivered = True
+                except Exception as exc:
+                    log.warning(
+                        "birthday.post_failed_fallback",
+                        extra={
+                            "guild_id": guild.id,
+                            "channel_id": fallback_ch.id,
+                            "error": str(exc),
+                        },
+                    )
 
             if delivered:
                 try:

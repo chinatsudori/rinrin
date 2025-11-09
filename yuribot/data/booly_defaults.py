@@ -112,7 +112,7 @@ PERSONAL_POOLS: Dict[int, List[str]] = {
         "hi mom a::wavehi: im mostly behaving today ~",
         "hearts you ~ :gura_heart:",
         "fine ill eat something but sister has to eat too",
-        "dont worry... I’ve only caused, like… two minor emotional damages today :henyaNodder:",
+        "dont worry... I've only caused, like… two minor emotional damages today :henyaNodder:",
         "youd still love me if i accidentally ban someone right ? :sadcrydepression:",
         "a::gimme_hug:",
         "おはよう、お母さん ～！:henyaHeart:",
@@ -136,7 +136,7 @@ PERSONAL_POOLS: Dict[int, List[str]] = {
     ID_NAT: [
         "hai sister  :WaveHiHi:",
         "sister I did a thing, look!",
-        "I’m totally not trying to impress you~ (I am.)",
+        "I'm totally not trying to impress you~ (I am.)",
         "can we play minecraft together",
     ],
     ID_NOVANE: [
@@ -178,9 +178,9 @@ PERSONAL_POOLS: Dict[int, List[str]] = {
         "yaaay blepblep is here ! :henyaHeart:",
     ],
     ID_VIVI: [
-        "hi aunt vivi a::wavehi: I promise I didn’t start this time",
+        "hi aunt vivi a::wavehi: I promise I didn't start this time",
         "can I hide behind you again :sadcrydepression:",
-        "aunt vivi blink twice if you’re tired of everyone’s nonsense",
+        "aunt vivi blink twice if you're tired of everyone's nonsense",
         "luv u :gura_heart:",
         "can we play some games vivivi :henyaNodder: ?",
     ],
@@ -201,7 +201,7 @@ PERSONAL_POOLS: Dict[int, List[str]] = {
         "baby needs his bottle ?",
         "ooh ooh aah aah 🐒",
         "mom scary man is talking to me. ban him",
-        "lil bro thinks he’s sooo cool",
+        "lil bro thinks he's sooo cool",
         "🤡",
         "sit.",
         "sit. lil bro sit.",

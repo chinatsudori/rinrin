@@ -21,7 +21,7 @@ def upsert_guild_cfg(
     polls: int,
     discussion_forum: int | None = None,
 ) -> None:
-    """Back-compat ‘guild config’ stored in the clubs table."""
+    """Back-compat ‘guild config' stored in the clubs table."""
     with connect() as con:
         cur = con.cursor()
         cur.execute(

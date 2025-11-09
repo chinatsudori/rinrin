@@ -416,7 +416,7 @@ _STRINGS.update(
         "birthday.hint.tz": "Optional IANA timezone",
         "birthday.hint.tz_optional": "Optional IANA timezone to update",
         "birthday.hint.user_mod": "(Mods only) Set for this user",
-        "birthday.hint.user_mod_view": "(Mods only) View this user’s birthday; otherwise shows your own",
+        "birthday.hint.user_mod_view": "(Mods only) View this user's birthday; otherwise shows your own",
         "birthday.hint.user_required_or_self": "User to edit (mods can edit others; defaults to yourself)",
         "birthday.hint.user_optional": "User to list (omit to list all — mods only)",
         "birthday.hint.closeness_optional": "Optional closeness level 1..5 to update",
@@ -430,15 +430,15 @@ _STRINGS.update(
         "birthday.err.mmdd_day": "Day must be 1-31",
         "birthday.err.mmdd_invalid": "Invalid calendar date",
         # Permission / resolution
-        "birthday.err.perms_other": "You don’t have permission to act on another user.",
-        "birthday.err.resolve_self": "Couldn’t resolve your member identity.",
+        "birthday.err.perms_other": "You don't have permission to act on another user.",
+        "birthday.err.resolve_self": "Couldn't resolve your member identity.",
         "birthday.err.closeness_range": "Closeness must be between 1 and 5.",
         # Basic flows
-        "birthday.saved": "🎂 Saved: **{m}-{d}** (TZ: `{tz}`). I’ll DM on the day.",
+        "birthday.saved": "🎂 Saved: **{m}-{d}** (TZ: `{tz}`). I'll DM on the day.",
         "birthday.saved.for": " (for {user})",
         "birthday.removed": "✅ Removed your birthday entry.",
         "birthday.none_self": "No birthday on file. Use `/birthday set`.",
-        "birthday.none_other": "{user} doesn’t have a birthday set.",
+        "birthday.none_other": "{user} doesn't have a birthday set.",
         "birthday.none_target_first": "Set a birthday for that user first with `/birthday set`.",
         # View / list
         "birthday.view.line": "🎂 **{m}-{d}** (TZ: `{tz}`){last_part}{close_part}",
