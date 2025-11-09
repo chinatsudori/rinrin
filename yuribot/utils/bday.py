@@ -17,20 +17,53 @@ except Exception:
     ZoneInfo = None
 
 log = logging.getLogger(__name__)
-DEFAULT_TZ = getattr(config, "TZ", getattr(config, "LOCAL_TZ", "UTC")) or "UTC"
 
-# ---------- parsing / tz / calendar ----------
+# --- Timezone normalization ---------------------------------------------------
 
+# Whatever the config provides (string, ZoneInfo, pytz tzfile, None)
+DEFAULT_TZ_RAW = getattr(config, "TZ", getattr(config, "LOCAL_TZ", "UTC"))
+
+def _tz_to_name(obj) -> str:
+    """Best-effort: turn tz-like objects into an IANA tz string."""
+    if obj is None:
+        return "UTC"
+    if isinstance(obj, str):
+        return obj.strip() or "UTC"
+    # zoneinfo.ZoneInfo has .key
+    key = getattr(obj, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    # pytz tzfile/timezone has .zone
+    zone = getattr(obj, "zone", None)
+    if isinstance(zone, str) and zone:
+        return zone
+    # last resort: tzname() (may need a datetime; try without)
+    try:
+        tn = obj.tzname(None)  # type: ignore[arg-type]
+        if isinstance(tn, str) and tn:
+            return tn
+    except Exception:
+        pass
+    # fall back
+    return "UTC"
+
+DEFAULT_TZ_NAME = _tz_to_name(DEFAULT_TZ_RAW)
 
 def coerce_tz(tzname: Optional[str]) -> str:
-    name = (tzname or DEFAULT_TZ or "UTC").strip()
-    if ZoneInfo is None:
-        return name
-    try:
-        _ = ZoneInfo(name)
-        return name
-    except Exception:
-        return "UTC"
+    """
+    Accepts str or tzinfo-like and returns a valid IANA tz string.
+    Falls back to DEFAULT_TZ_NAME, then 'UTC'.
+    """
+    name = _tz_to_name(tzname) or DEFAULT_TZ_NAME or "UTC"
+    name = str(name).strip() or "UTC"
+    if ZoneInfo is not None:
+        try:
+            _ = ZoneInfo(name)
+            return name
+        except Exception:
+            return "UTC"
+    return name
+
 
 
 def parse_mmdd(text: str) -> tuple[int, int]:

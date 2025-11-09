@@ -15,6 +15,7 @@ from ..strings import S  # use centralized strings
 
 log = logging.getLogger(__name__)
 DEFAULT_TZ = getattr(config, "TZ", getattr(config, "LOCAL_TZ", "UTC")) or "UTC"
+DEFAULT_TZ_NAME = utils.DEFAULT_TZ_NAME
 
 
 def _is_mod(member: discord.Member | None) -> bool:
@@ -68,7 +69,7 @@ class BirthdayCog(commands.GroupCog, name="birthday", description="Birthday remi
     @app_commands.describe(
         date_mmdd=S("birthday.hint.mmdd"),
         timezone_name=S(
-            "birthday.hint.tz", default=f"Optional IANA TZ (default: {DEFAULT_TZ})"
+            "birthday.hint.tz", default=f"Optional IANA TZ (default: {DEFAULT_TZ_NAME})"
         ),
         user=S("birthday.hint.user_mod"),
     )
