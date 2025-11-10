@@ -78,7 +78,7 @@ ID_RINRIN = 1266545197077102633
 RINRIN_BIRTHDAY_SPECIALS: Dict[int, List[str]] = {
     # Mom
     ID_MOM_1: [
-        "happy birthday mom !! :wavehi: i made a mess but it's okay cause its your day ~ :gura_heart:",
+        "happy birthday mom !! :wavehi: i made a mess but it's okay cause i made you a cake ~ :gura_heart:",
         "momm it's your birthday !! eat cake and dont scold me today okie ? :henyaHeart:",
         "happy birthday mom ~ i love you big much :gimme_hug:",
         "yay it's mom day !! thank you for always taking care of me even when I explode things hehe",
