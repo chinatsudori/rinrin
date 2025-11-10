@@ -145,6 +145,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.polls",
             "yuribot.cogs.lifecycle",
             "yuribot.cogs.bday",
+            "yuribot.cogs.dashboard",
         )
         await self._load_extensions(extensions)
 

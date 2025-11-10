@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Yuri Dashboard (Embedded)</title>
+  <script src="https://discord.com/sdk.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui; margin: 0; padding: 1rem; }
+    .card { border: 1px solid #6664; border-radius: 12px; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h3>Starting embedded session…</h3>
+    <div id="msg">Initializing…</div>
+  </div>
+  <script>
+    (async () => {
+      const clientId = "{{ client_id }}"; // DISCORD_CLIENT_ID from server
+      const nextPath = "{{ next_after_login }}"; // e.g. "/admin"
+      try {
+        const sdk = new window.DiscordSDK(clientId);
+        await sdk.ready();
+
+        // Request OAuth2 code inside Discord
+        const { code } = await sdk.commands.authorize({
+          client_id: clientId,
+          response_type: "code",
+          scope: ["identify", "guilds.members.read"],  // same scopes you use externally
+          // redirect_uri is required by Discord, but for SDK authorize it's not navigated to.
+          // Set it to your normal OAuth redirect for consistency:
+          redirect_uri: "{{ redirect_uri }}"
+        });
+
+        // Exchange code on your server to create a session
+        const r = await fetch("/auth/activity-exchange", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ code, next: nextPath })
+        });
+
+        if (!r.ok) throw new Error("Exchange failed: " + r.status);
+        // Session cookie set; navigate to your admin page **inside** the iframe
+        window.location.replace(nextPath);
+      } catch (e) {
+        document.getElementById("msg").textContent = "Auth error: " + e.message;
+      }
+    })();
+  </script>
+</body>
+</html>
