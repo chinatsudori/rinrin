@@ -8,7 +8,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 import time
-
+import re
 BOT_DB_PATH = os.getenv("BOT_DB_PATH", "/app/data/bot.sqlite3")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 STATIC_DIR = Path(__file__).parent / "static"
