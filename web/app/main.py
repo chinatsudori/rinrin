@@ -11,6 +11,8 @@ import time
 
 BOT_DB_PATH = os.getenv("BOT_DB_PATH", "/app/data/bot.sqlite3")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)  # <-- ensure it exists before mount
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
