@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "Yuri Admin" }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #4443; display:flex; align-items:center; gap:.75rem;}
+    nav a { margin-right: .75rem; }
+    main { padding: 1.25rem; max-width: 1100px; margin: 0 auto; }
+    .card { border: 1px solid #6664; border-radius: 16px; padding: 1rem; margin: 1rem 0; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: .45rem .6rem; border-bottom: 1px solid #6663; text-align: left; }
+    input, select, button, textarea { font: inherit; padding: .4rem .5rem; }
+    .muted{opacity:.8;} .ok{color:#3aa63a;font-weight:600;} .bad{color:#d93b3b;font-weight:600;}
+    pre { overflow:auto; max-height: 70vh; }
+    .grid { display:grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .row-form { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+  </style>
+</head>
+<body>
+<header>
+  <strong>Yuri Dashboard</strong>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/admin/logs">Logs</a>
+    <a href="/admin/db">DB</a>
+    <a href="/admin/birthdays">Birthdays</a>
+    <a href="/admin/booly">Booly</a>
+    <a href="/admin/mu">/mu Status</a>
+    <a href="/admin/timestamp">Timestamp</a>
+  </nav>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

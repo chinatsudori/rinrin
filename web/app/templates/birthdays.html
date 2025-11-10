@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Birthdays</h2>
+{% if err %}<p class="bad">{{ err }}</p>{% endif %}
+<div class="card">
+  <h3>Add / Update</h3>
+  <form method="post" action="/admin/birthdays/upsert" class="row-form">
+    <label>ID (leave blank to add): <input type="text" name="id"/></label>
+    <label>User: <input type="text" name="user" required/></label>
+    <label>Day: <input type="date" name="day" required/></label>
+    <label>Closeness: <input type="number" name="closeness" value="0"/></label>
+    <button type="submit">Save</button>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>ID</th><th>User</th><th>Day</th><th>Closeness</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.get('id') }}</td>
+        <td>{{ r.get('user') }}</td>
+        <td>{{ r.get('day') }}</td>
+        <td>{{ r.get('closeness') }}</td>
+        <td>
+          <form method="post" action="/admin/birthdays/delete">
+            <input type="hidden" name="id" value="{{ r.get('id') }}"/>
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

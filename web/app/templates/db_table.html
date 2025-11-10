@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Table: <code>{{ name }}</code></h2>
+<div class="card">
+  <form method="get">
+    <label>Limit <input type="number" name="limit" value="{{ limit }}"/></label>
+    <label>Offset <input type="number" name="offset" value="{{ offset }}"/></label>
+    <button type="submit">Apply</button>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        {% if pk_cols|length == 0 %}<th>ROWID</th>{% endif %}
+        {% for c in cols %}<th>{{ c }}</th>{% endfor %}
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        {% if pk_cols|length == 0 %}<td>{{ row["rowid"] if "rowid" in row else "-" }}</td>{% endif %}
+        {% for c in cols %}<td>{{ row[c] }}</td>{% endfor %}
+        <td>
+          <form class="row-form" method="post" action="/admin/db/table/{{ name }}/delete">
+            <input type="hidden" name="id" value="{{ row[pk_cols[0]] if pk_cols|length>0 else row['rowid'] if 'rowid' in row else '' }}"/>
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="{{ (cols|length) + 2 }}">
+          <details>
+            <summary>Edit row</summary>
+            <div>
+              {% for c in cols %}
+              <form class="row-form" method="post" action="/admin/db/table/{{ name }}/update">
+                <input type="hidden" name="id" value="{{ row[pk_cols[0]] if pk_cols|length>0 else row['rowid'] if 'rowid' in row else '' }}"/>
+                <input type="hidden" name="column" value="{{ c }}"/>
+                <label>{{ c }}: <input type="text" name="value" value="{{ row[c] }}"/></label>
+                <button type="submit">Save</button>
+              </form>
+              {% endfor %}
+            </div>
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Insert row</h3>
+  <form method="post" action="/admin/db/table/{{ name }}/insert">
+    {% for c in cols %}
+      <label>{{ c }}: <input type="text" name="col:{{ c }}" /></label>
+    {% endfor %}
+    <button type="submit">Insert</button>
+  </form>
+</div>
+{% endblock %}

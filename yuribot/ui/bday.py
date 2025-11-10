@@ -18,7 +18,7 @@ RINRIN_BIRTHDAY_LEVELS: Dict[int, List[str]] = {
     1: [
         "oh look who aged again 🙄",
         "wow… another year of crimes huh",
-        "you  survived another orbit 🎉",
+        "you    survived another orbit ig 🎉",
         "you're still here ? unbelievable.",
         "happy birthday i guess ~",
         "fine. happy birthday mmk",
@@ -62,15 +62,15 @@ RINRIN_BIRTHDAY_LEVELS: Dict[int, List[str]] = {
 
 ID_MOM_1 = 444390742266347535
 ID_MUM = 49670556760408064
-ID_NAT = 852192029085139004  # older sister
-ID_VIVI = 315694140480421889  # aunt vivi
+ID_NAT = 852192029085139004
+ID_VIVI = 315694140480421889
 ID_BLEP = 251914689913683970
-ID_ADDI = 1143394906606424165  # puppy
-ID_NOVANE = 1275539727096741930  # nova-nee
+ID_ADDI = 1143394906606424165
+ID_NOVANE = 1275539727096741930
 ID_L = 234732044175933441
 ID_OOKAMI = 278958673835851777
-ID_BAGE = 1149355492456538185  # auntie bage
-ID_ASTA = 91598353833410560  # asta-nee
+ID_BAGE = 1149355492456538185
+ID_ASTA = 91598353833410560
 ID_HARUHIME = 224288852494385155
 ID_RINRIN = 1266545197077102633
 
@@ -89,7 +89,7 @@ RINRIN_BIRTHDAY_SPECIALS: Dict[int, List[str]] = {
         "happy birthday mum !! :henyaHeart: i promise i've been good today (mostly) ~",
         "yayyy mum's birthday !! can i have cake too ? pleaaase :sadcrydepression:",
         "お誕生日おめでとう、ママ！you're the prettiest one as always :gura_heart:",
-        "mum mum look ! i made confetti!! ...oh. oopies. :sadcrydepression:",
+        "mum mum look ! i made confetti!! ...oh where did it go... oopies. :sadcrydepression:",
         "happy birthday my favorite mum in all universes ~ :henyaHeart:",
     ],
     # Nat (older sister)
@@ -174,7 +174,7 @@ RINRIN_BIRTHDAY_SPECIALS: Dict[int, List[str]] = {
         "It's my birthday ~ AND It's the server's birthday!? double cake dayyy~ :henyaHeart: thank you thank youuu 💕",
         "heehee~ happy birthday to ME! and happy anniversary to all of us ~ you're all stuck with me forever now :sadcrydepression: 🎂💖",
         "server-chan and I share a birthday because mom said so ~ now gimme presents ~ :gura_heart:",
-        "omg it's my birfdayy 🎉 the server's too!! we grew up together~ look how cute we turned out hehe :henyaNodder:",
+        "omg it's my birthdayy 🎉 the server's too!! we grew up together~ look how cute we turned out hehe :henyaNodder:",
         "today's the special day *I* was born ! and so was this home we made ~ thank you for loving me, nerds 💕 :gura_heart:",
     ],
 }

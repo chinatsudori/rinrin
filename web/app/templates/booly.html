@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Booly</h2>
+{% if err %}<p class="bad">{{ err }}</p>{% endif %}
+<div class="card">
+  <h3>Add / Update</h3>
+  <form method="post" action="/admin/booly/upsert" class="row-form">
+    <label>Key: <input type="text" name="key" required/></label>
+    <label>Value:
+      <select name="value">
+        <option value="0">0 (false)</option>
+        <option value="1">1 (true)</option>
+      </select>
+    </label>
+    <button type="submit">Save</button>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>Key</th><th>Value</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.get('key') }}</td>
+        <td>{{ r.get('value') }}</td>
+        <td>
+          <form method="post" action="/admin/booly/delete">
+            <input type="hidden" name="key" value="{{ r.get('key') }}"/>
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Timestamp Tool</h2>
+<div class="card">
+  <form method="get" action="/admin/timestamp" class="row-form">
+    <label>Input (epoch seconds or ISO8601): <input type="text" name="ts" value="{{ ts }}"/></label>
+    <button type="submit">Convert</button>
+    <button type="button" onclick="fetch('/admin/timestamp/now',{method:'POST'}).then(r=>r.json()).then(d=>{document.getElementById('now').textContent=JSON.stringify(d,null,2);})">Now</button>
+  </form>
+  <pre id="now"></pre>
+</div>
+{% if error %}<p class="bad">{{ error }}</p>{% endif %}
+{% if result %}
+<div class="card">
+  <h3>Result</h3>
+  <pre>{{ result }}</pre>
+</div>
+{% endif %}
+{% endblock %}

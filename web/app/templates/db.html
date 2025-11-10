@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Database</h2>
+{% if not status.exists %}
+  <p class="bad">Database not found at {{ status.path }}</p>
+{% else %}
+  <p class="muted">Tables ({{ tables|length }}):</p>
+  <ul>
+    {% for t in tables %}
+      <li><a href="/admin/db/table/{{ t }}">{{ t }}</a></li>
+    {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

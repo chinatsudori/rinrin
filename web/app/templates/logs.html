@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Logs</h2>
+<p class="muted">Path: <code>{{ log_path }}</code> — {% if exists %}<span class="ok">found</span>{% else %}<span class="bad">missing</span>{% endif %}</p>
+<form method="get">
+  <label>Tail lines: <input type="number" name="n" value="{{ n }}"/></label>
+  <button type="submit">Refresh</button>
+</form>
+<div class="card">
+  <pre>{% for line in lines %}{{ line }}{% endfor %}</pre>
+</div>
+{% endblock %}
