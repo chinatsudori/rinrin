@@ -1,78 +1,91 @@
-{% extends "base.html" %}
-{% block content %}
-<h2>Yuri Bot Dashboard</h2>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Yuri Bot Dashboard</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, 'Apple Color Emoji', 'Segoe UI Emoji'; }
+      header { padding: 1rem 1.25rem; border-bottom: 1px solid #4443; display:flex; align-items:center; gap:.75rem;}
+      .pill { font-size:.8rem; padding:.25rem .5rem; border-radius:9999px; border:1px solid #9995; }
+      main { padding: 1.25rem; max-width: 1000px; margin: 0 auto; }
+      h1 { font-size: 1.4rem; margin: 0; }
+      h2 { font-size: 1.1rem; margin: 1.25rem 0 .5rem; }
+      pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .card { border: 1px solid #6664; border-radius: 16px; padding: 1rem; margin: 1rem 0; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+      .muted { opacity: .8; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { padding: .5rem .75rem; border-bottom: 1px solid #6663; text-align: left; }
+      .ok { color: #3aa63a; font-weight: 600; }
+      .warn { color: #c67f2e; font-weight: 600; }
+      .bad { color: #d93b3b; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Yuri Bot Dashboard</h1>
+      <span class="pill muted">v0.1</span>
+      <span class="pill">FastAPI</span>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Service</h2>
+        <div class="grid">
+          <div>
+            <div class="muted">TZ</div>
+            <div><code>{{ env.TZ }}</code></div>
+          </div>
+          <div>
+            <div class="muted">BOT_DB_PATH</div>
+            <div><code>{{ env.BOT_DB_PATH }}</code></div>
+          </div>
+        </div>
+      </section>
 
-<div class="grid">
-  <div class="card">
-    <h3>Admin Tools</h3>
-    <ul>
-      <li><a href="/admin/db">DB Viewer / Editor</a></li>
-      <li><a href="/admin/birthdays">Birthdays Editor</a></li>
-      <li><a href="/admin/booly">Booly Flags</a></li>
-      <li><a href="/admin/mu">/mu Status</a></li>
-      <li><a href="/admin/logs">Logs</a></li>
-      <li><a href="/admin/timestamp">Timestamp Tool</a></li>
-    </ul>
-  </div>
+      <section class="card">
+        <h2>Database</h2>
+        {% if db.error %}
+          <p class="bad">Error: {{ db.error }}</p>
+        {% endif %}
+        <div class="grid">
+          <div>
+            <div class="muted">Exists</div>
+            <div class="{{ 'ok' if db.exists else 'bad' }}">{{ 'Yes' if db.exists else 'No' }}</div>
+          </div>
+          <div>
+            <div class="muted">Size</div>
+            <div>{{ (db.size_bytes or 0) }} bytes</div>
+          </div>
+          <div>
+            <div class="muted">Modified</div>
+            <div>{{ db.mtime or '-' }}</div>
+          </div>
+        </div>
+        <h3>Tables</h3>
+        {% if db.tables %}
+          <table>
+            <thead><tr><th>Name</th></tr></thead>
+            <tbody>
+            {% for t in db.tables %}
+              <tr><td><code>{{ t }}</code></td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="muted">No tables found or database missing.</p>
+        {% endif %}
+      </section>
 
-  <div class="card">
-    <h3>Service</h3>
-    <div class="grid">
-      <div>
-        <div class="muted">TZ</div>
-        <div><code>{{ env.TZ }}</code></div>
-      </div>
-      <div>
-        <div class="muted">BOT_DB_PATH</div>
-        <div><code>{{ env.BOT_DB_PATH }}</code></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<section class="card">
-  <h3>Database</h3>
-  {% if db.error %}
-    <p class="bad">Error: {{ db.error }}</p>
-  {% endif %}
-  <div class="grid">
-    <div>
-      <div class="muted">Exists</div>
-      <div class="{{ 'ok' if db.exists else 'bad' }}">{{ 'Yes' if db.exists else 'No' }}</div>
-    </div>
-    <div>
-      <div class="muted">Size</div>
-      <div>{{ (db.size_bytes or 0) }} bytes</div>
-    </div>
-    <div>
-      <div class="muted">Modified</div>
-      <div>{{ db.mtime or '-' }}</div>
-    </div>
-  </div>
-  <h4>Tables</h4>
-  {% if db.tables %}
-    <table>
-      <thead><tr><th>Name</th><th>Open</th></tr></thead>
-      <tbody>
-      {% for t in db.tables %}
-        <tr>
-          <td><code>{{ t }}</code></td>
-          <td><a href="/admin/db/table/{{ t }}">View</a></td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="muted">No tables found or database missing.</p>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h3>API</h3>
-  <p class="muted">Basic endpoints for uptime checks and status.</p>
-  <ul>
-    <li><a href="/health">/health</a></li>
-    <li><a href="/api/status">/api/status</a></li>
-  </ul>
-</section>
-{% endblock %}
+      <section class="card">
+        <h2>API</h2>
+        <p class="muted">Basic endpoints for uptime checks and status.</p>
+        <ul>
+          <li><a href="/health">/health</a></li>
+          <li><a href="/api/status">/api/status</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -10,9 +10,9 @@ services:
     env_file:
       - ./.env
     environment:
+      TZ: ${TZ:-America/Los_Angeles}
       DISCORD_TOKEN: ${DISCORD_TOKEN}
-      TZ: America/Los_Angeles
-      BOT_DB_PATH: /app/data/bot.sqlite3
+      BOT_DB_PATH: ${BOT_DB_PATH:-/app/data/bot.sqlite3}
 
     volumes:
       - botdata:/app/data:rw
@@ -20,9 +20,11 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
 
     healthcheck:
-      test: ["CMD", "python", "-c", "import importlib; importlib.import_module('yuribot')"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5).getcode()==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -39,31 +41,52 @@ services:
 
     networks:
       - npm_default
+
   web:
     image: yuribot-web:latest
     build: ./web
     container_name: yuribot-web
     restart: unless-stopped
+
+    # Load everything from the same .env (session secret, Discord OAuth, guild/role gates, TZ, DB paths)
+    env_file:
+      - ./.env
     environment:
-      TZ: America/Los_Angeles
-      # Share the same path so the dashboard can read (read-only) the bot's SQLite database
-      BOT_DB_PATH: /app/data/bot.sqlite3
+      TZ: ${TZ:-America/Los_Angeles}
+      BOT_DB_PATH: ${BOT_DB_PATH:-/app/data/bot.sqlite3}
+      LOG_PATH: ${LOG_PATH:-/app/data/bot.log}
+      # Discord SSO (must be set in .env):
+      # SESSION_SECRET, DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT_URI,
+      # DISCORD_GUILD_ID, DISCORD_BOT_TOKEN, ALLOWED_ROLE_IDS, ALLOWED_ROLE_NAMES
+
     volumes:
       - botdata:/app/data:ro
-    # Expose 5780 for Nginx Proxy Manager to route yuri.icebrand.dev -> this service
+
+    # Expose 5780 for NPM to proxy yuri.icebrand.dev -> this service
     ports:
       - "5780:5780"
+
+    # Use Python-based healthcheck to avoid relying on wget/curl presence in the image
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5780/health"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5780/health',timeout=5).getcode()==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
     networks:
       - npm_default
 
