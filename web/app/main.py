@@ -13,7 +13,6 @@ import re
 BOT_DB_PATH = os.getenv("BOT_DB_PATH", "/app/data/bot.sqlite3")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 STATIC_DIR = Path(__file__).parent / "static"
-STATIC_DIR.mkdir(parents=True, exist_ok=True)  # <-- ensure it exists before mount
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv('SESSION_SECRET', 'dev-change-me'), max_age=60*60*8)

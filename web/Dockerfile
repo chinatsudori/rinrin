@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1.7
 FROM python:3.11-slim AS base
+WORKDIR /app
+COPY . /app
+
+# Create the directory before switching to read-only at runtime
+RUN mkdir -p /app/app/static
+
 
 ENV PYTHONDONTWRITEBYTECODE=1     PYTHONUNBUFFERED=1     PIP_DISABLE_PIP_VERSION_CHECK=1     PYTHONHASHSEED=0
 
