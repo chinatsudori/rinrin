@@ -8,7 +8,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pathlib import Path
-from starlette.middleware.sessions import SessionMiddleware, BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from . import auth
 import os
 import sqlite3
