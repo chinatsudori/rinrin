@@ -4,10 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Yuri Dashboard (Embedded)</title>
+  <!-- Load once -->
   <script src="https://discord.com/sdk.js"></script>
   <style>
     body { font-family: ui-sans-serif, system-ui; margin: 0; padding: 1rem; }
     .card { border: 1px solid #6664; border-radius: 12px; padding: 1rem; }
+    #msg { white-space: pre-wrap }
   </style>
 </head>
 <body>
@@ -15,65 +17,64 @@
     <h3>Starting embedded session…</h3>
     <div id="msg">Initializing…</div>
   </div>
- <script src="https://discord.com/sdk.js"></script>
+
 <script>
 (async () => {
-  const clientId  = "{{ client_id }}";     // e.g. 1266...
-  const redirect  = "{{ redirect_uri }}";  // e.g. https://yuri.icebrand.dev/auth/callback
-  const nextPath  = "{{ next_after_login }}"; // e.g. /admin
+  const clientId   = "{{ client_id }}";        // 1266...
+  const redirect   = "{{ redirect_uri }}";     // https://yuri.icebrand.dev/auth/callback
+  const nextPath   = "{{ next_after_login }}"; // /admin
 
-  const show = (msg) => { const el = document.getElementById("msg"); if (el) el.textContent = msg; console.error(msg); };
+  const set = (t) => { const el = document.getElementById("msg"); el && (el.textContent = t); console.log(t); };
+  const fail = (e) => { const m = (e && e.message) ? e.message : String(e); set("Auth error: " + m); throw e; };
 
-  try {
-    const SDK = window.DiscordSDK;
-    if (!SDK) {
-      throw new Error("Discord SDK failed to load. Check CSP (script-src) and that you're inside Discord.");
-    }
+  // Fast probes so you don't guess:
+  set([
+    `inIframe=${window.top !== window}`,
+    `referrer=${document.referrer || '-'}`,
+    `sdkGlobal=${typeof window.DiscordSDK}`,
+  ].join("\n"));
 
-    // Normalize SDK instance across shapes
-    let discord;
-    if (typeof SDK === "function") {
-      // Classic: DiscordSDK is a constructor
-      discord = new SDK(clientId);
-    } else if (typeof SDK?.DiscordSDK === "function") {
-      // Namespaced constructor
-      discord = new SDK.DiscordSDK(clientId);
-    } else if (typeof SDK?.Client === "function") {
-      // Rare older shape
-      discord = new SDK.Client(clientId);
-    } else if (typeof SDK?.ready === "function") {
-      // Already-instantiated object with .ready/.commands
-      discord = SDK;
-    } else {
-      throw new Error("Unsupported Discord SDK global shape.");
-    }
-
-    await discord.ready();
-
-    // Ask for an OAuth2 code inside the embedded app
-    const { code } = await discord.commands.authorize({
-      client_id: clientId,
-      response_type: "code",
-      scope: ["identify", "guilds.members.read"],
-      redirect_uri: redirect
-    });
-
-    // Exchange the code for a token + session cookie
-    const r = await fetch("/auth/activity-exchange", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ code, next: nextPath })
-    });
-    if (!r.ok) throw new Error(`Exchange failed: ${r.status}`);
-
-    // Land on your gated page (still embedded)
-    window.location.replace(nextPath);
-  } catch (e) {
-    show("Auth error: " + (e?.message || e));
+  // Must be inside Discord + SDK must exist
+  if (window.top === window) fail(new Error("This page must be opened via Discord Activity (not standalone tab)."));
+  if (!/https:\/\/(\w+\.)?discord\.com/i.test(document.referrer)) {
+    // Discord desktop still sets referrer to discord.com; if this is blank, a CSP is killing referrer or you're not in Discord.
+    console.warn("Referrer not discord.com; check you launched from Discord and CSP isn't stripping referrer.");
   }
+
+  const SDK = window.DiscordSDK;
+  if (!SDK) fail(new Error("Discord SDK missing. This is *always* CSP (script-src) or a second, stricter CSP header."));
+
+  // Normalize SDK construction across versions
+  let discord;
+  if (typeof SDK === "function") discord = new SDK(clientId);
+  else if (typeof SDK?.DiscordSDK === "function") discord = new SDK.DiscordSDK(clientId);
+  else if (typeof SDK?.Client === "function") discord = new SDK.Client(clientId);
+  else if (typeof SDK?.ready === "function") discord = SDK;
+  else fail(new Error("Unsupported Discord SDK global shape."));
+
+  await discord.ready();  // throws if not actually running inside Discord
+
+  // Request OAuth code from the embedded app
+  const { code } = await discord.commands.authorize({
+    client_id: clientId,
+    response_type: "code",
+    scope: ["identify", "guilds.members.read"],
+    redirect_uri: redirect,
+    prompt: "none"
+  });
+
+  // Exchange code -> cookie session
+  const r = await fetch("/auth/activity-exchange", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ code, next: nextPath })
+  });
+  if (!r.ok) fail(new Error(`Exchange failed: ${r.status}`));
+
+  set("OK. Redirecting…");
+  window.location.replace(nextPath);
 })();
 </script>
-
 </body>
 </html>

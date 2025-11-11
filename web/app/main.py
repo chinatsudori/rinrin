@@ -48,7 +48,6 @@ app.add_middleware(
     same_site="none",  # allow third-party iframe
     https_only=True,  # cookie requires HTTPS
 )
-app.add_middleware(SecurityHeaders)
 app.mount(
     "/static",
     StaticFiles(directory=str(Path(__file__).parent / "static")),
