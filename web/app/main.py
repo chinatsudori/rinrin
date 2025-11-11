@@ -35,7 +35,7 @@ CSP = (
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         resp = await call_next(request)
-        #resp.headers["Content-Security-Policy"] = CSP
+        resp.headers["Content-Security-Policy"] = CSP
         return resp
 
 
