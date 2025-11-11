@@ -24,7 +24,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 CSP = (
     "default-src 'self'; "
     "frame-ancestors https://discord.com https://*.discord.com; "
-    "script-src 'self' https://discord.com 'unsafe-inline'; "  # <-- ADDED 'unsafe-inline'
+    "script-src 'self' 'unsafe-inline'; "  # <-- THIS LINE IS MODIFIED
     "connect-src 'self' https://discord.com https://*.discord.com; "
     "img-src 'self' data: https:; "
     "style-src 'self' 'unsafe-inline'; "
@@ -35,12 +35,12 @@ CSP = (
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         resp = await call_next(request)
-        resp.headers["Content-Security-Policy"] = CSP  # <-- UN-COMMENT THIS
+        resp.headers["Content-Security-Policy"] = CSP  # <-- THIS IS UN-COMMENTED
         return resp
 
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
-app.add_middleware(SecurityHeaders)
+app.add_middleware(SecurityHeaders)  # <-- THIS IS UN-COMMENTED
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-change-me"),

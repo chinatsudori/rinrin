@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Yuri Dashboard (Embedded)</title>
   <!-- Load once -->
-  <script src="https://discord.com/sdk.js"></script>
+  <script src="/sdk/sdk.js"></script>
   <style>
     body { font-family: ui-sans-serif, system-ui; margin: 0; padding: 1rem; }
     .card { border: 1px solid #6664; border-radius: 12px; padding: 1rem; }
@@ -26,7 +26,7 @@
   if (!window.DiscordSDK) {
     // Try to load it dynamically; if onerror triggers, it's CSP for sure.
     const s = document.createElement('script');
-    s.src = 'https://discord.com/sdk.js';
+    s.src = '/sdk/sdk.js';
     s.onload = () => msg('SDK dynamically loaded after initial block. You had multiple/conflicting CSPs.');
     s.onerror = (e) => msg('Blocked by CSP: could not load https://discord.com/sdk.js');
     document.head.appendChild(s);
