@@ -35,12 +35,12 @@ CSP = (
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         resp = await call_next(request)
-        resp.headers["Content-Security-Policy"] = CSP
+        #resp.headers["Content-Security-Policy"] = CSP
         return resp
 
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
-app.add_middleware(SecurityHeaders)
+#app.add_middleware(SecurityHeaders)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-change-me"),
