@@ -24,7 +24,9 @@ from ..utils.booly import (
 
 # Hard exception: always send this when that user mentions the bot
 ALWAYS_GIF_USER = 994264143634907157
-ALWAYS_GIF_URL = "https://tenor.com/view/sparkle-star-rail-laugh-gif-5535487387681154728"
+ALWAYS_GIF_URL = (
+    "https://tenor.com/view/sparkle-star-rail-laugh-gif-5535487387681154728"
+)
 
 
 class UserAutoResponder(commands.Cog):
@@ -79,7 +81,9 @@ class UserAutoResponder(commands.Cog):
         self.personal_pools[uid] = [m.content for m in rows] if rows else []
         return bool(self.personal_pools[uid])
 
-    async def _safe_reply(self, src: discord.Message, content: str) -> Optional[discord.Message]:
+    async def _safe_reply(
+        self, src: discord.Message, content: str
+    ) -> Optional[discord.Message]:
         if not content:
             return None
         content = expand_emoji_tokens(content)
@@ -109,7 +113,19 @@ class UserAutoResponder(commands.Cog):
         if is_hard:
             # Special-case GIF user
             if uid == ALWAYS_GIF_USER:
-                if not st.last_mention_ts or (now - st.last_mention_ts) >= MENTION_COOLDOWN:
+                if (
+                    not st.last_mention_ts
+                    or (now - st.last_mention_ts) >= MENTION_COOLDOWN
+                ):
+                    await self._safe_reply(message, ALWAYS_GIF_URL)
+                    st.last_mention_ts = now
+                    save_state(self.state)
+                return
+            if uid == 614545005129760799:
+                if (
+                    not st.last_mention_ts
+                    or (now - st.last_mention_ts) >= MENTION_COOLDOWN
+                ):
                     await self._safe_reply(message, ALWAYS_GIF_URL)
                     st.last_mention_ts = now
                     save_state(self.state)
@@ -119,7 +135,9 @@ class UserAutoResponder(commands.Cog):
                 return
 
             # Choose pool based on whether user has personal lines in DB
-            is_personal = self._has_personal_cached(uid) or self._ensure_personal_loaded(uid)
+            is_personal = self._has_personal_cached(
+                uid
+            ) or self._ensure_personal_loaded(uid)
             use_mod_pool = is_personal and bool(self.mod_pool)
 
             pool = self.mod_pool if use_mod_pool else self.general_pool
@@ -134,7 +152,7 @@ class UserAutoResponder(commands.Cog):
 
         # Personalized auto-replies (soft trigger, 24h)
         # Qualify purely by DB presence (not a static SPECIAL_IDS list)
-        if (self._has_personal_cached(uid) or self._ensure_personal_loaded(uid)):
+        if self._has_personal_cached(uid) or self._ensure_personal_loaded(uid):
             if cid in EXCLUDED_CHANNEL_IDS:
                 return
             last = st.last_auto_ts or 0
