@@ -41,6 +41,7 @@ class SecurityHeaders(BaseHTTPMiddleware):
 
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
+app.add_middleware(SecurityHeaders)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-change-me"),
