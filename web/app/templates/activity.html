@@ -19,6 +19,21 @@
   </div>
 
 <script>
+    (async () => {
+  const msg = (t) => (document.getElementById('msg').textContent = t);
+
+  // If the script got here, the HTML executed. Now confirm if the SDK was actually allowed to load:
+  if (!window.DiscordSDK) {
+    // Try to load it dynamically; if onerror triggers, it's CSP for sure.
+    const s = document.createElement('script');
+    s.src = 'https://discord.com/sdk.js';
+    s.onload = () => msg('SDK dynamically loaded after initial block. You had multiple/conflicting CSPs.');
+    s.onerror = (e) => msg('Blocked by CSP: could not load https://discord.com/sdk.js');
+    document.head.appendChild(s);
+    return;
+  }
+})();
+
 (async () => {
   const clientId   = "{{ client_id }}";        // 1266...
   const redirect   = "{{ redirect_uri }}";     // https://yuri.icebrand.dev/auth/callback
