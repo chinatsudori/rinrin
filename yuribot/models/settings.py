@@ -123,50 +123,44 @@ __all__ = [
 ]
 
 
-# Added helpers for per-guild settings
+# Per-guild generic KV settings (uses guild_kv, not guild_settings)
 def _conn():
     from .. import db as _db
-
     return _db.connect()
 
-
-def ensure_table():
+def _ensure_kv_table():
     with _conn() as c:
         c.execute(
-            """CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id INTEGER NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT,
-            PRIMARY KEY (guild_id, key)
-        )"""
+            """CREATE TABLE IF NOT EXISTS guild_kv (
+                guild_id INTEGER NOT NULL,
+                key      TEXT    NOT NULL,
+                value    TEXT,
+                PRIMARY KEY (guild_id, key)
+            )"""
         )
         c.commit()
 
-
 def get_guild_setting(guild_id: int, key: str, default=None):
-    ensure_table()
+    _ensure_kv_table()
     with _conn() as c:
         cur = c.execute(
-            "SELECT value FROM guild_settings WHERE guild_id=? AND key=?",
+            "SELECT value FROM guild_kv WHERE guild_id=? AND key=?",
             (int(guild_id), str(key)),
         )
         row = cur.fetchone()
         return row[0] if row else default
 
-
 def set_guild_setting(guild_id: int, key: str, value: str | None):
-    ensure_table()
+    _ensure_kv_table()
     with _conn() as c:
         c.execute(
-            "INSERT INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?) ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO guild_kv (guild_id, key, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
             (int(guild_id), str(key), None if value is None else str(value)),
         )
         c.commit()
 
-
-def get_channel_id(
-    guild_id: int, key: str, fallback_id: int | None = None
-) -> int | None:
+def get_channel_id(guild_id: int, key: str, fallback_id: int | None = None) -> int | None:
     v = get_guild_setting(guild_id, key)
     if v is not None:
         try:

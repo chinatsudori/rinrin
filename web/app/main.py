@@ -8,7 +8,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pathlib import Path
-from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.sessions import SessionMiddleware, BaseHTTPMiddleware
 from . import auth
 import os
 import sqlite3
@@ -20,6 +20,25 @@ BOT_DB_PATH = os.getenv("BOT_DB_PATH", "/app/data/bot.sqlite3")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 STATIC_DIR = Path(__file__).parent / "static"
 
+CSP = (
+    "default-src 'self'; "
+    "frame-ancestors https://discord.com https://*.discord.com; "
+    "script-src 'self' https://discord.com; "
+    "connect-src 'self' https://discord.com https://*.discord.com; "
+    "img-src 'self' data: https:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "base-uri 'self'; form-action 'self'"
+)
+
+
+class SecurityHeaders(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        resp = await call_next(request)
+        resp.headers["X-Frame-Options"] = ""
+        resp.headers["Content-Security-Policy"] = CSP
+        return resp
+
+
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
 app.add_middleware(
     SessionMiddleware,
@@ -28,6 +47,7 @@ app.add_middleware(
     same_site="none",  # allow third-party iframe
     https_only=True,  # cookie requires HTTPS
 )
+app.add_middleware(SecurityHeaders)
 app.mount(
     "/static",
     StaticFiles(directory=str(Path(__file__).parent / "static")),
