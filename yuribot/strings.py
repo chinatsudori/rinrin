@@ -460,5 +460,13 @@ _STRINGS.update(
         # Closeness
         "birthday.closeness.set": "✅ Set closeness to **{level}**",
         "birthday.closeness.view": "Closeness level: **{level}**",
+        # Voice Stats
+        "voice_stats.err.no_log_channel": "Bot log channel is not configured. Use `/admin set_bot_logs` first.",
+        "voice_stats.err.bad_log_channel": "Configured bot log channel is not a valid text channel.",
+        "voice_stats.err.no_log_perms": "I'm missing 'Read Message History' permission in {channel}. Please grant it and try again.",
+        "voice_stats.starting": "Starting voice session backfill. I will scan {channel} for all new voice logs. This may take a while.",
+        "voice_stats.no_new_logs": "No new voice logs found to process.",
+        "voice_stats.complete": "Backfill complete. Processed {events} new voice events and created/updated {count} sessions.",
+        "voice_stats.error": "An error occurred during the backfill: {err}",
     }
 )

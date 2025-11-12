@@ -146,6 +146,9 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.lifecycle",
             "yuribot.cogs.bday",
             "yuribot.cogs.dashboard",
+            "yuribot.cogs.archive",
+            "yuribot.cogs.voice_stats",
+            "yuribot.cogs.tellmum",
         )
         await self._load_extensions(extensions)
 
