@@ -48,15 +48,15 @@ class VoiceStatsCog(commands.Cog):
                 # Use the known Member object; VoiceState.member may be None.
                 key = (guild.id, member.id)
                 self._seed_voice_state(guild, member, vs)
-            key = (guild.id, vs.member.id)
+            key = (guild.id, member.id)
             if key not in self._live_sessions:
                 try:
                     session_id = voice_sessions.open_live_session(
-                        guild.id, vs.member.id, vs.channel.id, now
+                        guild.id, member.id, vs.channel.id, now
                     )
                     self._live_sessions[key] = (session_id, now, vs.channel.id)
                 except Exception as e:
-                    log.error(f"Failed to prime session for {vs.member.id}: {e}")
+                    log.error(f"Failed to prime session for {member.id}: {e}")
         log.info(f"Live session cache primed with {len(self._live_sessions)} users.")
 
     # --- Live Listener ---
