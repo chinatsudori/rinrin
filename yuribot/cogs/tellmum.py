@@ -11,7 +11,6 @@ log = logging.getLogger(__name__)
 # Config
 # ============================================================
 
-# Base watch-terms (lowercase). Hyphen may be optional per term (see map below).
 BASE_KEYWORDS = (
     "mum",
     "thea",
@@ -24,11 +23,10 @@ BASE_KEYWORDS = (
     "queen",
 )
 
-# For which tokens should a hyphen be treated as OPTIONAL in matching?
 HYPHEN_OPTIONAL = {
-    "oneesama": True,  # oneesama / onee-sama
-    "nee-chan": True,  # neechan / nee-chan
-    "summer-chan": True,  # summerchan / summer-chan
+    "oneesama": True,
+    "nee-chan": True,
+    "summer-chan": True,
     "thea": False,
     "mum": False,
     "rin": False,
@@ -37,8 +35,6 @@ HYPHEN_OPTIONAL = {
     "queen": False,
 }
 
-# Fuzzy thresholds (edit distance) per canonical token (on normalized forms).
-# Keep these tight to avoid noise.
 FUZZY_MAX_DIST = {
     "mum": 1,
     "thea": 1,
@@ -57,79 +53,47 @@ FUZZY_MAX_DIST = {
 
 
 def _elongatable_pattern(token: str, hyphen_optional: bool) -> str:
-    """
-    Build a regex that matches the token with stretched letters (char+).
-    Hyphens can be optional if configured.
-    Then we allow an optional plural/possessive suffix: 's | s' | s
-    """
     parts = []
     for ch in token:
         if ch.isalnum():
-            parts.append(re.escape(ch) + "+")  # 'a' -> 'a+'
+            parts.append(re.escape(ch) + "+")
         elif ch == "-" and hyphen_optional:
-            parts.append("-?")  # optional hyphen
+            parts.append("-?")
         else:
-            parts.append(re.escape(ch))  # literal punctuation
+            parts.append(re.escape(ch))
     core = "".join(parts)
-    # Optional plural/possessive suffix
     sfx = r"(?:'s|s'|s)?"
     return core + sfx
 
 
-# Build elongation regex alternation for all keywords.
 ELONGATED_ALTS = "|".join(
     _elongatable_pattern(t, HYPHEN_OPTIONAL.get(t, False)) for t in BASE_KEYWORDS
 )
-
-# Whole-word (not inside other words) elongated pattern, case-insensitive.
 ELONGATED_RE = re.compile(rf"(?<!\w)(?:{ELONGATED_ALTS})(?!\w)", re.IGNORECASE)
 
-# Tokenizer for fuzzy fallback:
-# include internal hyphens and apostrophes so we see "onee-sama", "thea's", "mums'"
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-']*")
 
 
 def _normalize_for_fuzzy(s: str) -> str:
-    """
-    Normalize a candidate string for fuzzy compare:
-      - lowercase, remove hyphens/apostrophes
-      - collapse repeated letters: 'theaaa' -> 'thea', 'muuum' -> 'mum'
-    """
-    s = s.lower()
-    s = s.replace("-", "").replace("'", "")
+    s = s.lower().replace("-", "").replace("'", "")
     s = re.sub(r"(.)\1+", r"\1", s)
     return s
 
 
 def _strip_plural_possessive(norm: str) -> str:
-    """
-    Strip a trailing plural/possessive: 's, s', or s.
-    Operates on *normalized* strings (no hyphens/apostrophes).
-    """
-    if not norm:
-        return norm
-    # Already removed apostrophes in normalization; plural/possessive reduces to trailing 's'
-    if norm.endswith("s"):
-        # Avoid chopping single-letter tokens or 'ss' accidental
-        base = norm[:-1]
-        if len(base) >= 2:
-            return base
+    if norm.endswith("s") and len(norm) >= 3:
+        return norm[:-1]
     return norm
 
 
 def _canon_forms() -> dict[str, str]:
-    """Canonical normalized forms of watch terms (no hyphens/apostrophes, no elongation)."""
-    out = {}
-    for t in BASE_KEYWORDS:
-        out[t] = _normalize_for_fuzzy(t)
-    return out
+    return {t: _normalize_for_fuzzy(t) for t in BASE_KEYWORDS}
 
 
 CANON = _canon_forms()
 
 
-def _levenshtein(a: str, b: str) -> int:
-    """Classic Levenshtein distance (iterative DP)."""
+def _lev(a: str, b: str) -> int:
     if a == b:
         return 0
     if not a:
@@ -139,8 +103,8 @@ def _levenshtein(a: str, b: str) -> int:
     if len(a) > len(b):
         a, b = b, a
     prev = list(range(len(a) + 1))
-    for j, bj in enumerate(b, start=1):
-        cur = [j]
+    for bj in b:
+        cur = [prev[0] + 1]
         for i, ai in enumerate(a, start=1):
             ins = cur[i - 1] + 1
             dele = prev[i] + 1
@@ -150,44 +114,62 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
+def _short_token_guard(token_norm: str, base_norm: str) -> bool:
+    """
+    Extra constraints for short bases (len<=4) to prevent junk like:
+      thea ~ the, rin ~ in, mum ~ um, etc.
+    """
+    if len(base_norm) <= 4:
+        # token must be at least as long as base, and share first letter
+        if len(token_norm) < len(base_norm):
+            return False
+        if not token_norm or token_norm[0] != base_norm[0]:
+            return False
+    return True
+
+
 def matches_keyword(content: str) -> bool:
-    """
-    True if:
-      1) elongated whole-word regex hits (with optional plural/possessive), or
-      2) fuzzy distance <= per-term threshold against any token (after normalization),
-         also trying a version with plural/possessive stripped.
-    """
     if not content:
         return False
 
-    # Fast path: elongated regex
+    # 1) precise/fast path
     if ELONGATED_RE.search(content):
         return True
 
-    # Fuzzy path
+    # 2) fuzzy (constrained)
     tokens = TOKEN_RE.findall(content)
     if not tokens:
         return False
 
-    items = list(FUZZY_MAX_DIST.items())  # [(token, maxdist), ...]
+    items = list(FUZZY_MAX_DIST.items())
     for raw in tokens:
         norm = _normalize_for_fuzzy(raw)
-        if not norm:
+        if len(norm) < 3:  # ignore ultra-short tokens
             continue
         norm_stripped = _strip_plural_possessive(norm)
 
         for base, maxd in items:
             base_norm = CANON[base]
 
-            d0 = _levenshtein(norm, base_norm)
+            # guard for short bases
+            if not _short_token_guard(norm, base_norm):
+                # try stripped too
+                if not _short_token_guard(norm_stripped, base_norm):
+                    continue
+
+            # check full norm
+            d0 = _lev(norm, base_norm)
             if d0 <= maxd:
+                # log.debug("match via fuzzy: %r ~ %r (d=%d)", norm, base_norm, d0)
                 return True
 
-            # Try with plural/possessive stripped (handles thea's/theas/queens/etc.)
+            # check stripped (plural/possessive)
             if norm_stripped != norm:
-                d1 = _levenshtein(norm_stripped, base_norm)
+                d1 = _lev(norm_stripped, base_norm)
                 if d1 <= maxd:
+                    # log.debug("match via fuzzy-stripped: %r ~ %r (d=%d)", norm_stripped, base_norm, d1)
                     return True
+
     return False
 
 
@@ -197,7 +179,7 @@ def matches_keyword(content: str) -> bool:
 
 
 class OwnerNotifyCog(commands.Cog):
-    """DMs the bot owner when target names are mentioned (elongations+typos+plural/possessive)."""
+    """DMs the bot owner when target names are mentioned (elongations+typos+plural/possessive, low-noise)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -220,7 +202,6 @@ class OwnerNotifyCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Ignore bots and DMs
         if message.author.bot or message.guild is None:
             return
         if not self.owner:

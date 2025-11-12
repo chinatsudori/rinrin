@@ -142,8 +142,12 @@ class ActivityMetricsCog(commands.Cog):
                     await inter.edit_original_response(content=text)
             except discord.HTTPException as e:
                 # 50027 = Invalid Webhook Token (interaction token expired)
-                if getattr(e, "code", None) == 50027 or "Invalid Webhook Token" in str(e):
-                    self._log("[activity_rebuild] progress update switched off: webhook token expired")
+                if getattr(e, "code", None) == 50027 or "Invalid Webhook Token" in str(
+                    e
+                ):
+                    self._log(
+                        "[activity_rebuild] progress update switched off: webhook token expired"
+                    )
                     raise
                 self._log(f"[activity_rebuild] progress update failed: {e}", error=True)
 
@@ -185,6 +189,7 @@ class ActivityMetricsCog(commands.Cog):
             progress["msgs_this_channel"] = 0
 
             async for m in ch.history(limit=None, oldest_first=True, after=since):
+
                 def _work():
                     try:
                         am.upsert_from_message(m, include_bots=bool(include_bots))
@@ -220,8 +225,11 @@ class ActivityMetricsCog(commands.Cog):
                 await _scan_thread(th)
 
         async def _scan_thread(th: discord.Thread):
-            progress["channel_name"] = f"{th.parent.name} → {th.name}" if th.parent else th.name
+            progress["channel_name"] = (
+                f"{th.parent.name} → {th.name}" if th.parent else th.name
+            )
             async for m in th.history(limit=None, oldest_first=True, after=since):
+
                 def _work():
                     try:
                         am.upsert_from_message(m, include_bots=bool(include_bots))
@@ -245,7 +253,9 @@ class ActivityMetricsCog(commands.Cog):
                 progress["channel_index"] = idx
                 if isinstance(ch, discord.StageChannel):
                     continue
-                if isinstance(ch, discord.TextChannel) or isinstance(ch, discord.NewsChannel):
+                if isinstance(ch, discord.TextChannel) or isinstance(
+                    ch, discord.NewsChannel
+                ):
                     await _scan_textlike(ch)
                 elif isinstance(ch, discord.ForumChannel):
                     await _scan_forum(ch)
@@ -320,7 +330,9 @@ class ActivityMetricsCog(commands.Cog):
         lines.append("")
         lines.append("**Top channels (by messages)**")
         if not by_channel:
-            lines.append("_No per-channel data yet. Run `/activity_rebuild` to backfill._")
+            lines.append(
+                "_No per-channel data yet. Run `/activity_rebuild` to backfill._"
+            )
         else:
             top = sorted(by_channel.items(), key=lambda kv: kv[1], reverse=True)[:15]
             for cid, count in top:
@@ -361,7 +373,6 @@ class ActivityMetricsCog(commands.Cog):
             await inter.response.send_message("You need Manage Server.", ephemeral=True)
             return
 
-        # Confirm intent
         scope_str = f"last {days} day(s)" if days and days > 0 else "ALL data"
         if not really:
             await inter.response.send_message(
@@ -372,43 +383,25 @@ class ActivityMetricsCog(commands.Cog):
             )
             return
 
-        # Defer according to 'post'
         if post:
             await inter.response.defer()
         else:
             await inter.response.defer(ephemeral=True)
 
-        gid = inter.guild.id
+        gid = int(inter.guild.id)
         now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
 
-        # Compute date/hour bounds if days is provided
         start_day: Optional[str] = None
         end_day: Optional[str] = None
-        start_hour: Optional[str] = None
-        end_hour: Optional[str] = None
-
         if days and days > 0:
             start_day = (now.date() - dt.timedelta(days=days)).isoformat()
             end_day = now.date().isoformat()
-            # hourly key uses your model's hour key; mirror that here
-            # If your hour key is 'YYYY-MM-DD HH:00:00Z' (for example), build a wide range
-            # We’ll just delete hours >= start_day 00:00:00 UTC
-            start_dt = dt.datetime.combine(now.date() - dt.timedelta(days=days), dt.time(0, 0, 0))
-            end_dt = now
-            start_hour = start_dt.replace(microsecond=0).isoformat(timespec="seconds")
-            end_hour = end_dt.replace(microsecond=0).isoformat(timespec="seconds")
 
-        async def _purge():
-            # Delete rows from all aggregates for this guild; optionally scoped by day/hour
+        def _purge() -> int:
             con = am.connect()
             try:
                 cur = con.cursor()
-                total_deleted = 0
-
-                def _exec(sql: str, params: tuple) -> int:
-                    cur.execute(sql, params)
-                    return cur.rowcount if hasattr(cur, "rowcount") else 0
-
+                before = con.total_changes
                 # Daily tables
                 daily_tables = [
                     "message_metrics_daily",
@@ -420,44 +413,40 @@ class ActivityMetricsCog(commands.Cog):
                 ]
                 if start_day and end_day:
                     for t in daily_tables:
-                        total_deleted += _exec(
+                        cur.execute(
                             f"DELETE FROM {t} WHERE guild_id=? AND day BETWEEN ? AND ?",
                             (gid, start_day, end_day),
                         )
                 else:
                     for t in daily_tables:
-                        total_deleted += _exec(
+                        cur.execute(
                             f"DELETE FROM {t} WHERE guild_id=?",
                             (gid,),
                         )
 
-                # Hourly
-                if start_hour and end_hour:
-                    total_deleted += _exec(
-                        "DELETE FROM message_metrics_hourly WHERE guild_id=? AND hour BETWEEN ? AND ?",
-                        (gid, start_hour, end_hour),
+                # Hourly — stored as 'YYYY-MM-DDTHH' → compare by day prefix
+                if start_day and end_day:
+                    cur.execute(
+                        "DELETE FROM message_metrics_hourly "
+                        "WHERE guild_id=? AND substr(hour,1,10) BETWEEN ? AND ?",
+                        (gid, start_day, end_day),
                     )
                 else:
-                    total_deleted += _exec(
+                    cur.execute(
                         "DELETE FROM message_metrics_hourly WHERE guild_id=?",
                         (gid,),
                     )
 
-                # Channel last message markers — simplest is to clear for guild
-                total_deleted += _exec(
-                    "DELETE FROM channel_last_msg WHERE guild_id=?",
-                    (gid,),
-                )
+                # Channel last msg watermark
+                cur.execute("DELETE FROM channel_last_msg WHERE guild_id=?", (gid,))
 
-                # Optional: dedupe index (so rebuild can reprocess)
+                # Optional dedupe index
                 if include_index:
-                    total_deleted += _exec(
-                        "DELETE FROM message_index WHERE guild_id=?",
-                        (gid,),
-                    )
+                    cur.execute("DELETE FROM message_index WHERE guild_id=?", (gid,))
 
                 con.commit()
-                return total_deleted
+                after = con.total_changes
+                return max(0, after - before)
             finally:
                 try:
                     con.close()
@@ -474,7 +463,8 @@ class ActivityMetricsCog(commands.Cog):
                 f"{'• Dedupe index cleared.' if include_index else ''}"
             )
             await inter.edit_original_response(
-                content=msg, allowed_mentions=discord.AllowedMentions.none()
+                content=msg,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception as e:
             self._log(f"[activity_purge] error: {e}", error=True)
