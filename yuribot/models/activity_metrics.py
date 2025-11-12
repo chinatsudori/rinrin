@@ -38,6 +38,13 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+if os.getenv("DEBUG_SQL") == "1":
+    try:
+        con = connect()
+        con.set_trace_callback(print)
+        con.close()
+    except Exception:
+        pass
 # ────────────────────────────────
 # Schema (compact, append/upsert-friendly)
 # ────────────────────────────────
@@ -185,14 +192,20 @@ def ensure_tables() -> None:
             DDL_SENTIMENT_DAILY,
         ):
             cur.executescript(ddl)
-            # --- migrations ---
-        # 1) Add url_msgs to message_metrics_daily if missing
-        rows = cur.execute("PRAGMA table_info(message_metrics_daily)").fetchall()
-        cols = {r[1] for r in rows}  # r[1] = column name
+
+        # --- migrations ---
+        # 1) message_metrics_daily.url_msgs
+        cols = {
+            row[1]
+            for row in cur.execute(
+                "PRAGMA table_info(message_metrics_daily)"
+            ).fetchall()
+        }
         if "url_msgs" not in cols:
             cur.execute(
                 "ALTER TABLE message_metrics_daily ADD COLUMN url_msgs INTEGER NOT NULL DEFAULT 0"
             )
+
         con.commit()
     finally:
         con.close()
@@ -355,19 +368,18 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
     try:
         cur = con.cursor()
 
-        # 1) per-user daily metrics
         cur.execute(
             """
             INSERT INTO message_metrics_daily(guild_id,user_id,day,messages,words,replies,mentions,gifs,reactions_rx,url_msgs)
             VALUES(?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(guild_id,user_id,day) DO UPDATE SET
-              messages     = messages + excluded.messages,
-              words        = words    + excluded.words,
-              replies      = replies  + excluded.replies,
-              mentions     = mentions + excluded.mentions,
-              gifs         = gifs     + excluded.gifs,
-              reactions_rx = reactions_rx + excluded.reactions_rx,
-              url_msgs     = url_msgs + excluded.url_msgs
+            messages     = messages + excluded.messages,
+            words        = words    + excluded.words,
+            replies      = replies  + excluded.replies,
+            mentions     = mentions + excluded.mentions,
+            gifs         = gifs     + excluded.gifs,
+            reactions_rx = reactions_rx + excluded.reactions_rx,
+            url_msgs     = url_msgs + excluded.url_msgs
             """,
             (
                 guild_id,
@@ -382,6 +394,9 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
                 url_msgs,
             ),
         )
+    except Exception as e:
+        print(f"[activity_metrics] daily insert failed: {e}")
+        raise
 
         # 2) hourly guild message counter
         cur.execute(

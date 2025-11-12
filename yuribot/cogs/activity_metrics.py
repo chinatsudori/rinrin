@@ -66,7 +66,10 @@ class ActivityMetricsCog(commands.Cog):
                 return
             count = 0
             async for m in ch.history(limit=None, oldest_first=True, after=since):
-                am.upsert_from_message(m, include_bots=bool(include_bots))
+                # offload blocking SQLite work
+                await asyncio.to_thread(
+                    am.upsert_from_message, m, include_bots=bool(include_bots)
+                )
                 count += 1
                 if count % 250 == 0:
                     await asyncio.sleep(0)
