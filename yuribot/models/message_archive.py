@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Sequence, Tuple, Dict, Any, Iterator
 import re
 import html
+import discord
 
 # Public DB surface for other modules (e.g., cogs) to use.
 # connect() must return a sqlite3.Connection-compatible object.
