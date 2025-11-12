@@ -187,9 +187,8 @@ def ensure_tables() -> None:
             cur.executescript(ddl)
             # --- migrations ---
         # 1) Add url_msgs to message_metrics_daily if missing
-        cols = [
-            r[1] for r in cur.execute("PRAGMA table_info(message_metrics_daily)")
-        ].fetchall()
+        rows = cur.execute("PRAGMA table_info(message_metrics_daily)").fetchall()
+        cols = {r[1] for r in rows}  # r[1] = column name
         if "url_msgs" not in cols:
             cur.execute(
                 "ALTER TABLE message_metrics_daily ADD COLUMN url_msgs INTEGER NOT NULL DEFAULT 0"

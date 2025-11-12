@@ -42,19 +42,21 @@ class VoiceStatsCog(commands.Cog):
         now = datetime.now(timezone.utc)
         for guild in self.bot.guilds:
             for member in guild.members:
-                vs = getattr(member, "voice", None)  # discord.VoiceState or None
-                if vs and vs.channel:
-                    # fabricate a minimal obj or pass (member, vs)
-                    self._seed_voice_state(guild, member, vs)
-                key = (guild.id, vs.member.id)
-                if key not in self._live_sessions:
-                    try:
-                        session_id = voice_sessions.open_live_session(
-                            guild.id, vs.member.id, vs.channel.id, now
-                        )
-                        self._live_sessions[key] = (session_id, now, vs.channel.id)
-                    except Exception as e:
-                        log.error(f"Failed to prime session for {vs.member.id}: {e}")
+                vs = getattr(member, "voice", None)
+                if not vs or not vs.channel:
+                    continue
+                # Use the known Member object; VoiceState.member may be None.
+                key = (guild.id, member.id)
+                self._seed_voice_state(guild, member, vs)
+            key = (guild.id, vs.member.id)
+            if key not in self._live_sessions:
+                try:
+                    session_id = voice_sessions.open_live_session(
+                        guild.id, vs.member.id, vs.channel.id, now
+                    )
+                    self._live_sessions[key] = (session_id, now, vs.channel.id)
+                except Exception as e:
+                    log.error(f"Failed to prime session for {vs.member.id}: {e}")
         log.info(f"Live session cache primed with {len(self._live_sessions)} users.")
 
     # --- Live Listener ---
