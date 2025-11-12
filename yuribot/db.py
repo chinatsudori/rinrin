@@ -18,13 +18,15 @@ log = logging.getLogger("yuribot.db")
 # ----------------------------
 # Path resolution
 # ----------------------------
+DEFAULT_DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+DEFAULT_DB = DEFAULT_DATA_DIR / "bot.sqlite3"
+
+
 def _resolved_db_path() -> str:
-    env = os.environ.get("BOT_DB_PATH")
-    if env:
-        return os.path.abspath(env)
-    return os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "data", "bot.sqlite3")
-    )
+    env_path = os.getenv("BOT_DB_PATH")
+    if env_path:
+        return env_path
+    return str(DEFAULT_DB)
 
 
 # ----------------------------
@@ -276,25 +278,30 @@ def ensure_db() -> None:
         # ========== message_archive ==========
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS message_archive (
-                message_id  INTEGER PRIMARY KEY,
-                guild_id    INTEGER NOT NULL,
-                channel_id  INTEGER NOT NULL,
-                author_id   INTEGER NOT NULL,
-                message_type TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL,
-                content     TEXT,
-                edited_at   TEXT,
-
-                from attachments/embeds (INT) to _json (TEXT)
-                attachments_json TEXT,
-                embeds_json      TEXT,
-
-                reactions   TEXT,
-                reply_to_id INTEGER
-            )
-            """
+        CREATE TABLE IF NOT EXISTS message_archive (
+            message_id  INTEGER PRIMARY KEY,
+            guild_id    INTEGER NOT NULL,
+            channel_id  INTEGER NOT NULL,
+            author_id   INTEGER NOT NULL,
+            message_type TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL,
+            content     TEXT,
+            edited_at   TEXT,
+            -- existing JSON blobs
+            attachments_json TEXT,
+            embeds_json      TEXT,
+            reactions        TEXT,
+            reply_to_id      INTEGER,
+            -- NEW detail blobs for content analytics
+            emojis_json      TEXT,   -- list[ {emoji, emoji_id, emoji_name, emoji_animated, count} ]
+            stickers_json    TEXT,   -- list[ {id, name, format} ]
+            gif_urls_json    TEXT    -- list[str]
         )
+        """
+        )
+        _ensure_column(con, "message_archive", "emojis_json", "TEXT")
+        _ensure_column(con, "message_archive", "stickers_json", "TEXT")
+        _ensure_column(con, "message_archive", "gif_urls_json", "TEXT")
         _ensure_column(con, "message_archive", "reactions", "TEXT")
         _ensure_column(con, "message_archive", "reply_to_id", "INTEGER")
         _ensure_column(con, "message_archive", "attachments_json", "TEXT")
@@ -304,6 +311,42 @@ def ensure_db() -> None:
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_archive_author ON message_archive (guild_id, author_id, created_at)"
+        )
+        # per-user/day message + content metrics (for stats.html cards)
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS message_metrics_daily (
+        guild_id      INTEGER NOT NULL,
+        user_id       INTEGER NOT NULL,
+        day           TEXT    NOT NULL,          -- 'YYYY-MM-DD' (UTC)
+        messages      INTEGER NOT NULL DEFAULT 0,
+        words         INTEGER NOT NULL DEFAULT 0,
+        replies       INTEGER NOT NULL DEFAULT 0,
+        mentions      INTEGER NOT NULL DEFAULT 0,
+        gifs          INTEGER NOT NULL DEFAULT 0,
+        reactions_rx  INTEGER NOT NULL DEFAULT 0, -- sum of counts on that user's messages
+        PRIMARY KEY (guild_id, user_id, day)
+        )"""
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_metrics_gud ON message_metrics_daily(guild_id, user_id, day)"
+        )
+
+        # per-user/day emoji & sticker usage (one row per unique token & source)
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS reaction_emoji_daily (
+        guild_id      INTEGER NOT NULL,
+        user_id       INTEGER NOT NULL,
+        day           TEXT    NOT NULL,
+        kind          TEXT    NOT NULL,          -- 'text_emoji' | 'custom_emoji' | 'reaction' | 'sticker' | 'gif'
+        key           TEXT    NOT NULL,          -- e.g. '🥲' or 'henyaHeart:1432...' or sticker_id or gif host
+        count         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, user_id, day, kind, key)
+        )"""
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_re_agg_gd ON reaction_emoji_daily(guild_id, day)"
         )
 
         # ========== role_welcome_sent ==========

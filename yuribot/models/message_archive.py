@@ -4,13 +4,138 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Sequence, Tuple, Dict, Any, Iterator
+import re
+import html
 
 # Public DB surface for other modules (e.g., cogs) to use.
 # connect() must return a sqlite3.Connection-compatible object.
 from ..db import connect
 
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f680-\U0001f6ff"  # transport & map
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa70-\U0001faff"
+    "\u2600-\u26ff"
+    "\u2700-\u27bf"
+    "]+",
+    flags=re.UNICODE,
+)
+_CUSTOM_EMOJI_RE = re.compile(r"<(a?):([a-zA-Z0-9_]+):(\d+)>")
+_GIF_EXT_RE = re.compile(r"\.(?:gif|gifv)(?:\?.*)?$", re.I)
+
 
 # ---- Public helpers expected by the cog ----
+
+
+def _extract_text_emojis(content: str | None) -> str | None:
+    if not content:
+        return None
+    items: dict[tuple[str, int | None, str | None, int | None], int] = {}
+    # Unicode emoji
+    for ch in _EMOJI_RE.findall(content):
+        key = (ch, None, None, 0)
+        items[key] = items.get(key, 0) + 1
+    # Custom emoji tokens: <:name:id> or <a:name:id>
+    for m in _CUSTOM_EMOJI_RE.finditer(content):
+        animated = 1 if m.group(1) == "a" else 0
+        name = m.group(2)
+        eid = int(m.group(3))
+        key = (m.group(0), eid, name, animated)
+        items[key] = items.get(key, 0) + 1
+    if not items:
+        return None
+    payload = [
+        {
+            "emoji": k[0],
+            "emoji_id": k[1],
+            "emoji_name": k[2],
+            "emoji_animated": k[3],
+            "count": c,
+        }
+        for (k, c) in items.items()
+    ]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _serialize_stickers(message: "discord.Message") -> str | None:
+    sts = getattr(message, "stickers", None) or []
+    if not sts:
+        return None
+    payload = []
+    for s in sts:
+        # discord.StickerItem has .id, .name, .format (enum). Use getattr for safety.
+        payload.append(
+            {
+                "id": int(getattr(s, "id", 0)) or None,
+                "name": getattr(s, "name", None),
+                "format": getattr(getattr(s, "format", None), "name", None),
+            }
+        )
+    return json.dumps(payload, ensure_ascii=False) if payload else None
+
+
+def _extract_gif_urls(message: "discord.Message") -> str | None:
+    urls: list[str] = []
+    # Attachments with GIF content types or .gif extension
+    for a in getattr(message, "attachments", []) or []:
+        ct = (getattr(a, "content_type", "") or "").lower()
+        url = getattr(a, "url", None) or ""
+        if ("gif" in ct) or _GIF_EXT_REQ.search(url or ""):
+            urls.append(url)
+    # Embeds that are gif/video or have gif links
+    for e in getattr(message, "embeds", []) or []:
+        try:
+            d = e.to_dict()
+        except Exception:
+            continue
+        t = (d.get("type") or "").lower()
+        if t == "gifv":
+            urls.append(d.get("url") or d.get("video", {}).get("url") or "")
+        else:
+            for key in ("url", "thumbnail", "image", "video"):
+                v = d.get(key)
+                if isinstance(v, str) and _GIF_EXT_RE.search(v):
+                    urls.append(v)
+                elif isinstance(v, dict):
+                    u = v.get("url") or v.get("proxy_url")
+                    if isinstance(u, str) and _GIF_EXT_RE.search(u):
+                        urls.append(u)
+    urls = [u for u in urls if u]
+    return json.dumps(urls, ensure_ascii=False) if urls else None
+
+
+def from_discord_message(message: "discord.Message") -> ArchivedMessage:
+    ...
+    attachments_json = (
+        json.dumps([a.to_dict() for a in message.attachments])
+        if message.attachments
+        else None
+    )
+    embeds_json = (
+        json.dumps([e.to_dict() for e in message.embeds]) if message.embeds else None
+    )
+    emojis_json = _extract_text_emojis(message.content)
+    stickers_json = _serialize_stickers(message)
+    gif_urls_json = _extract_gif_urls(message)
+    return ArchivedMessage(
+        ...,
+        attachments_json=attachments_json,
+        embeds_json=embeds_json,
+        reactions=_serialize_reactions(
+            message
+        ),  # already exists [message_archive.py](https://github.com/chinatsudori/rinrin/blob/d269f653b9ec3ddaaa9f0f63a8ceb62e0ee26c9c/yuribot/models/message_archive.py#L163-L196)cite39file0
+        reply_to_id=_resolve_reply_to_id(message),
+        # NEW:
+        emojis_json=emojis_json,
+        stickers_json=stickers_json,
+        gif_urls_json=gif_urls_json,
+    )
 
 
 def get_connection():

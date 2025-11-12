@@ -14,33 +14,46 @@ from . import auth
 import os
 import sqlite3
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 import time
 import re
+
+from .routes import activity as activity_routes
+
+import json
+import httpx  # Added for SDK proxy
+from fastapi import Response  # Added for SDK proxy
 
 BOT_DB_PATH = os.getenv("BOT_DB_PATH", "/app/data/bot.sqlite3")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 STATIC_DIR = Path(__file__).parent / "static"
+GUILD_ID = 1417424779354574932
 
+BOT_AUTHOR_IDS = {
+    1266545197077102633,  # rinrin
+}
 CSP = (
     "default-src 'self'; "
     "frame-ancestors https://discord.com https://*.discord.com; "
-    "script-src 'self' 'unsafe-inline'; "  # <-- THIS LINE IS MODIFIED
+    "script-src 'self' 'unsafe-inline'; "  # Allow inline scripts for activity.html
     "connect-src 'self' https://discord.com https://*.discord.com; "
     "img-src 'self' data: https:; "
     "style-src 'self' 'unsafe-inline'; "
     "base-uri 'self'; form-action 'self'"
 )
 
+warnings.filterwarnings("ignore")
+
 
 class SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         resp = await call_next(request)
-        resp.headers["Content-Security-Policy"] = CSP  # <-- THIS IS UN-COMMENTED
+        resp.headers["Content-Security-Policy"] = CSP
         return resp
 
 
 app = FastAPI(title="Yuri Bot Dashboard", version="0.2.0")
-app.add_middleware(SecurityHeaders)  # <-- THIS IS UN-COMMENTED
+app.add_middleware(SecurityHeaders)  # Make sure this is un-commented
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-change-me"),
@@ -54,6 +67,9 @@ app.mount(
     name="static",
 )
 app.include_router(auth.router)
+app.include_router(activity_routes.router)
+# Create a reusable client for proxying
+client = httpx.AsyncClient()
 
 templates_path = Path(__file__).parent / "templates"
 env = Environment(
@@ -475,3 +491,108 @@ def timestamp_now():
             "local": now.astimezone().isoformat(),
         }
     )
+
+
+# ---------- START: New Stats Dashboard ----------
+def get_ranking(con, stat_expr, order="DESC", limit=20):
+    """Helper to run a ranking query on the message_archive table."""
+    query = f"""
+        SELECT
+            user_id,
+            ({stat_expr}) AS value
+        FROM message_archive
+        GROUP BY user_id
+        HAVING value > 0
+        ORDER BY value {order}
+        LIMIT ?
+    """
+    cur = con.cursor()
+    cur.execute(query, (limit,))
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.get(
+    "/admin/stats",
+    response_class=HTMLResponse,
+    dependencies=[Depends(auth.require_auth())],
+)
+def stats_page(request: Request):
+    rankings = {}
+    error = None
+
+    missing_stats = [
+        "Voice minutes",
+        "Streaming minutes",
+        "Activity joins",
+        "Sticker usage",
+        "Emoji usage",
+        "Reactions sent",
+        "Mentions received",
+        "Replies received",
+    ]
+
+    try:
+        con = db_conn()
+
+        # Check if table exists
+        cur = con.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_archive'"
+        )
+        if not cur.fetchone():
+            raise FileNotFoundError(
+                "Table 'message_archive' not found in database. Is the bot logging messages?"
+            )
+
+        # --- Run all ranking queries ---
+        rankings["total_messages"] = get_ranking(con, "COUNT(id)")
+
+        # Est. words: count spaces in messages longer than 10 chars
+        rankings["total_words"] = get_ranking(
+            con,
+            "SUM(CASE WHEN LENGTH(content) > 10 THEN (LENGTH(content) - LENGTH(REPLACE(content, ' ', '')) + 1) ELSE 0 END)",
+        )
+
+        rankings["active_hours"] = get_ranking(
+            con, "COUNT(DISTINCT STRFTIME('%Y-%m-%d %H', created_at))"
+        )
+
+        rankings["total_gifs"] = get_ranking(
+            con, "SUM(CASE WHEN content LIKE '%.gif%' THEN 1 ELSE 0 END)"
+        )
+
+        rankings["reactions_received"] = get_ranking(con, "SUM(num_reactions)")
+
+        rankings["mentions_sent"] = get_ranking(con, "SUM(num_mentions)")
+
+        rankings["replies_sent"] = get_ranking(con, "SUM(is_reply)")
+
+        con.close()
+
+    except Exception as e:
+        error = str(e)
+
+    template = env.get_template("stats.html")
+    return template.render(
+        request=request, rankings=rankings, missing_stats=missing_stats, error=error
+    )
+
+
+# ---------- SDK Proxy (from activity fix) ----------
+@app.get("/sdk/sdk.js")
+async def get_discord_sdk():
+    """
+    Proxies the Discord SDK to the client.
+    This is required for the URL Mapping to work.
+    """
+    try:
+        r = await client.get("https://discord.com/sdk.js")
+        r.raise_for_status()  # Raise an exception for 4xx/5xx errors
+
+        # Return the content with the correct JavaScript MIME type
+        return Response(content=r.content, media_type="application/javascript")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Failed to fetch Discord SDK: {e}",
+        )

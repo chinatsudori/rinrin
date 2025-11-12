@@ -37,4 +37,4 @@ EXPOSE 5780
 # 6) Do NOT define healthcheck here; compose already has one
 # (If you insist, prefer a Python-based check that doesn't require wget/curl)
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5780"]CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5780", "--proxy-headers"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5780", "--proxy-headers"]
