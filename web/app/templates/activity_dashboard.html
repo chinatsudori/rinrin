@@ -1,0 +1,641 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+  main { max-width: 1400px; }
+  .activity-shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+  .activity-card {
+    border: 1px solid #6664;
+    border-radius: 18px;
+    padding: 1.25rem;
+    background: #0f172a;
+    color: #f8fafc;
+    box-shadow: 0 8px 30px #00000040;
+  }
+  .activity-card h2,
+  .activity-card h3 {
+    margin-top: 0;
+    margin-bottom: .6rem;
+  }
+  .dash-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .view-toggle {
+    display: flex;
+    gap: .75rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .view-toggle label {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    font-weight: 600;
+  }
+  .range-pills {
+    display: flex;
+    gap: .4rem;
+  }
+  .range-pills button,
+  .activity-btn {
+    border: 1px solid #475569;
+    background: transparent;
+    color: inherit;
+    border-radius: 999px;
+    padding: .4rem 1rem;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .range-pills button.active {
+    background: linear-gradient(120deg,#38bdf8,#6366f1);
+    border-color: transparent;
+  }
+  .activity-btn.is-on {
+    background: #16a34a;
+    border-color: #16a34a;
+    color: #04160b;
+  }
+  .date-controls {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: .9rem;
+  }
+  .date-controls input[type="date"] {
+    background: #020617;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    color: #f8fafc;
+    padding: .35rem .6rem;
+  }
+  .activity-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+  .stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -.02em;
+  }
+  .stat-label {
+    text-transform: uppercase;
+    font-size: .75rem;
+    letter-spacing: .2em;
+    opacity: .7;
+  }
+  canvas.spark {
+    width: 100%;
+    height: 220px;
+    display: block;
+  }
+  .rankings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+  .rank-card {
+    background: #020617;
+    border-radius: 12px;
+    padding: .75rem 1rem;
+  }
+  .rank-card h4 {
+    margin: 0 0 .5rem;
+    font-size: .9rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+  .rank-card ol {
+    margin: 0;
+    padding-left: 1.25rem;
+  }
+  .rank-card li {
+    margin-bottom: .25rem;
+    font-size: .9rem;
+  }
+  .panel-title {
+    font-size: 1.15rem;
+    margin-bottom: .4rem;
+  }
+  table.activity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .9rem;
+  }
+  table.activity-table th,
+  table.activity-table td {
+    border-bottom: 1px solid #1e293b;
+    padding: .45rem .2rem;
+    text-align: left;
+  }
+  .heatmap-wrapper {
+    overflow-x: auto;
+  }
+  .heatmap-grid {
+    display: grid;
+    grid-template-columns: 80px repeat(24, minmax(24px, 1fr));
+    gap: 1px;
+    font-size: .7rem;
+    background: #1e293b;
+  }
+  .heatmap-cell {
+    padding: .25rem;
+    text-align: center;
+    min-width: 24px;
+  }
+  .heatmap-row-label {
+    font-weight: 600;
+    background: #0f172a;
+  }
+  .status-text {
+    font-size: .9rem;
+    opacity: .8;
+  }
+  @media (max-width: 720px) {
+    .activity-shell { padding: .5rem; }
+  }
+</style>
+
+<div class="activity-shell" id="activity-app">
+  <div class="activity-card">
+    <div class="dash-controls">
+      <div>
+        <h2 style="margin:0;">Live Activity Dashboard</h2>
+        <p class="status-text" id="activity-status">Loading…</p>
+        <div class="view-toggle">
+          <label>
+            <input type="radio" name="view-mode" value="guild" checked>
+            All activity
+          </label>
+          {% if viewer %}
+          <label>
+            <input type="radio" name="view-mode" value="personal">
+            My stats
+          </label>
+          {% else %}
+          <span style="font-size:.85rem; opacity:.7;">Log in with Discord to view personal stats</span>
+          {% endif %}
+        </div>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:.75rem; align-items:flex-end;">
+        <div class="range-pills" role="group" aria-label="Time range">
+          <button type="button" data-range="7">7d</button>
+          <button type="button" data-range="14">14d</button>
+          <button type="button" data-range="30" class="active">30d</button>
+          <button type="button" data-range="90">90d</button>
+        </div>
+        <div style="display:flex; gap:.6rem; align-items:center;">
+          <button type="button" id="auto-refresh" class="activity-btn is-on">Auto refresh</button>
+          <button type="button" id="manual-refresh" class="activity-btn">Refresh now</button>
+        </div>
+        <div class="date-controls">
+          <label>Start <input type="date" id="range-start"></label>
+          <label>End <input type="date" id="range-end"></label>
+          <button type="button" id="apply-range" class="activity-btn">Apply</button>
+          <button type="button" id="clear-range" class="activity-btn">Clear</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="activity-grid">
+    <div class="activity-card">
+      <div class="panel-title">Message volume</div>
+      <div class="stat-value" id="stat-messages">—</div>
+      <div class="stat-label">total messages</div>
+      <p style="margin-top:.75rem; font-size:.9rem; opacity:.8;">
+        Avg words / msg: <strong id="stat-words-per-msg">—</strong> • Estimated total words:
+        <strong id="stat-words">—</strong>
+      </p>
+    </div>
+    <div class="activity-card">
+      <div class="panel-title">Distribution</div>
+      <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+        <div>
+          <div class="stat-label">Mean</div>
+          <div class="stat-value" style="font-size:1.6rem;" id="stat-mean">—</div>
+        </div>
+        <div>
+          <div class="stat-label">Std dev</div>
+          <div class="stat-value" style="font-size:1.6rem;" id="stat-std">—</div>
+        </div>
+      </div>
+      <p style="margin-top:.6rem; font-size:.9rem; opacity:.8;">
+        Skew <span id="stat-skew">—</span> • Kurtosis <span id="stat-kurt">—</span> • Gini <span id="stat-gini">—</span>
+      </p>
+    </div>
+    <div class="activity-card">
+      <div class="panel-title">Silence & Latency</div>
+      <p class="stat-label">Silent hours</p>
+      <div class="stat-value" style="font-size:1.8rem;" id="stat-silence">—</div>
+      <p style="margin-top:.6rem; font-size:.9rem; opacity:.8;">
+        Median reply latency <strong id="stat-latency-median">—</strong> • P95 <strong id="stat-latency-p95">—</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="activity-card">
+    <div class="panel-title">Hourly throughput</div>
+    <canvas id="hourly-canvas" class="spark" height="220"></canvas>
+  </div>
+
+  <div class="activity-card">
+    <div class="panel-title">24h burstiness (σ of rolling window)</div>
+    <canvas id="burst-canvas" class="spark" height="220"></canvas>
+  </div>
+
+  <div class="activity-card">
+    <div class="panel-title">Heatmap (avg msgs / hour)</div>
+    <div class="heatmap-wrapper">
+      <div id="heatmap-grid" class="heatmap-grid"></div>
+    </div>
+  </div>
+
+  <div class="activity-card">
+    <div class="panel-title">Rankings (day / week / month / all time)</div>
+    <div id="rankings-grid" class="rankings-grid"></div>
+  </div>
+
+  <div class="activity-grid">
+    <div class="activity-card">
+      <div class="panel-title">Lexical diversity (top members)</div>
+      <table class="activity-table" id="lexical-table">
+        <thead>
+          <tr><th>User ID</th><th>TTR</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="activity-card">
+      <div class="panel-title">Latency focus channels</div>
+      <table class="activity-table" id="latency-table">
+        <thead>
+          <tr><th>Channel ID</th><th>Median</th><th>P95</th><th>Samples</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="activity-card">
+    <div class="panel-title">Raw payload</div>
+    <pre id="activity-json" style="max-height:280px; overflow:auto; margin:0; background:#020617; padding:1rem; border-radius:12px;"></pre>
+  </div>
+</div>
+
+<script>
+(() => {
+  const guildId = {{ guild_id }};
+  const viewer = {{ viewer|default({}, true)|tojson }};
+  const state = {
+    days: 30,
+    autoRefresh: true,
+    timer: null,
+    refreshMs: 60000,
+    scope: 'guild',
+    startDay: null,
+    endDay: null,
+  };
+
+  const statusEl = document.getElementById('activity-status');
+  const jsonEl = document.getElementById('activity-json');
+  const rangeButtons = document.querySelectorAll('[data-range]');
+  const autoBtn = document.getElementById('auto-refresh');
+  const manualBtn = document.getElementById('manual-refresh');
+  const scopeRadios = document.querySelectorAll('input[name="view-mode"]');
+  const startInput = document.getElementById('range-start');
+  const endInput = document.getElementById('range-end');
+  const applyBtn = document.getElementById('apply-range');
+  const clearBtn = document.getElementById('clear-range');
+
+  const statEls = {
+    messages: document.getElementById('stat-messages'),
+    words: document.getElementById('stat-words'),
+    wordsPerMsg: document.getElementById('stat-words-per-msg'),
+    mean: document.getElementById('stat-mean'),
+    std: document.getElementById('stat-std'),
+    skew: document.getElementById('stat-skew'),
+    kurt: document.getElementById('stat-kurt'),
+    gini: document.getElementById('stat-gini'),
+    silence: document.getElementById('stat-silence'),
+    latencyMedian: document.getElementById('stat-latency-median'),
+    latencyP95: document.getElementById('stat-latency-p95'),
+  };
+
+  function formatNumber(value, opts = {}) {
+    if (value === null || value === undefined || Number.isNaN(value)) return '—';
+    const { digits = 0, style } = opts;
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits, minimumFractionDigits: digits, style }).format(value);
+  }
+
+  function setStatus(text, isError = false) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.style.color = isError ? '#f87171' : '#f8fafc';
+  }
+
+  async function loadData() {
+    try {
+      setStatus('Loading…');
+      const params = new URLSearchParams();
+      if (state.startDay && state.endDay) {
+        params.set('start', state.startDay);
+        params.set('end', state.endDay);
+      } else {
+        params.set('days', state.days);
+      }
+      params.set('scope', state.scope);
+      if (state.scope === 'personal' && viewer?.id) {
+        params.set('user_id', viewer.id);
+      }
+      const resp = await fetch(`/api/activity/${guildId}/live?${params.toString()}`);
+      if (!resp.ok) throw new Error(`Request failed (${resp.status})`);
+      const data = await resp.json();
+      renderAll(data);
+      jsonEl.textContent = JSON.stringify(data, null, 2);
+      const range = data.range || {};
+      const rangeLabel = range.start_day && range.end_day
+        ? `${range.start_day} → ${range.end_day}`
+        : `${state.days}d`;
+      const scopeLabel = data.scope === 'personal' ? 'My stats' : 'All activity';
+      setStatus(`Last updated ${new Date().toLocaleTimeString()} • ${scopeLabel} • ${rangeLabel}`);
+    } catch (err) {
+      console.error(err);
+      setStatus(`Error: ${err.message}`, true);
+    }
+  }
+
+  function renderAll(data) {
+    const basic = data.basic || {};
+    const content = data.content || {};
+    const temporal = data.temporal || {};
+    const latency = data.latency || {};
+
+    statEls.messages.textContent = formatNumber(content.total_messages || 0);
+    statEls.words.textContent = formatNumber(content.total_words || 0);
+    statEls.wordsPerMsg.textContent = formatNumber(content.words_per_msg_mean || 0, { digits: 2 });
+    statEls.mean.textContent = formatNumber(basic.mean || 0, { digits: 1 });
+    statEls.std.textContent = formatNumber(basic.std || 0, { digits: 1 });
+    statEls.skew.textContent = formatNumber(basic.skewness, { digits: 2 });
+    statEls.kurt.textContent = formatNumber(basic.kurtosis, { digits: 2 });
+    statEls.gini.textContent = formatNumber(basic.gini, { digits: 2 });
+    statEls.silence.textContent = `${formatNumber((temporal.silence_ratio || 0) * 100, { digits: 1 })}%`;
+    statEls.latencyMedian.textContent = `${formatNumber(latency?.global?.median_ms || 0, { digits: 0 })} ms`;
+    statEls.latencyP95.textContent = `${formatNumber(latency?.global?.p95_ms || 0, { digits: 0 })} ms`;
+
+    drawLine('hourly-canvas', temporal.hourly_counts || {});
+    drawLine('burst-canvas', temporal.burst_std_24h || {}, { gradient: ['#a855f7', '#ec4899'] });
+
+    renderHeatmap(temporal.heatmap_avg_per_hour || []);
+    renderLexical(content.lexical_diversity_by_user || {});
+    renderLatency(latency.channels || []);
+    renderRankings(data.rankings || {});
+  }
+
+  function drawLine(canvasId, dataMap, opts = {}) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const entries = Object.entries(dataMap).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    const values = entries.map(([, v]) => Number(v));
+    const labels = entries.map(([k]) => k);
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth * dpr;
+    const height = canvas.clientHeight * dpr;
+    canvas.width = width;
+    canvas.height = height;
+    ctx.clearRect(0, 0, width, height);
+    if (!values.length) {
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('No data', 12, height / 2);
+      return;
+    }
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const pad = 24 * dpr;
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1 * dpr;
+    for (let i = 0; i < 5; i++) {
+      const y = pad + ((height - pad * 2) / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(pad, y);
+      ctx.lineTo(width - pad, y);
+      ctx.stroke();
+    }
+    const gradient = ctx.createLinearGradient(0, 0, width, 0);
+    const colors = opts.gradient || ['#38bdf8', '#6366f1'];
+    gradient.addColorStop(0, colors[0]);
+    gradient.addColorStop(1, colors[1]);
+    ctx.lineWidth = 2.5 * dpr;
+    ctx.strokeStyle = gradient;
+    ctx.beginPath();
+    values.forEach((val, idx) => {
+      const x = pad + (idx / Math.max(values.length - 1, 1)) * (width - pad * 2);
+      const y = height - pad - ((val - min) / range) * (height - pad * 2);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.fillStyle = gradient;
+    ctx.globalAlpha = 0.15;
+    ctx.lineTo(width - pad, height - pad);
+    ctx.lineTo(pad, height - pad);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = `${12 * dpr}px ui-sans-serif`;
+    ctx.fillText(`${formatNumber(min, { digits: 0 })}`, 8 * dpr, height - 4 * dpr);
+    ctx.fillText(`${formatNumber(max, { digits: 0 })}`, 8 * dpr, pad + 10 * dpr);
+  }
+
+  function renderHeatmap(grid) {
+    const container = document.getElementById('heatmap-grid');
+    if (!container) return;
+    container.innerHTML = '';
+    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const flat = grid.flat();
+    const max = Math.max(...flat, 1);
+    grid.forEach((row, idx) => {
+      const label = document.createElement('div');
+      label.textContent = dows[idx] || `D${idx}`;
+      label.className = 'heatmap-cell heatmap-row-label';
+      container.appendChild(label);
+      row.forEach((val) => {
+        const cell = document.createElement('div');
+        const ratio = val / max;
+        const hue = 200 - Math.round(ratio * 120);
+        const light = 15 + Math.round(ratio * 40);
+        cell.style.background = `hsl(${hue} 70% ${light}%)`;
+        cell.className = 'heatmap-cell';
+        cell.textContent = val ? Math.round(val) : '';
+        container.appendChild(cell);
+      });
+    });
+  }
+
+  function renderLexical(map) {
+    const tbody = document.querySelector('#lexical-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const rows = Object.entries(map)
+      .map(([uid, val]) => [uid, Number(val)])
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="2">No samples</td></tr>';
+      return;
+    }
+    rows.forEach(([uid, val]) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${uid}</td><td>${formatNumber(val, { digits: 2 })}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderLatency(rows) {
+    const tbody = document.querySelector('#latency-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const top = (rows || [])
+      .slice()
+      .sort((a, b) => (b.n || 0) - (a.n || 0))
+      .slice(0, 8);
+    if (!top.length) {
+      tbody.innerHTML = '<tr><td colspan="4">No latency buckets</td></tr>';
+      return;
+    }
+    top.forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.channel_id}</td>
+        <td>${formatNumber(row.median_ms || 0, { digits: 0 })} ms</td>
+        <td>${formatNumber(row.p95_ms || 0, { digits: 0 })} ms</td>
+        <td>${row.n || 0}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderRankings(rankings) {
+    const container = document.getElementById('rankings-grid');
+    if (!container) return;
+    const labels = {
+      day: 'Past day',
+      week: 'Past week',
+      month: 'Past month',
+      all: 'All time',
+    };
+    container.innerHTML = '';
+    const entries = Object.keys(labels);
+    if (!rankings || !entries.some((key) => (rankings[key] || []).length)) {
+      container.innerHTML = '<p style="margin:0; opacity:.7;">No ranking data in this window.</p>';
+      return;
+    }
+    entries.forEach((key) => {
+      const card = document.createElement('div');
+      card.className = 'rank-card';
+      const list = document.createElement('ol');
+      const rows = (rankings[key] || []).slice(0, 5);
+      if (!rows.length) {
+        list.innerHTML = '<li>—</li>';
+      } else {
+        rows.forEach((row) => {
+          const li = document.createElement('li');
+          li.innerHTML = `<strong>${row.user_id}</strong> • ${formatNumber(row.messages || 0)}`;
+          list.appendChild(li);
+        });
+      }
+      const title = document.createElement('h4');
+      title.textContent = labels[key];
+      card.appendChild(title);
+      card.appendChild(list);
+      container.appendChild(card);
+    });
+  }
+
+  function schedule() {
+    if (state.timer) {
+      clearInterval(state.timer);
+      state.timer = null;
+    }
+    if (state.autoRefresh) {
+      state.timer = setInterval(() => loadData(), state.refreshMs);
+    }
+  }
+
+  rangeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      rangeButtons.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.days = Number(btn.dataset.range);
+      state.startDay = null;
+      state.endDay = null;
+      if (startInput) startInput.value = '';
+      if (endInput) endInput.value = '';
+      loadData();
+    });
+  });
+
+  scopeRadios.forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      state.scope = radio.value;
+      loadData();
+    });
+  });
+
+  applyBtn?.addEventListener('click', () => {
+    const startVal = startInput?.value;
+    const endVal = endInput?.value;
+    if (!startVal || !endVal) {
+      setStatus('Select both start and end dates to apply.', true);
+      return;
+    }
+    if (startVal > endVal) {
+      setStatus('Start date must be before or equal to end date.', true);
+      return;
+    }
+    rangeButtons.forEach((b) => b.classList.remove('active'));
+    state.startDay = startVal;
+    state.endDay = endVal;
+    loadData();
+  });
+
+  clearBtn?.addEventListener('click', () => {
+    state.startDay = null;
+    state.endDay = null;
+    if (startInput) startInput.value = '';
+    if (endInput) endInput.value = '';
+    state.days = 30;
+    rangeButtons.forEach((b) => b.classList.remove('active'));
+    document.querySelector('[data-range="30"]')?.classList.add('active');
+    loadData();
+  });
+
+  autoBtn?.addEventListener('click', () => {
+    state.autoRefresh = !state.autoRefresh;
+    autoBtn.classList.toggle('is-on', state.autoRefresh);
+    schedule();
+  });
+
+  manualBtn?.addEventListener('click', () => loadData());
+
+  loadData();
+  schedule();
+})();
+</script>
+{% endblock %}
