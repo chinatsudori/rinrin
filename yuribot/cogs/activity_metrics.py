@@ -10,6 +10,9 @@ from discord.ext import commands
 
 from ..models import activity_metrics as am
 
+# Server opened on this date; default stats window uses days since this date.
+OPEN_DATE = dt.date(2025, 9, 16)
+
 
 class ActivityMetricsCog(commands.Cog):
     """Live metrics updater & on-demand rebuild from history with progress + error logging."""
@@ -35,20 +38,23 @@ class ActivityMetricsCog(commands.Cog):
         else:
             print(("[ERR] " if error else "") + msg)
 
+    # ---------------------------
+    # /activity_rebuild (non-ephemeral, progress) — unchanged behavior
+    # ---------------------------
     @app_commands.command(
         name="activity_rebuild",
-        description="Rebuild live activity metrics from history.",
+        description="Rebuild live activity metrics from history (text/news/forum/threads).",
     )
     @app_commands.describe(
         days="Look back this many days (default 30).",
-        channel="Optionally limit to one text channel.",
+        channel="Optionally limit to one text or forum channel.",
         include_bots="Include bot-authored messages.",
     )
     async def activity_rebuild(
         self,
         inter: discord.Interaction,
         days: Optional[int] = 30,
-        channel: Optional[discord.TextChannel] = None,
+        channel: Optional[discord.abc.GuildChannel] = None,
         include_bots: Optional[bool] = False,
     ) -> None:
         if inter.guild is None:
@@ -58,16 +64,17 @@ class ActivityMetricsCog(commands.Cog):
             await inter.response.send_message("You need Manage Server.", ephemeral=True)
             return
 
-        await inter.response.defer(ephemeral=True)
+        # Defer WITHOUT ephemeral -> progress message won't expire at 15m.
+        await inter.response.defer()
 
         guild = inter.guild
         since = None
         if days and days > 0:
             since = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=days)
 
-        # ---- Progress state shared with progress loop ----
+        # ---- progress state & message ----
         progress = {
-            "phase": "starting",  # "starting" | "scanning" | "done" | "error"
+            "phase": "starting",
             "channel_index": 0,
             "channel_total": 0,
             "channel_name": "",
@@ -76,110 +83,158 @@ class ActivityMetricsCog(commands.Cog):
             "errors_count": 0,
             "last_errors": [],  # type: List[str]
         }
-        stop_event = asyncio.Event()
+        msg = await inter.followup.send("⏳ Preparing activity rebuild…")
+        stop = False
 
-        async def render_progress() -> None:
-            """Edits the original ephemeral response every ~1.5s with live counters."""
-            while not stop_event.is_set():
+        async def render_progress_once():
+            phase = progress["phase"]
+            ch_i = progress["channel_index"]
+            ch_n = progress["channel_total"]
+            ch_name = progress["channel_name"]
+            msgs_ch = progress["msgs_this_channel"]
+            msgs_all = progress["msgs_total"]
+            errs = progress["errors_count"]
+            last_errs = progress["last_errors"][-3:]
+
+            lines = []
+            if phase == "starting":
+                lines.append("⏳ Preparing activity rebuild…")
+            elif phase == "scanning":
+                lines.append(f"🔎 Scanning channels ({ch_i}/{ch_n})")
+                lines.append(f"• Current: #{ch_name} — {msgs_ch} msgs")
+                lines.append(f"• Total processed: {msgs_all}")
+            elif phase == "error":
+                lines.append("❌ Rebuild encountered an error. See logs.")
+            elif phase == "done":
+                lines.append("✅ Activity metrics rebuild complete.")
+                lines.append(f"• Channels: {ch_n}")
+                lines.append(f"• Messages processed: {msgs_all}")
+
+            if errs:
+                lines.append(f"⚠️ Errors so far: {errs}")
+                if last_errs:
+                    lines.append("Latest:")
+                    for e in last_errs:
+                        snippet = e if len(e) < 160 else (e[:157] + "…")
+                        lines.append(f"  • {snippet}")
+
+            await msg.edit(
+                content="\n".join(lines),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        async def progress_loop():
+            while not stop:
                 try:
-                    phase = progress["phase"]
-                    ch_i = progress["channel_index"]
-                    ch_n = progress["channel_total"]
-                    ch_name = progress["channel_name"]
-                    msgs_ch = progress["msgs_this_channel"]
-                    msgs_all = progress["msgs_total"]
-                    errs = progress["errors_count"]
-                    last_errs = progress["last_errors"][-3:]  # show last 3
-
-                    lines = []
-                    if phase == "starting":
-                        lines.append("⏳ Preparing activity rebuild…")
-                    elif phase == "scanning":
-                        lines.append(f"🔎 Scanning channels ({ch_i}/{ch_n})")
-                        lines.append(f"• Current: #{ch_name} — {msgs_ch} msgs")
-                        lines.append(f"• Total processed: {msgs_all}")
-                    elif phase == "error":
-                        lines.append("❌ Rebuild encountered an error. See logs.")
-                    elif phase == "done":
-                        lines.append("✅ Activity metrics rebuild complete.")
-                        lines.append(f"• Channels: {ch_n}")
-                        lines.append(f"• Messages processed: {msgs_all}")
-
-                    if errs:
-                        lines.append(f"⚠️ Errors so far: {errs}")
-                        if last_errs:
-                            lines.append("Latest:")
-                            for e in last_errs:
-                                # keep it brief to avoid hitting message length limits
-                                snippet = e if len(e) < 160 else (e[:157] + "…")
-                                lines.append(f"  • {snippet}")
-
-                    await inter.edit_original_response(content="\n".join(lines))
+                    await render_progress_once()
                 except Exception as e:
-                    # don't crash the updater on transient edit errors
                     self._log(
                         f"[activity_rebuild] progress update failed: {e}", error=True
                     )
                 await asyncio.sleep(1.5)
 
-        # Start progress loop
-        progress["phase"] = "starting"
-        progress_task = asyncio.create_task(render_progress())
+        progress_task = asyncio.create_task(progress_loop())
 
-        # Prepare channel list and set totals
-        if channel:
-            channels = [channel]
-        else:
-            channels = [c for c in guild.text_channels]
-            channels.sort(
-                key=lambda c: (
-                    c.category.position if c.category else -1,
-                    c.position,
-                    c.id,
-                )
-            )
+        # ---- collect channels to scan (includes text “inside” voice) ----
+        def _list_channels() -> List[discord.abc.GuildChannel]:
+            if channel:
+                return [channel]
+            chans: List[discord.abc.GuildChannel] = []
+            # Any TextChannel (includes ones attached to Voice channels)
+            for ch in guild.channels:
+                if isinstance(ch, discord.TextChannel):
+                    chans.append(ch)
+            # News/Announcement
+            chans.extend(getattr(guild, "news_channels", []))
+            # Forum channels
+            chans.extend(getattr(guild, "forums", []))
+            return chans
+
+        channels = _list_channels()
         progress["channel_total"] = len(channels)
 
-        async def scan_channel(ch: discord.TextChannel):
+        async def _scan_textlike(ch: discord.TextChannel):
             if not ch.permissions_for(guild.me).read_message_history:
-                msg = f"Skipping #{ch.name}: missing Read Message History"
-                self._log(f"[activity_rebuild] {msg}")
-                progress["last_errors"].append(msg)
+                msg_ = f"Skipping #{ch.name}: missing Read Message History"
+                progress["last_errors"].append(msg_)
                 progress["errors_count"] += 1
+                self._log(f"[activity_rebuild] {msg_}")
                 return
 
             progress["channel_name"] = ch.name
             progress["msgs_this_channel"] = 0
 
             async for m in ch.history(limit=None, oldest_first=True, after=since):
-                # Offload SQLite writes off the event loop to avoid heartbeat blocks.
-                def _upsert_wrapper():
+
+                def _work():
                     try:
                         am.upsert_from_message(m, include_bots=bool(include_bots))
                     except Exception as e:
-                        # capture & log error but keep going
                         err = f"{ch.name} / msg {m.id}: {e}"
                         progress["last_errors"].append(err)
-                        # cap the error buffer to avoid memory blow-up
                         if len(progress["last_errors"]) > 1000:
                             del progress["last_errors"][:500]
                         progress["errors_count"] += 1
                         self._log(f"[activity_rebuild] {err}", error=True)
 
-                await asyncio.to_thread(_upsert_wrapper)
+                await asyncio.to_thread(_work)
                 progress["msgs_this_channel"] += 1
                 progress["msgs_total"] += 1
+                if (progress["msgs_this_channel"] % 250) == 0:
+                    await asyncio.sleep(0)
 
-                # Yield periodically to keep gateway healthy
-                if progress["msgs_this_channel"] % 250 == 0:
+            # Threads under this channel (active + archived)
+            try:
+                for th in ch.threads:
+                    await _scan_thread(th)
+                async for th in ch.archived_threads(limit=None):
+                    await _scan_thread(th)
+            except Exception:
+                pass
+
+        async def _scan_forum(forum: discord.ForumChannel):
+            progress["channel_name"] = forum.name
+            progress["msgs_this_channel"] = 0
+            for th in forum.threads:
+                await _scan_thread(th)
+            async for th in forum.archived_threads(limit=None):
+                await _scan_thread(th)
+
+        async def _scan_thread(th: discord.Thread):
+            progress["channel_name"] = (
+                f"{th.parent.name} → {th.name}" if th.parent else th.name
+            )
+            async for m in th.history(limit=None, oldest_first=True, after=since):
+
+                def _work():
+                    try:
+                        am.upsert_from_message(m, include_bots=bool(include_bots))
+                    except Exception as e:
+                        err = f"{th.name} / msg {m.id}: {e}"
+                        progress["last_errors"].append(err)
+                        if len(progress["last_errors"]) > 1000:
+                            del progress["last_errors"][:500]
+                        progress["errors_count"] += 1
+                        self._log(f"[activity_rebuild] {err}", error=True)
+
+                await asyncio.to_thread(_work)
+                progress["msgs_this_channel"] += 1
+                progress["msgs_total"] += 1
+                if (progress["msgs_this_channel"] % 250) == 0:
                     await asyncio.sleep(0)
 
         try:
             progress["phase"] = "scanning"
             for idx, ch in enumerate(channels, start=1):
                 progress["channel_index"] = idx
-                await scan_channel(ch)
-
+                if isinstance(ch, discord.StageChannel):
+                    continue  # voice-only
+                if isinstance(ch, discord.TextChannel) or isinstance(
+                    ch, discord.NewsChannel
+                ):
+                    await _scan_textlike(ch)
+                elif isinstance(ch, discord.ForumChannel):
+                    await _scan_forum(ch)
             progress["phase"] = "done"
         except Exception as e:
             progress["phase"] = "error"
@@ -188,21 +243,75 @@ class ActivityMetricsCog(commands.Cog):
             progress["errors_count"] += 1
             self._log(f"[activity_rebuild] {err}", error=True)
         finally:
-            # Stop updater and do one last render
-            stop_event.set()
+            stop = True
             try:
                 await progress_task
             except Exception:
                 pass
+            await render_progress_once()
 
-            # Final, explicit message (keeps ephemeral)
-            ch_n = progress["channel_total"]
-            msgs_all = progress["msgs_total"]
-            errs = progress["errors_count"]
-            summary = f"✅ Activity metrics rebuild complete.\n• Channels: {ch_n}\n• Messages processed: {msgs_all}"
-            if errs:
-                summary += f"\n⚠️ Errors encountered: {errs} (see logs for details)"
-            await inter.edit_original_response(content=summary)
+    # ---------------------------
+    # /activity_stats (default to days since OPEN_DATE; optional public post)
+    # ---------------------------
+    @app_commands.command(
+        name="activity_stats",
+        description="Show totals captured (overall + by channel) for a window.",
+    )
+    @app_commands.describe(
+        days="Look back this many days. Default is days since 2025-09-16 (server open).",
+        post="Post result publicly in this channel (default: false).",
+    )
+    async def activity_stats(
+        self,
+        inter: discord.Interaction,
+        days: Optional[int] = None,
+        post: Optional[bool] = False,
+    ) -> None:
+        if inter.guild is None:
+            await inter.response.send_message("Run this in a server.", ephemeral=True)
+            return
+
+        # Default window = days since OPEN_DATE
+        now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        default_days = max((now.date() - OPEN_DATE).days, 1)
+        window_days = days if (days and days > 0) else default_days
+
+        # Defer according to 'post'
+        if post:
+            await inter.response.defer()  # public
+        else:
+            await inter.response.defer(ephemeral=True)
+
+        start_day = (now.date() - dt.timedelta(days=window_days)).isoformat()
+        end_day = now.date().isoformat()
+
+        totals = am.get_totals(inter.guild.id, start_day, end_day)
+        by_channel = am.get_totals_by_channel(inter.guild.id, start_day, end_day)
+
+        # format
+        lines = []
+        lines.append(f"**Activity totals (last {window_days} days)**")
+        lines.append(f"- Messages: {totals['messages']:,}")
+        lines.append(f"- Words: {totals['words']:,}")
+        lines.append("")
+
+        lines.append("**Top channels (by messages)**")
+        if not by_channel:
+            lines.append(
+                "_No per-channel data yet. Run `/activity_rebuild` to backfill._"
+            )
+        else:
+            top = sorted(by_channel.items(), key=lambda kv: kv[1], reverse=True)[:15]
+            for cid, count in top:
+                # Render as channel mention if available; otherwise raw ID
+                mention = f"<#{cid}>"
+                lines.append(f"- {mention}: {count:,}")
+
+        content = "\n".join(lines)
+        await inter.edit_original_response(
+            content=content,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot: commands.Bot):

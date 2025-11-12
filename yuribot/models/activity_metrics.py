@@ -65,7 +65,17 @@ CREATE TABLE IF NOT EXISTS message_metrics_daily(
 );
 CREATE INDEX IF NOT EXISTS idx_msg_daily_gd ON message_metrics_daily(guild_id, day);
 """
-
+DDL_MESSAGE_CHANNEL_DAILY = """
+CREATE TABLE IF NOT EXISTS message_metrics_channel_daily(
+  guild_id   INTEGER NOT NULL,
+  channel_id INTEGER NOT NULL,
+  day        TEXT    NOT NULL,              -- 'YYYY-MM-DD' UTC
+  messages   INTEGER NOT NULL DEFAULT 0,
+  words      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, channel_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_msg_ch_daily_gd ON message_metrics_channel_daily(guild_id, day);
+"""
 # Hourly message count per guild for heatmap/bursts/silence ratio
 # hour is truncated UTC hour: 'YYYY-MM-DDTHH'
 DDL_MESSAGE_HOURLY = """
@@ -182,6 +192,7 @@ def ensure_tables() -> None:
         cur = con.cursor()
         for ddl in (
             DDL_MESSAGE_DAILY,
+            DDL_MESSAGE_CHANNEL_DAILY,
             DDL_MESSAGE_HOURLY,
             DDL_USER_TOKEN_DAILY,
             DDL_REACTION_HIST_DAILY,
@@ -340,16 +351,20 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
     ensure_tables()
 
     guild_id = int(guild.id)
-    channel_id = int(getattr(message, "channel", None).id)
-    author_id = int(getattr(message, "author", None).id)
+    channel = getattr(message, "channel", None)
+    channel_id = int(channel.id) if channel is not None else 0
+    author = getattr(message, "author", None)
+    author_id = int(author.id) if author is not None else 0
+
     created_at: dt.datetime = getattr(message, "created_at")
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=dt.timezone.utc)
 
     day = created_at.astimezone(dt.timezone.utc).date().isoformat()
     hour_key = _hour_key(created_at)
+
     content = getattr(message, "content", "") or ""
-    words = len([m.group(0) for m in WORD_RE.finditer(content)])
+    words = sum(1 for _ in WORD_RE.finditer(content))
     mentions = len(MENTION_RE.findall(content)) + len(
         getattr(message, "mentions", []) or []
     )
@@ -368,144 +383,210 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
     try:
         cur = con.cursor()
 
-        cur.execute(
-            """
-            INSERT INTO message_metrics_daily(guild_id,user_id,day,messages,words,replies,mentions,gifs,reactions_rx,url_msgs)
-            VALUES(?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(guild_id,user_id,day) DO UPDATE SET
-            messages     = messages + excluded.messages,
-            words        = words    + excluded.words,
-            replies      = replies  + excluded.replies,
-            mentions     = mentions + excluded.mentions,
-            gifs         = gifs     + excluded.gifs,
-            reactions_rx = reactions_rx + excluded.reactions_rx,
-            url_msgs     = url_msgs + excluded.url_msgs
-            """,
-            (
-                guild_id,
-                author_id,
-                day,
-                1,
-                words,
-                is_reply,
-                mentions,
-                gifs,
-                rx_total,
-                url_msgs,
-            ),
-        )
-    except Exception as e:
-        print(f"[activity_metrics] daily insert failed: {e}")
-        raise
-
-        # 2) hourly guild message counter
-        cur.execute(
-            """
-            INSERT INTO message_metrics_hourly(guild_id, hour, messages)
-            VALUES(?,?,1)
-            ON CONFLICT(guild_id, hour) DO UPDATE SET messages = messages + 1
-            """,
-            (guild_id, hour_key),
-        )
-
-        # 3) reaction histograms per day (count & diversity, bucketed 0..9)
-        def _b9(v: int) -> int:
-            return v if v < 9 else 9
-
-        if rx_total:
+        # 1) per-user daily metrics
+        try:
             cur.execute(
                 """
-                INSERT INTO reaction_hist_daily(guild_id,day,kind,bucket,n)
-                VALUES(?,?,?,?,1)
-                ON CONFLICT(guild_id,day,kind,bucket) DO UPDATE SET n = n + 1
-                """,
-                (guild_id, day, "count", _b9(rx_total)),
-            )
-        if rx_div:
-            cur.execute(
-                """
-                INSERT INTO reaction_hist_daily(guild_id,day,kind,bucket,n)
-                VALUES(?,?,?,?,1)
-                ON CONFLICT(guild_id,day,kind,bucket) DO UPDATE SET n = n + 1
-                """,
-                (guild_id, day, "diversity", _b9(rx_div)),
-            )
-
-        # 4) response latency histogram (per channel)
-        cur.execute(
-            "SELECT last_ts_utc FROM channel_last_msg WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id),
-        )
-        prev = cur.fetchone()
-        if prev and prev["last_ts_utc"]:
-            try:
-                prev_dt = dt.datetime.fromisoformat(
-                    str(prev["last_ts_utc"]).replace("Z", "+00:00")
-                )
-                gap_ms = (created_at - prev_dt).total_seconds() * 1000.0
-                if 0 <= gap_ms <= 24 * 60 * 60 * 1000:
-                    b = _b = _log2_bucket_millis(gap_ms)
-                    cur.execute(
-                        """
-                        INSERT INTO latency_hist_daily(guild_id,channel_id,day,bucket,n)
-                        VALUES(?,?,?,?,1)
-                        ON CONFLICT(guild_id,channel_id,day,bucket) DO UPDATE SET n = n + 1
-                        """,
-                        (guild_id, channel_id, day, b),
-                    )
-            except Exception:
-                pass
-
-        cur.execute(
-            """
-            INSERT INTO channel_last_msg(guild_id,channel_id,last_ts_utc,last_msg_id,last_author)
-            VALUES(?,?,?,?,?)
-            ON CONFLICT(guild_id,channel_id) DO UPDATE SET
-                last_ts_utc = excluded.last_ts_utc,
-                last_msg_id = excluded.last_msg_id,
-                last_author = excluded.last_author
-            """,
-            (guild_id, channel_id, created_at.isoformat(), int(message.id), author_id),
-        )
-
-        # 5) per-user/day lexical diversity store
-        if words:
-            tokens = set(m.group(0).lower() for m in WORD_RE.finditer(content))
-            cur.executemany(
-                "INSERT OR IGNORE INTO user_token_daily(guild_id,user_id,day,token) VALUES(?,?,?,?)",
-                [(guild_id, author_id, day, t) for t in tokens],
-            )
-
-        # 6) optional sentiment (VADER lexicon must be available)
-        sia = _get_sia()
-        if sia and content:
-            s = sia.polarity_scores(content)
-            cur.execute(
-                """
-                INSERT INTO sentiment_daily(guild_id,user_id,day,n,sum_compound,sum_pos,sum_neg,sum_neu)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO message_metrics_daily
+                  (guild_id,user_id,day,messages,words,replies,mentions,gifs,reactions_rx,url_msgs)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id,user_id,day) DO UPDATE SET
-                  n = n + excluded.n,
-                  sum_compound = sum_compound + excluded.sum_compound,
-                  sum_pos      = sum_pos + excluded.sum_pos,
-                  sum_neg      = sum_neg + excluded.sum_neg,
-                  sum_neu      = sum_neu + excluded.sum_neu
+                  messages     = messages + excluded.messages,
+                  words        = words    + excluded.words,
+                  replies      = replies  + excluded.replies,
+                  mentions     = mentions + excluded.mentions,
+                  gifs         = gifs     + excluded.gifs,
+                  reactions_rx = reactions_rx + excluded.reactions_rx,
+                  url_msgs     = url_msgs + excluded.url_msgs
                 """,
                 (
                     guild_id,
                     author_id,
                     day,
                     1,
-                    float(s["compound"]),
-                    float(s["pos"]),
-                    float(s["neg"]),
-                    float(s["neu"]),
+                    words,
+                    is_reply,
+                    mentions,
+                    gifs,
+                    rx_total,
+                    url_msgs,
                 ),
             )
+        except Exception as e:
+            print(
+                f"[activity_metrics] daily insert failed (guild={guild_id}, user={author_id}, day={day}): {e}"
+            )
+            raise
+
+        # 1b) per-channel daily metrics (for quick channel totals)
+        try:
+            cur.execute(
+                """
+                INSERT INTO message_metrics_channel_daily
+                  (guild_id,channel_id,day,messages,words)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(guild_id,channel_id,day) DO UPDATE SET
+                  messages = messages + excluded.messages,
+                  words    = words    + excluded.words
+                """,
+                (guild_id, channel_id, day, 1, words),
+            )
+        except Exception as e:
+            print(
+                f"[activity_metrics] channel-daily insert failed (guild={guild_id}, channel={channel_id}, day={day}): {e}"
+            )
+            raise
+
+        # 2) hourly guild message counter
+        try:
+            cur.execute(
+                """
+                INSERT INTO message_metrics_hourly(guild_id, hour, messages)
+                VALUES(?,?,1)
+                ON CONFLICT(guild_id, hour) DO UPDATE SET messages = messages + 1
+                """,
+                (guild_id, hour_key),
+            )
+        except Exception as e:
+            print(
+                f"[activity_metrics] hourly upsert failed (guild={guild_id}, hour={hour_key}): {e}"
+            )
+            raise
+
+        # 3) reaction histograms per day (count & diversity, bucketed 0..9)
+        def _b9(v: int) -> int:
+            return v if v < 9 else 9
+
+        try:
+            if rx_total:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_hist_daily(guild_id,day,kind,bucket,n)
+                    VALUES(?,?,?,?,1)
+                    ON CONFLICT(guild_id,day,kind,bucket) DO UPDATE SET n = n + 1
+                    """,
+                    (guild_id, day, "count", _b9(rx_total)),
+                )
+            if rx_div:
+                cur.execute(
+                    """
+                    INSERT INTO reaction_hist_daily(guild_id,day,kind,bucket,n)
+                    VALUES(?,?,?,?,1)
+                    ON CONFLICT(guild_id,day,kind,bucket) DO UPDATE SET n = n + 1
+                    """,
+                    (guild_id, day, "diversity", _b9(rx_div)),
+                )
+        except Exception as e:
+            print(
+                f"[activity_metrics] reaction histogram upsert failed (guild={guild_id}, day={day}): {e}"
+            )
+            raise
+
+        # 4) response latency histogram (per channel)
+        try:
+            cur.execute(
+                "SELECT last_ts_utc FROM channel_last_msg WHERE guild_id=? AND channel_id=?",
+                (guild_id, channel_id),
+            )
+            prev = cur.fetchone()
+            if prev and prev["last_ts_utc"]:
+                try:
+                    prev_dt = dt.datetime.fromisoformat(
+                        str(prev["last_ts_utc"]).replace("Z", "+00:00")
+                    )
+                    gap_ms = (created_at - prev_dt).total_seconds() * 1000.0
+                    if 0 <= gap_ms <= 24 * 60 * 60 * 1000:
+                        b = _log2_bucket_millis(gap_ms)
+                        cur.execute(
+                            """
+                            INSERT INTO latency_hist_daily(guild_id,channel_id,day,bucket,n)
+                            VALUES(?,?,?,?,1)
+                            ON CONFLICT(guild_id,channel_id,day,bucket) DO UPDATE SET n = n + 1
+                            """,
+                            (guild_id, channel_id, day, b),
+                        )
+                except Exception:
+                    # ignore parse/compute errors for latency
+                    pass
+
+            # update last message marker
+            cur.execute(
+                """
+                INSERT INTO channel_last_msg(guild_id,channel_id,last_ts_utc,last_msg_id,last_author)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(guild_id,channel_id) DO UPDATE SET
+                    last_ts_utc = excluded.last_ts_utc,
+                    last_msg_id = excluded.last_msg_id,
+                    last_author = excluded.last_author
+                """,
+                (
+                    guild_id,
+                    channel_id,
+                    created_at.isoformat(),
+                    int(message.id),
+                    author_id,
+                ),
+            )
+        except Exception as e:
+            print(
+                f"[activity_metrics] latency/channel_last upsert failed (guild={guild_id}, channel={channel_id}): {e}"
+            )
+            raise
+
+        # 5) per-user/day lexical diversity store
+        try:
+            if words:
+                tokens = set(m.group(0).lower() for m in WORD_RE.finditer(content))
+                cur.executemany(
+                    "INSERT OR IGNORE INTO user_token_daily(guild_id,user_id,day,token) VALUES(?,?,?,?)",
+                    [(guild_id, author_id, day, t) for t in tokens],
+                )
+        except Exception as e:
+            print(
+                f"[activity_metrics] token insert failed (guild={guild_id}, user={author_id}, day={day}): {e}"
+            )
+            raise
+
+        # 6) optional sentiment (VADER)
+        try:
+            sia = _get_sia()
+            if sia and content:
+                s = sia.polarity_scores(content)
+                cur.execute(
+                    """
+                    INSERT INTO sentiment_daily(guild_id,user_id,day,n,sum_compound,sum_pos,sum_neg,sum_neu)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(guild_id,user_id,day) DO UPDATE SET
+                      n = n + excluded.n,
+                      sum_compound = sum_compound + excluded.sum_compound,
+                      sum_pos      = sum_pos + excluded.sum_pos,
+                      sum_neg      = sum_neg + excluded.sum_neg,
+                      sum_neu      = sum_neu + excluded.sum_neu
+                    """,
+                    (
+                        guild_id,
+                        author_id,
+                        day,
+                        1,
+                        float(s.get("compound", 0.0)),
+                        float(s.get("pos", 0.0)),
+                        float(s.get("neg", 0.0)),
+                        float(s.get("neu", 0.0)),
+                    ),
+                )
+        except Exception as e:
+            print(
+                f"[activity_metrics] sentiment upsert failed (guild={guild_id}, user={author_id}, day={day}): {e}"
+            )
+            raise
 
         con.commit()
+
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 # ────────────────────────────────
@@ -679,6 +760,43 @@ def get_burst_std_24h(
         else:
             out[h] = float(statistics.pstdev(dq))
     return out
+
+
+def get_totals(guild_id: int, start_day: str, end_day: str) -> dict:
+    con = connect()
+    try:
+        cur = con.cursor()
+        row = cur.execute(
+            """
+            SELECT COALESCE(SUM(messages),0) AS m, COALESCE(SUM(words),0) AS w
+            FROM message_metrics_daily
+            WHERE guild_id=? AND day BETWEEN ? AND ?
+            """,
+            (guild_id, start_day, end_day),
+        ).fetchone()
+        return {"messages": int(row["m"] or 0), "words": int(row["w"] or 0)}
+    finally:
+        con.close()
+
+
+def get_totals_by_channel(
+    guild_id: int, start_day: str, end_day: str
+) -> dict[int, int]:
+    con = connect()
+    try:
+        cur = con.cursor()
+        rows = cur.execute(
+            """
+            SELECT channel_id, COALESCE(SUM(messages),0) AS m
+            FROM message_metrics_channel_daily
+            WHERE guild_id=? AND day BETWEEN ? AND ?
+            GROUP BY channel_id
+            """,
+            (guild_id, start_day, end_day),
+        ).fetchall()
+        return {int(r["channel_id"]): int(r["m"] or 0) for r in rows}
+    finally:
+        con.close()
 
 
 def get_latency_stats(guild_id: int, start_day: str, end_day: str) -> Dict[str, Any]:
