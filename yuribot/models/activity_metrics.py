@@ -184,6 +184,15 @@ CREATE TABLE IF NOT EXISTS sentiment_daily(
 );
 CREATE INDEX IF NOT EXISTS idx_sent_gd ON sentiment_daily(guild_id, day);
 """
+DDL_MESSAGE_INDEX = """
+CREATE TABLE IF NOT EXISTS message_index(
+  message_id INTEGER PRIMARY KEY,
+  guild_id   INTEGER NOT NULL,
+  channel_id INTEGER NOT NULL,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_msgidx_guild ON message_index(guild_id);
+"""
 
 
 def ensure_tables() -> None:
@@ -201,6 +210,7 @@ def ensure_tables() -> None:
             DDL_THREAD_INDEX,
             DDL_MESSAGE_THREAD,
             DDL_SENTIMENT_DAILY,
+            DDL_MESSAGE_INDEX,
         ):
             cur.executescript(ddl)
 
@@ -340,7 +350,10 @@ def _reaction_count_and_diversity(message) -> Tuple[int, int]:
 def upsert_from_message(message, *, include_bots: bool = False) -> None:
     """
     Compute & persist live metrics from a single discord.Message.
-    Safe to call on every on_message event and during history backfill.
+    Idempotent via message_index (won't double-count on rebuilds).
+    Relies on existing helpers/regex in this module:
+      - _hour_key, WORD_RE, MENTION_RE, URL_RE, _count_gifs, _reaction_count_and_diversity,
+        _log2_bucket_millis, _get_sia
     """
     guild = getattr(message, "guild", None)
     if guild is None:
@@ -364,6 +377,7 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
     hour_key = _hour_key(created_at)
 
     content = getattr(message, "content", "") or ""
+    # These regex/helpers are expected to be defined elsewhere in your file:
     words = sum(1 for _ in WORD_RE.finditer(content))
     mentions = len(MENTION_RE.findall(content)) + len(
         getattr(message, "mentions", []) or []
@@ -382,6 +396,21 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
     con = connect()
     try:
         cur = con.cursor()
+
+        # 0) Deduplicate: bail out if we've processed this message_id before
+        try:
+            cur.execute(
+                "INSERT OR IGNORE INTO message_index(message_id, guild_id, channel_id, created_at) VALUES (?,?,?,?)",
+                (int(message.id), guild_id, channel_id, created_at.isoformat()),
+            )
+            if cur.rowcount == 0:
+                con.commit()
+                return  # already processed
+        except Exception as e:
+            print(
+                f"[activity_metrics] message_index insert failed (msg={int(message.id)}): {e}"
+            )
+            raise
 
         # 1) per-user daily metrics
         try:
@@ -482,7 +511,7 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
             )
             raise
 
-        # 4) response latency histogram (per channel)
+        # 4) response latency histogram (per channel) + last marker
         try:
             cur.execute(
                 "SELECT last_ts_utc FROM channel_last_msg WHERE guild_id=? AND channel_id=?",
@@ -506,18 +535,17 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
                             (guild_id, channel_id, day, b),
                         )
                 except Exception:
-                    # ignore parse/compute errors for latency
-                    pass
+                    pass  # ignore latency parse errors
 
-            # update last message marker
+            # Update last message marker
             cur.execute(
                 """
                 INSERT INTO channel_last_msg(guild_id,channel_id,last_ts_utc,last_msg_id,last_author)
                 VALUES(?,?,?,?,?)
                 ON CONFLICT(guild_id,channel_id) DO UPDATE SET
-                    last_ts_utc = excluded.last_ts_utc,
-                    last_msg_id = excluded.last_msg_id,
-                    last_author = excluded.last_author
+                  last_ts_utc = excluded.last_ts_utc,
+                  last_msg_id = excluded.last_msg_id,
+                  last_author = excluded.last_author
                 """,
                 (
                     guild_id,
@@ -581,7 +609,6 @@ def upsert_from_message(message, *, include_bots: bool = False) -> None:
             raise
 
         con.commit()
-
     finally:
         try:
             con.close()
@@ -765,8 +792,7 @@ def get_burst_std_24h(
 def get_totals(guild_id: int, start_day: str, end_day: str) -> dict:
     con = connect()
     try:
-        cur = con.cursor()
-        row = cur.execute(
+        row = con.execute(
             """
             SELECT COALESCE(SUM(messages),0) AS m, COALESCE(SUM(words),0) AS w
             FROM message_metrics_daily
@@ -784,8 +810,7 @@ def get_totals_by_channel(
 ) -> dict[int, int]:
     con = connect()
     try:
-        cur = con.cursor()
-        rows = cur.execute(
+        rows = con.execute(
             """
             SELECT channel_id, COALESCE(SUM(messages),0) AS m
             FROM message_metrics_channel_daily

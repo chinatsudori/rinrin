@@ -15,7 +15,7 @@ OPEN_DATE = dt.date(2025, 9, 16)
 
 
 class ActivityMetricsCog(commands.Cog):
-    """Live metrics updater & on-demand rebuild from history with progress + error logging."""
+    """Live metrics updater, purge, stats, and rebuild-from-history with progress + error logging."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -39,7 +39,7 @@ class ActivityMetricsCog(commands.Cog):
             print(("[ERR] " if error else "") + msg)
 
     # ---------------------------
-    # /activity_rebuild (non-ephemeral, progress) — unchanged behavior
+    # /activity_rebuild (non-ephemeral, progress) — uses normal message (no webhook expiry)
     # ---------------------------
     @app_commands.command(
         name="activity_rebuild",
@@ -91,11 +91,10 @@ class ActivityMetricsCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.Forbidden:
-            # No send permission here; we’ll fall back to editing the original interaction response.
-            progress_msg = None
+            progress_msg = None  # fall back to editing the interaction response
 
         stop = False
-        used_interaction_edit = False  # track if we’re editing the interaction response
+        used_interaction_edit = False
 
         async def _render_text() -> str:
             phase = progress["phase"]
@@ -138,20 +137,14 @@ class ActivityMetricsCog(commands.Cog):
                         content=text, allowed_mentions=discord.AllowedMentions.none()
                     )
                 else:
-                    # Fallback: edit the original interaction response (webhook). This will eventually expire.
                     nonlocal used_interaction_edit
                     used_interaction_edit = True
                     await inter.edit_original_response(content=text)
             except discord.HTTPException as e:
                 # 50027 = Invalid Webhook Token (interaction token expired)
-                if getattr(e, "code", None) == 50027 or "Invalid Webhook Token" in str(
-                    e
-                ):
-                    self._log(
-                        "[activity_rebuild] progress update switched off: webhook token expired"
-                    )
-                    raise  # break loop; we can’t edit the webhook anymore
-                # Other edit errors: log and keep going (don’t spam)
+                if getattr(e, "code", None) == 50027 or "Invalid Webhook Token" in str(e):
+                    self._log("[activity_rebuild] progress update switched off: webhook token expired")
+                    raise
                 self._log(f"[activity_rebuild] progress update failed: {e}", error=True)
 
         async def progress_loop():
@@ -159,7 +152,6 @@ class ActivityMetricsCog(commands.Cog):
                 try:
                     await render_progress_once()
                 except Exception:
-                    # Stop if editing is no longer possible (e.g., webhook expired and no normal msg)
                     if progress_msg is None:
                         break
                 await asyncio.sleep(1.5)
@@ -193,7 +185,6 @@ class ActivityMetricsCog(commands.Cog):
             progress["msgs_this_channel"] = 0
 
             async for m in ch.history(limit=None, oldest_first=True, after=since):
-
                 def _work():
                     try:
                         am.upsert_from_message(m, include_bots=bool(include_bots))
@@ -229,11 +220,8 @@ class ActivityMetricsCog(commands.Cog):
                 await _scan_thread(th)
 
         async def _scan_thread(th: discord.Thread):
-            progress["channel_name"] = (
-                f"{th.parent.name} → {th.name}" if th.parent else th.name
-            )
+            progress["channel_name"] = f"{th.parent.name} → {th.name}" if th.parent else th.name
             async for m in th.history(limit=None, oldest_first=True, after=since):
-
                 def _work():
                     try:
                         am.upsert_from_message(m, include_bots=bool(include_bots))
@@ -257,9 +245,7 @@ class ActivityMetricsCog(commands.Cog):
                 progress["channel_index"] = idx
                 if isinstance(ch, discord.StageChannel):
                     continue
-                if isinstance(ch, discord.TextChannel) or isinstance(
-                    ch, discord.NewsChannel
-                ):
+                if isinstance(ch, discord.TextChannel) or isinstance(ch, discord.NewsChannel):
                     await _scan_textlike(ch)
                 elif isinstance(ch, discord.ForumChannel):
                     await _scan_forum(ch)
@@ -283,7 +269,6 @@ class ActivityMetricsCog(commands.Cog):
                         content=text, allowed_mentions=discord.AllowedMentions.none()
                     )
                 else:
-                    # best-effort finalize; may no-op if webhook already expired
                     if not used_interaction_edit:
                         await inter.edit_original_response(content=text)
             except Exception:
@@ -333,16 +318,12 @@ class ActivityMetricsCog(commands.Cog):
         lines.append(f"- Messages: {totals['messages']:,}")
         lines.append(f"- Words: {totals['words']:,}")
         lines.append("")
-
         lines.append("**Top channels (by messages)**")
         if not by_channel:
-            lines.append(
-                "_No per-channel data yet. Run `/activity_rebuild` to backfill._"
-            )
+            lines.append("_No per-channel data yet. Run `/activity_rebuild` to backfill._")
         else:
             top = sorted(by_channel.items(), key=lambda kv: kv[1], reverse=True)[:15]
             for cid, count in top:
-                # Render as channel mention if available; otherwise raw ID
                 mention = f"<#{cid}>"
                 lines.append(f"- {mention}: {count:,}")
 
@@ -351,6 +332,156 @@ class ActivityMetricsCog(commands.Cog):
             content=content,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    # ---------------------------
+    # /activity_purge (drop rows; scoped or full; guarded)
+    # ---------------------------
+    @app_commands.command(
+        name="activity_purge",
+        description="PURGE captured metrics for this server. Use with care.",
+    )
+    @app_commands.describe(
+        days="If set, purge only the last N days; omit to purge ALL data.",
+        include_index="Also clear dedupe index (message_index). Default: true.",
+        really="Safety flag. Must be true to actually purge.",
+        post="Post the result publicly (default: false).",
+    )
+    async def activity_purge(
+        self,
+        inter: discord.Interaction,
+        days: Optional[int] = None,
+        include_index: Optional[bool] = True,
+        really: Optional[bool] = False,
+        post: Optional[bool] = False,
+    ) -> None:
+        if inter.guild is None:
+            await inter.response.send_message("Run this in a server.", ephemeral=True)
+            return
+        if not inter.user.guild_permissions.manage_guild:
+            await inter.response.send_message("You need Manage Server.", ephemeral=True)
+            return
+
+        # Confirm intent
+        scope_str = f"last {days} day(s)" if days and days > 0 else "ALL data"
+        if not really:
+            await inter.response.send_message(
+                f"⚠️ This will purge **{scope_str}** of activity metrics for this server."
+                f"\nRe-run with `really=true` to confirm."
+                f"\nUse `include_index=true` to also clear the dedupe table.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer according to 'post'
+        if post:
+            await inter.response.defer()
+        else:
+            await inter.response.defer(ephemeral=True)
+
+        gid = inter.guild.id
+        now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+
+        # Compute date/hour bounds if days is provided
+        start_day: Optional[str] = None
+        end_day: Optional[str] = None
+        start_hour: Optional[str] = None
+        end_hour: Optional[str] = None
+
+        if days and days > 0:
+            start_day = (now.date() - dt.timedelta(days=days)).isoformat()
+            end_day = now.date().isoformat()
+            # hourly key uses your model's hour key; mirror that here
+            # If your hour key is 'YYYY-MM-DD HH:00:00Z' (for example), build a wide range
+            # We’ll just delete hours >= start_day 00:00:00 UTC
+            start_dt = dt.datetime.combine(now.date() - dt.timedelta(days=days), dt.time(0, 0, 0))
+            end_dt = now
+            start_hour = start_dt.replace(microsecond=0).isoformat(timespec="seconds")
+            end_hour = end_dt.replace(microsecond=0).isoformat(timespec="seconds")
+
+        async def _purge():
+            # Delete rows from all aggregates for this guild; optionally scoped by day/hour
+            con = am.connect()
+            try:
+                cur = con.cursor()
+                total_deleted = 0
+
+                def _exec(sql: str, params: tuple) -> int:
+                    cur.execute(sql, params)
+                    return cur.rowcount if hasattr(cur, "rowcount") else 0
+
+                # Daily tables
+                daily_tables = [
+                    "message_metrics_daily",
+                    "message_metrics_channel_daily",
+                    "reaction_hist_daily",
+                    "latency_hist_daily",
+                    "user_token_daily",
+                    "sentiment_daily",
+                ]
+                if start_day and end_day:
+                    for t in daily_tables:
+                        total_deleted += _exec(
+                            f"DELETE FROM {t} WHERE guild_id=? AND day BETWEEN ? AND ?",
+                            (gid, start_day, end_day),
+                        )
+                else:
+                    for t in daily_tables:
+                        total_deleted += _exec(
+                            f"DELETE FROM {t} WHERE guild_id=?",
+                            (gid,),
+                        )
+
+                # Hourly
+                if start_hour and end_hour:
+                    total_deleted += _exec(
+                        "DELETE FROM message_metrics_hourly WHERE guild_id=? AND hour BETWEEN ? AND ?",
+                        (gid, start_hour, end_hour),
+                    )
+                else:
+                    total_deleted += _exec(
+                        "DELETE FROM message_metrics_hourly WHERE guild_id=?",
+                        (gid,),
+                    )
+
+                # Channel last message markers — simplest is to clear for guild
+                total_deleted += _exec(
+                    "DELETE FROM channel_last_msg WHERE guild_id=?",
+                    (gid,),
+                )
+
+                # Optional: dedupe index (so rebuild can reprocess)
+                if include_index:
+                    total_deleted += _exec(
+                        "DELETE FROM message_index WHERE guild_id=?",
+                        (gid,),
+                    )
+
+                con.commit()
+                return total_deleted
+            finally:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+        try:
+            deleted = await asyncio.to_thread(_purge)
+            msg = (
+                f"🧹 Purge complete.\n"
+                f"• Scope: **{scope_str}**\n"
+                f"• Guild: `{gid}`\n"
+                f"• Rows deleted (approx): **{deleted}**\n"
+                f"{'• Dedupe index cleared.' if include_index else ''}"
+            )
+            await inter.edit_original_response(
+                content=msg, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except Exception as e:
+            self._log(f"[activity_purge] error: {e}", error=True)
+            await inter.edit_original_response(
+                content=f"❌ Purge failed: {e}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
 
 async def setup(bot: commands.Bot):

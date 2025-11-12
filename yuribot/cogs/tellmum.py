@@ -18,26 +18,37 @@ BASE_KEYWORDS = (
     "summer-chan",
     "oneesama",
     "nee-chan",
+    "rin",
+    "rinrin",
+    "nat",
+    "queen",
 )
 
 # For which tokens should a hyphen be treated as OPTIONAL in matching?
-# onee-sama makes sense; I also allow it for nee-chan and summer-chan (practical).
 HYPHEN_OPTIONAL = {
-    "oneesama": True,  # matches oneesama / onee-sama
-    "nee-chan": True,  # matches neechan / nee-chan
-    "summer-chan": True,  # matches summerchan / summer-chan
+    "oneesama": True,  # oneesama / onee-sama
+    "nee-chan": True,  # neechan / nee-chan
+    "summer-chan": True,  # summerchan / summer-chan
     "thea": False,
     "mum": False,
+    "rin": False,
+    "rinrin": False,
+    "nat": False,
+    "queen": False,
 }
 
 # Fuzzy thresholds (edit distance) per canonical token (on normalized forms).
-# Keep these tight to avoid noise. Distance is absolute, not ratio.
+# Keep these tight to avoid noise.
 FUZZY_MAX_DIST = {
-    "mum": 1,  # len=3 → allow one typo: "mim", "mum!"
-    "thea": 1,  # len=4 → allow one typo
-    "oneesama": 2,  # len=8 → allow 2 edits
-    "nee-chan": 2,  # len=8 (w/o hyphen) → allow 2 edits
-    "summer-chan": 2,  # longer → allow 2
+    "mum": 1,
+    "thea": 1,
+    "oneesama": 2,
+    "nee-chan": 2,
+    "summer-chan": 2,
+    "rin": 1,
+    "rinrin": 1,
+    "nat": 1,
+    "queen": 1,
 }
 
 # ============================================================
@@ -47,10 +58,9 @@ FUZZY_MAX_DIST = {
 
 def _elongatable_pattern(token: str, hyphen_optional: bool) -> str:
     """
-    Build a regex that matches the token with *stretched letters*.
-    Letters/digits become that char repeated 1+ times.
+    Build a regex that matches the token with stretched letters (char+).
     Hyphens can be optional if configured.
-    The whole thing is later wrapped with non-word boundaries.
+    Then we allow an optional plural/possessive suffix: 's | s' | s
     """
     parts = []
     for ch in token:
@@ -60,7 +70,10 @@ def _elongatable_pattern(token: str, hyphen_optional: bool) -> str:
             parts.append("-?")  # optional hyphen
         else:
             parts.append(re.escape(ch))  # literal punctuation
-    return "".join(parts)
+    core = "".join(parts)
+    # Optional plural/possessive suffix
+    sfx = r"(?:'s|s'|s)?"
+    return core + sfx
 
 
 # Build elongation regex alternation for all keywords.
@@ -71,30 +84,44 @@ ELONGATED_ALTS = "|".join(
 # Whole-word (not inside other words) elongated pattern, case-insensitive.
 ELONGATED_RE = re.compile(rf"(?<!\w)(?:{ELONGATED_ALTS})(?!\w)", re.IGNORECASE)
 
-# Tokenizer for fuzzy fallback: grab word-like pieces including optional hyphens inside.
-TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-]*")
+# Tokenizer for fuzzy fallback:
+# include internal hyphens and apostrophes so we see "onee-sama", "thea's", "mums'"
+TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-']*")
 
 
 def _normalize_for_fuzzy(s: str) -> str:
     """
     Normalize a candidate string for fuzzy compare:
-      - lowercase
-      - strip hyphens
+      - lowercase, remove hyphens/apostrophes
       - collapse repeated letters: 'theaaa' -> 'thea', 'muuum' -> 'mum'
     """
     s = s.lower()
-    s = s.replace("-", "")
-    # collapse runs of the same letter: e.g., 'eeeee' -> 'e'
+    s = s.replace("-", "").replace("'", "")
     s = re.sub(r"(.)\1+", r"\1", s)
     return s
 
 
+def _strip_plural_possessive(norm: str) -> str:
+    """
+    Strip a trailing plural/possessive: 's, s', or s.
+    Operates on *normalized* strings (no hyphens/apostrophes).
+    """
+    if not norm:
+        return norm
+    # Already removed apostrophes in normalization; plural/possessive reduces to trailing 's'
+    if norm.endswith("s"):
+        # Avoid chopping single-letter tokens or 'ss' accidental
+        base = norm[:-1]
+        if len(base) >= 2:
+            return base
+    return norm
+
+
 def _canon_forms() -> dict[str, str]:
-    """Canonical normalized forms of watch terms (w/o hyphen)."""
+    """Canonical normalized forms of watch terms (no hyphens/apostrophes, no elongation)."""
     out = {}
     for t in BASE_KEYWORDS:
-        cn = _normalize_for_fuzzy(t)
-        out[t] = cn
+        out[t] = _normalize_for_fuzzy(t)
     return out
 
 
@@ -102,14 +129,13 @@ CANON = _canon_forms()
 
 
 def _levenshtein(a: str, b: str) -> int:
-    """Classic Levenshtein distance (iterative DP, O(len(a)*len(b)))."""
+    """Classic Levenshtein distance (iterative DP)."""
     if a == b:
         return 0
     if not a:
         return len(b)
     if not b:
         return len(a)
-    # Ensure 'a' is the shorter for less memory.
     if len(a) > len(b):
         a, b = b, a
     prev = list(range(len(a) + 1))
@@ -127,35 +153,41 @@ def _levenshtein(a: str, b: str) -> int:
 def matches_keyword(content: str) -> bool:
     """
     True if:
-      1) elongated whole-word regex hits, or
-      2) fuzzy distance <= per-term threshold against any token (after normalization).
+      1) elongated whole-word regex hits (with optional plural/possessive), or
+      2) fuzzy distance <= per-term threshold against any token (after normalization),
+         also trying a version with plural/possessive stripped.
     """
     if not content:
         return False
 
-    # Quick path: elongated regex (fast)
+    # Fast path: elongated regex
     if ELONGATED_RE.search(content):
         return True
 
-    # Fuzzy fallback: check each word-like token
-    # Example: "onee---sama" weird punctuation won't match elongated, but
-    # normalization collapses it and Levenshtein will catch it if close.
+    # Fuzzy path
     tokens = TOKEN_RE.findall(content)
     if not tokens:
         return False
 
-    # Precompute canonical thresholds
     items = list(FUZZY_MAX_DIST.items())  # [(token, maxdist), ...]
     for raw in tokens:
         norm = _normalize_for_fuzzy(raw)
         if not norm:
             continue
+        norm_stripped = _strip_plural_possessive(norm)
+
         for base, maxd in items:
             base_norm = CANON[base]
-            # If hyphen optional for that base, base_norm already has no hyphens.
-            d = _levenshtein(norm, base_norm)
-            if d <= maxd:
+
+            d0 = _levenshtein(norm, base_norm)
+            if d0 <= maxd:
                 return True
+
+            # Try with plural/possessive stripped (handles thea's/theas/queens/etc.)
+            if norm_stripped != norm:
+                d1 = _levenshtein(norm_stripped, base_norm)
+                if d1 <= maxd:
+                    return True
     return False
 
 
@@ -165,7 +197,7 @@ def matches_keyword(content: str) -> bool:
 
 
 class OwnerNotifyCog(commands.Cog):
-    """DMs the bot owner when target names are mentioned (elongations+typos; safe boundaries)."""
+    """DMs the bot owner when target names are mentioned (elongations+typos+plural/possessive)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -192,7 +224,6 @@ class OwnerNotifyCog(commands.Cog):
         if message.author.bot or message.guild is None:
             return
         if not self.owner:
-            # Owner may not be fetched yet; silently ignore
             return
 
         content = message.content or ""
