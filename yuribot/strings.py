@@ -408,6 +408,13 @@ _STRINGS.update(
             "introduce yourself, and check the channels unlocked for you."
         ),
         "rolewelcome.footer": "{guild}",
+        # ---------------- Archive ----------------
+        "archive.backfill.already_running": "An archive task is already running for this server.",
+        "archive.backfill.starting": "Starting archive task. This will take a long time. I will send updates as I go.",
+        "archive.backfill.found_channels": "Found {count} text-based channels and threads to scan.",
+        "archive.backfill.progress_update": "Progress: Archived {count} new messages from {channel}...",
+        "archive.backfill.complete": "Archive task complete. Scanned {channels} channels and archived {messages} new messages.",
+        "archive.backfill.error": "An error occurred during the archive: {err}",
         # Common
         "common.guild_only": "This only works in a server.",
         # Hints / field help

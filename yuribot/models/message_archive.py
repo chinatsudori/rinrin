@@ -80,7 +80,7 @@ def iter_guild_messages(
     where_clause = " AND ".join(conditions)
     sql = (
         "SELECT message_id, guild_id, channel_id, author_id, message_type, created_at, content, "
-        "edited_at, attachments, embeds, reactions, reply_to_id "
+        "edited_at, attachments_json, embeds_json, reactions, reply_to_id "
         f"FROM message_archive WHERE {where_clause} "
         "ORDER BY created_at ASC, message_id ASC"
     )
@@ -109,8 +109,10 @@ class ArchivedMessage:
     created_at: str
     content: str | None
     edited_at: str | None
-    attachments: int
-    embeds: int
+
+    # MODIFIED:
+    attachments_json: str | None
+    embeds_json: str | None
 
     reactions: str | None
     reply_to_id: int | None
@@ -126,8 +128,8 @@ class ArchivedMessage:
         str,
         str | None,
         str | None,
-        int,
-        int,
+        str | None,  # attachments_json
+        str | None,  # embeds_json
         str | None,
         int | None,
     ]:
@@ -140,8 +142,9 @@ class ArchivedMessage:
             self.created_at,
             self.content,
             self.edited_at,
-            self.attachments,
-            self.embeds,
+            # MODIFIED:
+            self.attachments_json,
+            self.embeds_json,
             self.reactions,
             self.reply_to_id,
         )
@@ -187,6 +190,9 @@ def _serialize_reactions(message: "discord.Message") -> str | None:
             }
         )
 
+    # NOTE: Fetching *who* reacted requires an async call (`reaction.users()`)
+    # per reaction, which is too slow for a bulk archive and will be rate limited.
+    # We store counts as a reasonable compromise.
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -203,10 +209,7 @@ def _resolve_reply_to_id(message: "discord.Message") -> int | None:
 
 
 def from_discord_message(message: "discord.Message") -> ArchivedMessage:
-    # Local import to avoid importing discord.py for callers that only need DB helpers.
-    from discord import Message  # type: ignore
-
-    if not isinstance(message, Message):
+    if not isinstance(message, discord.Message):
         raise TypeError("message must be a discord.Message")
 
     guild = message.guild
@@ -219,6 +222,15 @@ def from_discord_message(message: "discord.Message") -> ArchivedMessage:
     if author is None or not hasattr(author, "id"):
         raise ValueError("Message author missing id")
 
+    # MODIFIED: Serialize full attachment/embed data
+    attachments_json = None
+    if message.attachments:
+        attachments_json = json.dumps([a.to_dict() for a in message.attachments])
+
+    embeds_json = None
+    if message.embeds:
+        embeds_json = json.dumps([e.to_dict() for e in message.embeds])
+
     return ArchivedMessage(
         message_id=message.id,
         guild_id=guild.id,
@@ -230,8 +242,9 @@ def from_discord_message(message: "discord.Message") -> ArchivedMessage:
         created_at=_ensure_utc_iso(message.created_at) or "",
         content=message.content or None,
         edited_at=_ensure_utc_iso(message.edited_at),
-        attachments=len(getattr(message, "attachments", []) or []),
-        embeds=len(getattr(message, "embeds", []) or []),
+        # MODIFIED:
+        attachments_json=attachments_json,
+        embeds_json=embeds_json,
         reactions=_serialize_reactions(message),
         reply_to_id=_resolve_reply_to_id(message),
     )
@@ -245,7 +258,6 @@ def upsert_many(
     if not rows:
         return (0, []) if return_new else 0
 
-    # Support both sequences and general iterables.
     iterable: Iterable[ArchivedMessage]
     if isinstance(rows, Sequence):
         if len(rows) == 0:
@@ -270,12 +282,13 @@ def upsert_many(
                 cur.execute(sql, ids)
                 existing_ids = {int(mid) for (mid,) in cur.fetchall()}
 
+        # MODIFIED: Updated column list
         cur.executemany(
             """
             INSERT INTO message_archive (
                 message_id, guild_id, channel_id, author_id,
                 message_type, created_at, content, edited_at,
-                attachments, embeds, reactions, reply_to_id
+                attachments_json, embeds_json, reactions, reply_to_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 guild_id=excluded.guild_id,
@@ -285,8 +298,8 @@ def upsert_many(
                 created_at=excluded.created_at,
                 content=excluded.content,
                 edited_at=excluded.edited_at,
-                attachments=excluded.attachments,
-                embeds=excluded.embeds,
+                attachments_json=excluded.attachments_json,
+                embeds_json=excluded.embeds_json,
                 reactions=excluded.reactions,
                 reply_to_id=excluded.reply_to_id
             """,

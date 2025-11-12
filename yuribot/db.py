@@ -285,8 +285,11 @@ def ensure_db() -> None:
                 created_at  TEXT    NOT NULL,
                 content     TEXT,
                 edited_at   TEXT,
-                attachments INTEGER NOT NULL DEFAULT 0,
-                embeds      INTEGER NOT NULL DEFAULT 0,
+
+                from attachments/embeds (INT) to _json (TEXT)
+                attachments_json TEXT,
+                embeds_json      TEXT,
+
                 reactions   TEXT,
                 reply_to_id INTEGER
             )
@@ -294,6 +297,8 @@ def ensure_db() -> None:
         )
         _ensure_column(con, "message_archive", "reactions", "TEXT")
         _ensure_column(con, "message_archive", "reply_to_id", "INTEGER")
+        _ensure_column(con, "message_archive", "attachments_json", "TEXT")
+        _ensure_column(con, "message_archive", "embeds_json", "TEXT")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_archive_guild_channel ON message_archive (guild_id, channel_id, created_at)"
         )
