@@ -64,7 +64,7 @@ class ActivityMetricsCog(commands.Cog):
             await inter.response.send_message("You need Manage Server.", ephemeral=True)
             return
 
-        # Defer WITHOUT ephemeral -> progress message won't expire at 15m.
+        # defer (public)
         await inter.response.defer()
 
         guild = inter.guild
@@ -72,7 +72,6 @@ class ActivityMetricsCog(commands.Cog):
         if days and days > 0:
             since = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=days)
 
-        # ---- progress state & message ----
         progress = {
             "phase": "starting",
             "channel_index": 0,
@@ -83,10 +82,22 @@ class ActivityMetricsCog(commands.Cog):
             "errors_count": 0,
             "last_errors": [],  # type: List[str]
         }
-        msg = await inter.followup.send("⏳ Preparing activity rebuild…")
-        stop = False
 
-        async def render_progress_once():
+        # --- create a NORMAL channel message (bot token), not a followup webhook ---
+        progress_msg: discord.Message | None = None
+        try:
+            progress_msg = await inter.channel.send(  # type: ignore[arg-type]
+                "⏳ Preparing activity rebuild…",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.Forbidden:
+            # No send permission here; we’ll fall back to editing the original interaction response.
+            progress_msg = None
+
+        stop = False
+        used_interaction_edit = False  # track if we’re editing the interaction response
+
+        async def _render_text() -> str:
             phase = progress["phase"]
             ch_i = progress["channel_index"]
             ch_n = progress["channel_total"]
@@ -117,36 +128,53 @@ class ActivityMetricsCog(commands.Cog):
                     for e in last_errs:
                         snippet = e if len(e) < 160 else (e[:157] + "…")
                         lines.append(f"  • {snippet}")
+            return "\n".join(lines)
 
-            await msg.edit(
-                content="\n".join(lines),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        async def render_progress_once():
+            text = await _render_text()
+            try:
+                if progress_msg is not None:
+                    await progress_msg.edit(
+                        content=text, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    # Fallback: edit the original interaction response (webhook). This will eventually expire.
+                    nonlocal used_interaction_edit
+                    used_interaction_edit = True
+                    await inter.edit_original_response(content=text)
+            except discord.HTTPException as e:
+                # 50027 = Invalid Webhook Token (interaction token expired)
+                if getattr(e, "code", None) == 50027 or "Invalid Webhook Token" in str(
+                    e
+                ):
+                    self._log(
+                        "[activity_rebuild] progress update switched off: webhook token expired"
+                    )
+                    raise  # break loop; we can’t edit the webhook anymore
+                # Other edit errors: log and keep going (don’t spam)
+                self._log(f"[activity_rebuild] progress update failed: {e}", error=True)
 
         async def progress_loop():
             while not stop:
                 try:
                     await render_progress_once()
-                except Exception as e:
-                    self._log(
-                        f"[activity_rebuild] progress update failed: {e}", error=True
-                    )
+                except Exception:
+                    # Stop if editing is no longer possible (e.g., webhook expired and no normal msg)
+                    if progress_msg is None:
+                        break
                 await asyncio.sleep(1.5)
 
         progress_task = asyncio.create_task(progress_loop())
 
-        # ---- collect channels to scan (includes text “inside” voice) ----
-        def _list_channels() -> List[discord.abc.GuildChannel]:
+        # ---- channel enumeration (includes text “inside” voice, news, forum) ----
+        def _list_channels() -> list[discord.abc.GuildChannel]:
             if channel:
                 return [channel]
-            chans: List[discord.abc.GuildChannel] = []
-            # Any TextChannel (includes ones attached to Voice channels)
+            chans: list[discord.abc.GuildChannel] = []
             for ch in guild.channels:
                 if isinstance(ch, discord.TextChannel):
-                    chans.append(ch)
-            # News/Announcement
+                    chans.append(ch)  # includes voice-attached text areas
             chans.extend(getattr(guild, "news_channels", []))
-            # Forum channels
             chans.extend(getattr(guild, "forums", []))
             return chans
 
@@ -228,7 +256,7 @@ class ActivityMetricsCog(commands.Cog):
             for idx, ch in enumerate(channels, start=1):
                 progress["channel_index"] = idx
                 if isinstance(ch, discord.StageChannel):
-                    continue  # voice-only
+                    continue
                 if isinstance(ch, discord.TextChannel) or isinstance(
                     ch, discord.NewsChannel
                 ):
@@ -238,17 +266,28 @@ class ActivityMetricsCog(commands.Cog):
             progress["phase"] = "done"
         except Exception as e:
             progress["phase"] = "error"
-            err = f"Top-level rebuild error: {e}"
-            progress["last_errors"].append(err)
+            progress["last_errors"].append(f"Top-level rebuild error: {e}")
             progress["errors_count"] += 1
-            self._log(f"[activity_rebuild] {err}", error=True)
+            self._log(f"[activity_rebuild] Top-level rebuild error: {e}", error=True)
         finally:
             stop = True
             try:
                 await progress_task
             except Exception:
                 pass
-            await render_progress_once()
+            # Final render
+            text = await _render_text()
+            try:
+                if progress_msg is not None:
+                    await progress_msg.edit(
+                        content=text, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    # best-effort finalize; may no-op if webhook already expired
+                    if not used_interaction_edit:
+                        await inter.edit_original_response(content=text)
+            except Exception:
+                pass
 
     # ---------------------------
     # /activity_stats (default to days since OPEN_DATE; optional public post)
