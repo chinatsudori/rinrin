@@ -36,14 +36,14 @@ HYPHEN_OPTIONAL = {
 }
 
 FUZZY_MAX_DIST = {
-    "mum": 1,
-    "thea": 1,
+    "mum": 0,
+    "thea": 0,
     "oneesama": 2,
     "nee-chan": 2,
     "summer-chan": 2,
-    "rin": 1,
+    "rin": 0,
     "rinrin": 1,
-    "nat": 1,
+    "nat": 0,
     "queen": 1,
 }
 
