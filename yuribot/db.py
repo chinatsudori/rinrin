@@ -9,6 +9,7 @@ import os
 import sqlite3
 import logging
 from typing import Optional, Iterable
+from pathlib import Path
 
 from .data.booly_defaults import DEFAULT_BOOLY_ROWS
 

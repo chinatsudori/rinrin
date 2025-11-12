@@ -2,42 +2,24 @@
 from __future__ import annotations
 
 import datetime as dt
-import sqlite3
-from typing import Dict, List, Tuple
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from starlette.responses import JSONResponse
 
-from ...yuribot.models.activity_metrics import (
+# Use absolute import from project root: 'yuribot' is a top-level package
+from yuribot.models.activity_metrics import (
     get_basic_stats,
     get_burst_std_24h,
     get_content_stats,
     get_heatmap,
     get_latency_stats,
+    get_hourly_counts,
 )
-
-import os
 
 router = APIRouter(prefix="/api/activity", tags=["activity"])
 
 
-def _connect() -> sqlite3.Connection:
-    db_path = os.environ.get("BOT_DB_PATH") or "/app/data/bot.sqlite3"
-    con = sqlite3.connect(db_path, isolation_level=None)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def _date_range(days: int | None) -> Tuple[str, str]:
-    if not days or days <= 0:
-        # last 30 days by default
-        days = 30
-    end = dt.datetime.utcnow().date()
-    start = (end - dt.timedelta(days=days)).isoformat()
-    return start, end.isoformat()
-
-
 def _day_bounds(days: int) -> tuple[str, str, str, str]:
+    # days back in UTC, to day/hour ranges
     now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     start_day = (now.date() - dt.timedelta(days=days)).isoformat()
     end_day = now.date().isoformat()
@@ -55,18 +37,15 @@ def live_metrics(guild_id: int, days: int = 30):
 
     basic = get_basic_stats(guild_id, start_day, end_day)
     heat = get_heatmap(guild_id, start_day, end_day)
-    burst = get_burst_std_24h(guild_id, start_day, end_day)
-    silence = {"silence_ratio": 1.0}  # wip
+    burst = get_burst_std_24h(guild_id, start_hour, end_hour)
     latency = get_latency_stats(guild_id, start_day, end_day)
+
+    hourly = get_hourly_counts(guild_id, start_hour, end_hour)
+    silence_ratio = sum(1 for _, v in (hourly or {}).items() if int(v) == 0) / max(
+        len(hourly or {}), 1
+    )
+
     content = get_content_stats(guild_id, start_day, end_day)
-
-    # derive silence ratio from hourly path
-    from ...yuribot.models.activity_metrics import get_hourly_counts
-
-    hourly = get_hourly_counts(guild_id, start_day, end_day)
-    if hourly:
-        zeros = sum(1 for _, v in hourly.items() if int(v) == 0)
-        silence["silence_ratio"] = float(zeros) / float(len(hourly))
 
     resp = {
         "range": {
@@ -87,7 +66,7 @@ def live_metrics(guild_id: int, days: int = 30):
         "temporal": {
             "heatmap_avg_per_hour": heat,
             "burst_std_24h": burst,
-            **silence,
+            "silence_ratio": float(silence_ratio),
         },
         "latency": latency,
         "content": content,
