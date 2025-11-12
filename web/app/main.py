@@ -450,7 +450,21 @@ def activity_entry(request: Request):
         redirect_uri=os.getenv(
             "DISCORD_REDIRECT_URI", "https://yuri.icebrand.dev/auth/callback"
         ),
-        next_after_login="/admin",  # or another post-login page
+        next_after_login="/admin/activity-dashboard",
+    )
+
+
+@app.get(
+    "/admin/activity-dashboard",
+    response_class=HTMLResponse,
+    dependencies=[Depends(auth.require_auth())],
+)
+def activity_dashboard(request: Request):
+    template = env.get_template("activity_dashboard.html")
+    return template.render(
+        request=request,
+        guild_id=GUILD_ID,
+        viewer=request.session.get("user"),
     )
 
 

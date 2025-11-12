@@ -5,12 +5,15 @@ import math
 import os
 import sqlite3
 from collections import defaultdict, deque
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from starlette.responses import JSONResponse
 
 router = APIRouter(prefix="/api/activity", tags=["activity"])
+
+
+_TABLE_COLUMN_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
 def _con() -> sqlite3.Connection:
@@ -24,6 +27,27 @@ def _con() -> sqlite3.Connection:
     return c
 
 
+def _table_has_column(table: str, column: str) -> bool:
+    key = (table, column)
+    if key in _TABLE_COLUMN_CACHE:
+        return _TABLE_COLUMN_CACHE[key]
+    try:
+        con = _con()
+        cur = con.cursor()
+        cur.execute(f"PRAGMA table_info('{table}')")
+        cols = [str(r["name"]) for r in cur.fetchall()]
+        has = column in cols
+    except sqlite3.OperationalError:
+        has = False
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    _TABLE_COLUMN_CACHE[key] = has
+    return has
+
+
 def _bounds(days: int) -> Tuple[str, str, str, str]:
     now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     start_day = (now.date() - dt.timedelta(days=days)).isoformat()
@@ -31,6 +55,15 @@ def _bounds(days: int) -> Tuple[str, str, str, str]:
     start_hour = (now - dt.timedelta(hours=24 * days)).strftime("%Y-%m-%dT%H")
     end_hour = now.strftime("%Y-%m-%dT%H")
     return start_day, end_day, start_hour, end_hour
+
+
+def _hour_limits(start_h: str, end_h: str) -> Tuple[str, str]:
+    start_dt = dt.datetime.fromisoformat(f"{start_h}:00:00")
+    end_dt = dt.datetime.fromisoformat(f"{end_h}:59:59")
+    return (
+        start_dt.isoformat(timespec="seconds"),
+        end_dt.isoformat(timespec="seconds"),
+    )
 
 
 def _gini(values: List[int]) -> float:
@@ -87,25 +120,59 @@ def _quantiles_from_hist(hist: List[int], probs=(0.5, 0.95)) -> Tuple[float, flo
     return tuple(outs)  # type: ignore
 
 
-def _hourly_counts(gid: int, start_h: str, end_h: str) -> Dict[str, int]:
+def _hourly_counts(
+    gid: int, start_h: str, end_h: str, user_id: Optional[int] = None
+) -> Dict[str, int]:
+    if user_id is not None and not _table_has_column("message_metrics_hourly", "user_id"):
+        start_ts, end_ts = _hour_limits(start_h, end_h)
+        try:
+            con = _con()
+            cur = con.cursor()
+            rows = cur.execute(
+                """
+                SELECT STRFTIME('%Y-%m-%dT%H', created_at) AS hour, COUNT(*) AS messages
+                FROM message_archive
+                WHERE created_at BETWEEN ? AND ? AND user_id = ?
+                GROUP BY hour
+                ORDER BY hour
+                """,
+                (start_ts, end_ts, int(user_id)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+        return {str(r["hour"]): int(r["messages"]) for r in rows}
+
     con = _con()
     try:
         cur = con.cursor()
+        params: List[Any] = [gid, start_h, end_h]
+        where = "guild_id = ? AND hour BETWEEN ? AND ?"
+        if user_id is not None:
+            where += " AND user_id = ?"
+            params.append(int(user_id))
         rows = cur.execute(
-            """
-            SELECT hour, messages
+            f"""
+            SELECT hour, SUM(messages) AS messages
             FROM message_metrics_hourly
-            WHERE guild_id = ? AND hour BETWEEN ? AND ?
+            WHERE {where}
+            GROUP BY hour
             ORDER BY hour
             """,
-            (gid, start_h, end_h),
+            tuple(params),
         ).fetchall()
     finally:
         con.close()
     return {str(r["hour"]): int(r["messages"]) for r in rows}
 
 
-def _heatmap(gid: int, start_day: str, end_day: str) -> List[List[float]]:
+def _heatmap(
+    gid: int, start_day: str, end_day: str, user_id: Optional[int] = None
+) -> List[List[float]]:
     start = dt.date.fromisoformat(start_day)
     end = dt.date.fromisoformat(end_day)
     days_per_dow = [0] * 7
@@ -114,36 +181,19 @@ def _heatmap(gid: int, start_day: str, end_day: str) -> List[List[float]]:
         days_per_dow[d.weekday()] += 1
         d += dt.timedelta(days=1)
 
-    con = _con()
-    try:
-        cur = con.cursor()
-        rows = cur.execute(
-            """
-            SELECT hour, messages
-            FROM message_metrics_hosty -- typo guard
-            """,
-        )
-    except sqlite3.OperationalError:
-        rows = (
-            _con()
-            .execute(
-                """
-            SELECT hour, messages
-            FROM message_metrics_hourly
-            WHERE guild_id = ? AND substr(hour,1,10) BETWEEN ? AND ?
-            """,
-                (gid, start_day, end_day),
-            )
-            .fetchall()
-        )
+    start_hour = f"{start_day}T00"
+    end_hour = f"{end_day}T23"
+    hourly = _hourly_counts(gid, start_hour, end_hour, user_id=user_id)
 
     grid = [[0.0 for _ in range(24)] for _ in range(7)]
-    for r in rows:
-        h = str(r["hour"])  # 'YYYY-MM-DDTHH'
-        day = dt.date.fromisoformat(h[:10])
-        dow = day.weekday()
-        hr = int(h[11:13])
-        grid[dow][hr] += int(r["messages"])
+    for h, count in hourly.items():
+        try:
+            day = dt.date.fromisoformat(h[:10])
+            dow = day.weekday()
+            hr = int(h[11:13])
+        except (ValueError, IndexError):
+            continue
+        grid[dow][hr] += int(count)
     for dow in range(7):
         denom = max(1, days_per_dow[dow])
         for hr in range(24):
@@ -151,7 +201,9 @@ def _heatmap(gid: int, start_day: str, end_day: str) -> List[List[float]]:
     return grid
 
 
-def _burst_std24(gid: int, start_h: str, end_h: str) -> Dict[str, float]:
+def _burst_std24(
+    gid: int, start_h: str, end_h: str, user_id: Optional[int] = None
+) -> Dict[str, float]:
     start_dt = dt.datetime.fromisoformat(f"{start_h}:00+00:00")
     end_dt = dt.datetime.fromisoformat(f"{end_h}:00+00:00")
     hours: List[str] = []
@@ -160,7 +212,7 @@ def _burst_std24(gid: int, start_h: str, end_h: str) -> Dict[str, float]:
         hours.append(t.strftime("%Y-%m-%dT%H"))
         t += dt.timedelta(hours=1)
 
-    raw = _hourly_counts(gid, start_h, end_h)
+    raw = _hourly_counts(gid, start_h, end_h, user_id=user_id)
     series = [int(raw.get(h, 0)) for h in hours]
 
     out: Dict[str, float] = {}
@@ -214,38 +266,45 @@ def _latency_stats(gid: int, start_day: str, end_day: str) -> Dict[str, Any]:
     }
 
 
-def _content_stats(gid: int, start_day: str, end_day: str) -> Dict[str, Any]:
+def _content_stats(
+    gid: int, start_day: str, end_day: str, user_id: Optional[int] = None
+) -> Dict[str, Any]:
     con = _con()
     try:
         cur = con.cursor()
+        params: List[Any] = [gid, start_day, end_day]
+        where = "guild_id = ? AND day BETWEEN ? AND ?"
+        if user_id is not None:
+            where += " AND user_id = ?"
+            params.append(int(user_id))
         rows = cur.execute(
-            """
+            f"""
             SELECT user_id, SUM(messages) AS m, SUM(words) AS w, SUM(url_msgs) AS u
               FROM message_metrics_daily
-             WHERE guild_id = ? AND day BETWEEN ? AND ?
+             WHERE {where}
              GROUP BY user_id
             """,
-            (gid, start_day, end_day),
+            tuple(params),
         ).fetchall()
         tok_rows = cur.execute(
-            """
+            f"""
             SELECT user_id, COUNT(DISTINCT token) AS uniq
               FROM user_token_daily
-             WHERE guild_id = ? AND day BETWEEN ? AND ?
+             WHERE {where}
              GROUP BY user_id
             """,
-            (gid, start_day, end_day),
+            tuple(params),
         ).fetchall()
         # sentiment optional
         try:
             sent_rows = cur.execute(
-                """
+                f"""
                 SELECT user_id, SUM(n) AS n, SUM(sum_compound) AS csum
                   FROM sentiment_daily
-                 WHERE guild_id = ? AND day BETWEEN ? AND ?
+                 WHERE {where}
                  GROUP BY user_id
                 """,
-                (gid, start_day, end_day),
+                tuple(params),
             ).fetchall()
         except sqlite3.OperationalError:
             sent_rows = []
@@ -295,28 +354,120 @@ def _content_stats(gid: int, start_day: str, end_day: str) -> Dict[str, Any]:
     }
 
 
+def _activity_rankings(
+    gid: int, end_dt: dt.datetime, limit: int = 5
+) -> Dict[str, List[Dict[str, int]]]:
+    windows = {
+        "day": end_dt - dt.timedelta(days=1),
+        "week": end_dt - dt.timedelta(days=7),
+        "month": end_dt - dt.timedelta(days=30),
+        "all": None,
+    }
+    out: Dict[str, List[Dict[str, int]]] = {}
+    has_guild = _table_has_column("message_archive", "guild_id")
+    try:
+        con = _con()
+        cur = con.cursor()
+        for name, start_dt in windows.items():
+            where_parts = []
+            params: List[Any] = []
+            if has_guild:
+                where_parts.append("guild_id = ?")
+                params.append(gid)
+            if start_dt is not None:
+                where_parts.append("created_at BETWEEN ? AND ?")
+                params.append(start_dt.isoformat(timespec="seconds"))
+                params.append(end_dt.isoformat(timespec="seconds"))
+            else:
+                where_parts.append("created_at <= ?")
+                params.append(end_dt.isoformat(timespec="seconds"))
+            where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            try:
+                rows = cur.execute(
+                    f"""
+                    SELECT user_id, COUNT(*) AS messages
+                    FROM message_archive
+                    {where_sql}
+                    GROUP BY user_id
+                    ORDER BY messages DESC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            out[name] = [
+                {"user_id": int(r["user_id"]), "messages": int(r["messages"])}
+                for r in rows
+            ]
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    return out
+
+
 @router.get("/{guild_id}/live")
-def live_metrics(guild_id: int, days: int = 30):
-    if days <= 0:
-        raise HTTPException(status_code=400, detail="days must be > 0")
+def live_metrics(
+    guild_id: int,
+    days: int = 30,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    scope: str = "guild",
+    user_id: Optional[int] = None,
+):
+    if scope not in {"guild", "personal"}:
+        raise HTTPException(status_code=400, detail="invalid scope")
+    if scope == "personal" and user_id is None:
+        raise HTTPException(status_code=400, detail="user_id required for personal scope")
 
-    start_day, end_day, start_hour, end_hour = _bounds(days)
+    if start and not end or end and not start:
+        raise HTTPException(status_code=400, detail="start and end must both be provided")
 
-    # basic distribution
+    if start and end:
+        try:
+            start_date = dt.date.fromisoformat(start)
+            end_date = dt.date.fromisoformat(end)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD")
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="start must be <= end")
+        start_day = start_date.isoformat()
+        end_day = end_date.isoformat()
+        start_hour = f"{start_day}T00"
+        end_hour = f"{end_day}T23"
+    else:
+        if days <= 0:
+            raise HTTPException(status_code=400, detail="days must be > 0")
+        start_day, end_day, start_hour, end_hour = _bounds(days)
+
+    range_end_dt = dt.datetime.fromisoformat(f"{end_day}T23:59:59")
+    filter_user = int(user_id) if scope == "personal" and user_id is not None else None
+
+    # basic distribution scoped to guild or specific user
     con = _con()
     try:
         cur = con.cursor()
+        params: List[Any] = [guild_id, start_day, end_day]
+        where = "guild_id = ? AND day BETWEEN ? AND ?"
+        if filter_user is not None:
+            where += " AND user_id = ?"
+            params.append(filter_user)
         rows = cur.execute(
-            """
+            f"""
             SELECT user_id, SUM(messages) AS m
             FROM message_metrics_daily
-            WHERE guild_id = ? AND day BETWEEN ? AND ?
+            WHERE {where}
             GROUP BY user_id
             """,
-            (guild_id, start_day, end_day),
+            tuple(params),
         ).fetchall()
     finally:
         con.close()
+
     counts = [int(r["m"] or 0) for r in rows]
     f = [float(x) for x in counts]
     mean = sum(f) / len(f) if f else 0.0
@@ -342,13 +493,16 @@ def live_metrics(guild_id: int, days: int = 30):
         "gini": float(_gini(counts)) if counts else float("nan"),
     }
 
-    heat = _heatmap(guild_id, start_day, end_day)
-    burst = _burst_std24(guild_id, start_hour, end_hour)
-    hourly = _hourly_counts(guild_id, start_hour, end_hour)
+    heat = _heatmap(guild_id, start_day, end_day, user_id=filter_user)
+    burst = _burst_std24(guild_id, start_hour, end_hour, user_id=filter_user)
+    hourly = _hourly_counts(guild_id, start_hour, end_hour, user_id=filter_user)
     zeros = sum(1 for _, v in (hourly or {}).items() if int(v) == 0)
     silence_ratio = float(zeros) / float(len(hourly or {}) or 1)
-    latency = _latency_stats(guild_id, start_day, end_day)
-    content = _content_stats(guild_id, start_day, end_day)
+    latency = (
+        None if scope == "personal" else _latency_stats(guild_id, start_day, end_day)
+    )
+    content = _content_stats(guild_id, start_day, end_day, user_id=filter_user)
+    rankings = _activity_rankings(guild_id, range_end_dt)
 
     return JSONResponse(
         {
@@ -358,13 +512,16 @@ def live_metrics(guild_id: int, days: int = 30):
                 "start_hour": start_hour,
                 "end_hour": end_hour,
             },
+            "scope": scope,
             "basic": basic,
             "temporal": {
                 "heatmap_avg_per_hour": heat,
                 "burst_std_24h": burst,
+                "hourly_counts": hourly,
                 "silence_ratio": silence_ratio,
             },
             "latency": latency,
             "content": content,
+            "rankings": rankings,
         }
     )
