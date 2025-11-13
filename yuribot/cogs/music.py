@@ -19,6 +19,8 @@ import discord
 from discord.ext import commands
 import wavelink
 
+from yuribot.strings import S
+
 log = logging.getLogger(__name__)
 
 
@@ -56,7 +58,7 @@ def _format_duration(length: int | None) -> str:
 
 
 def _format_track_title(track: wavelink.Playable) -> str:
-    title = getattr(track, "title", "Unknown track")
+    title = getattr(track, "title", S("music.track.unknown"))
     uri = getattr(track, "uri", None)
     if uri:
         return f"[{title}]({uri})"
@@ -295,11 +297,13 @@ class MusicControllerView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not self.player.channel:
-            await interaction.response.send_message("Player is not connected.", ephemeral=True)
+            await interaction.response.send_message(S("music.controller.not_connected"), ephemeral=True)
             return False
         voice = interaction.user.voice if isinstance(interaction.user, discord.Member) else None
         if not voice or voice.channel != self.player.channel:
-            await interaction.response.send_message("Join my voice channel to use the controller!", ephemeral=True)
+            await interaction.response.send_message(
+                S("music.controller.join_voice"), ephemeral=True
+            )
             return False
         return True
 
@@ -435,18 +439,18 @@ class MusicCog(commands.Cog):
 
     async def _get_player(self, ctx: commands.Context, *, connect: bool = True) -> YuriPlayer | None:
         if not ctx.guild:
-            await self._reply(ctx, content="This command can only be used in a guild.")
+            await self._reply(ctx, content=S("common.guild_only"))
             return None
         player = ctx.guild.voice_client
         if player and not isinstance(player, YuriPlayer):
-            await self._reply(ctx, content="Another voice client is already running here.")
+            await self._reply(ctx, content=S("music.error.other_client"))
             return None
         if player and isinstance(player, YuriPlayer):
             return player
         if not connect:
             return None
         if not isinstance(ctx.author, discord.Member) or not ctx.author.voice or not ctx.author.voice.channel:
-            await self._reply(ctx, content="Join a voice channel first!")
+            await self._reply(ctx, content=S("music.error.join_voice_first"))
             return None
         channel = ctx.author.voice.channel
         player = await channel.connect(cls=YuriPlayer)
@@ -522,19 +526,43 @@ class MusicCog(commands.Cog):
         if player.current:
             track = player.current.track
             requester = player.current.requester(player.guild)
-            embed.title = "Now Playing"
-            embed.description = f"{_format_track_title(track)}\nRequested by {requester}"
-            embed.add_field(name="Duration", value=_format_duration(getattr(track, "length", None)))
+            embed.title = S("music.controller.now_playing")
+            embed.description = S(
+                "music.controller.now_playing_desc",
+                track=_format_track_title(track),
+                requester=requester,
+            )
+            embed.add_field(
+                name=S("music.controller.field_duration"),
+                value=_format_duration(getattr(track, "length", None)),
+            )
         else:
-            embed.title = "Player Idle"
-            embed.description = "Add something to the queue with /play"
-        embed.add_field(name="Loop", value="On" if player.loop_current else "Off")
-        embed.add_field(name="Volume", value=f"{getattr(player, 'volume', 100)}%")
+            embed.title = S("music.controller.idle")
+            embed.description = S("music.controller.idle_hint")
+        embed.add_field(
+            name=S("music.controller.field_loop"),
+            value=S("music.controller.loop_on") if player.loop_current else S("music.controller.loop_off"),
+        )
+        embed.add_field(
+            name=S("music.controller.field_volume"),
+            value=S("music.controller.volume_value", percent=getattr(player, "volume", 100)),
+        )
         if player.queue:
             upcoming = []
             for idx, entry in enumerate(list(player.queue)[:5], start=1):
-                upcoming.append(f"{idx}. {_format_track_title(entry.track)} — {entry.requester(player.guild)}")
-            embed.add_field(name="Up Next", value="\n".join(upcoming), inline=False)
+                upcoming.append(
+                    S(
+                        "music.controller.up_next_line",
+                        idx=idx,
+                        track=_format_track_title(entry.track),
+                        requester=entry.requester(player.guild),
+                    )
+                )
+            embed.add_field(
+                name=S("music.controller.field_up_next"),
+                value="\n".join(upcoming),
+                inline=False,
+            )
         return embed
 
     async def _queue_tracks(self, player: YuriPlayer, tracks: Iterable[wavelink.Playable], author: discord.Member) -> List[QueuedTrack]:
@@ -617,7 +645,7 @@ class MusicCog(commands.Cog):
             await self.refresh_controller(player)
 
     # ---- commands ----
-    @commands.hybrid_command(name="play", description="Play a song or playlist from YouTube")
+    @commands.hybrid_command(name="play", description=S("music.cmd.play"))
     async def play(self, ctx: commands.Context, *, query: str) -> None:
         await self._maybe_defer(ctx)
         player = await self._get_player(ctx)
@@ -627,144 +655,158 @@ class MusicCog(commands.Cog):
             player.bound_text_id = ctx.channel.id
         tracks = await self._search_tracks(query)
         if not tracks:
-            await self._reply(ctx, content="No matches found.")
+            await self._reply(ctx, content=S("music.error.no_matches"))
             return
         added = await self._queue_tracks(player, tracks, ctx.author)
         await self.refresh_controller(player)
         if len(added) == 1:
             title = _format_track_title(added[0].track)
-            await self._reply(ctx, content=f"Queued {title}")
+            await self._reply(ctx, content=S("music.info.queued_single", title=title))
         else:
-            await self._reply(ctx, content=f"Queued {len(added)} tracks")
+            await self._reply(ctx, content=S("music.info.queued_multi", count=len(added)))
 
-    @commands.hybrid_command(name="pause", description="Pause the current track")
+    @commands.hybrid_command(name="pause", description=S("music.cmd.pause"))
     async def pause(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
-            await self._reply(ctx, content="Nothing is playing.")
+            await self._reply(ctx, content=S("music.error.nothing_playing"))
             return
         await player.pause()
-        await self._reply(ctx, content="Paused ⏸️")
+        await self._reply(ctx, content=S("music.info.paused"))
 
-    @commands.hybrid_command(name="resume", description="Resume playback")
+    @commands.hybrid_command(name="resume", description=S("music.cmd.resume"))
     async def resume(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
-            await self._reply(ctx, content="Nothing is playing.")
+            await self._reply(ctx, content=S("music.error.nothing_playing"))
             return
         await player.resume()
-        await self._reply(ctx, content="Resumed ▶️")
+        await self._reply(ctx, content=S("music.info.resumed"))
 
-    @commands.hybrid_command(name="skip", description="Skip the current track")
+    @commands.hybrid_command(name="skip", description=S("music.cmd.skip"))
     async def skip(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
-            await self._reply(ctx, content="Nothing to skip.")
+            await self._reply(ctx, content=S("music.error.nothing_to_skip"))
             return
         await self._skip_current(player)
-        await self._reply(ctx, content="Skipped ⏭️")
+        await self._reply(ctx, content=S("music.info.skipped"))
 
-    @commands.hybrid_command(name="stop", description="Stop playback and clear the queue")
+    @commands.hybrid_command(name="stop", description=S("music.cmd.stop"))
     async def stop(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
-            await self._reply(ctx, content="I'm not connected.")
+            await self._reply(ctx, content=S("music.error.not_connected"))
             return
         await self._stop_player(player)
-        await self._reply(ctx, content="Stopped and cleared the queue.")
+        await self._reply(ctx, content=S("music.info.stopped"))
 
-    @commands.hybrid_command(name="leave", description="Disconnect the bot from voice")
+    @commands.hybrid_command(name="leave", description=S("music.cmd.leave"))
     async def leave(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
-            await self._reply(ctx, content="I'm not in a voice channel.")
+            await self._reply(ctx, content=S("music.error.not_in_voice"))
             return
         await self._stop_player(player)
         await player.disconnect()
-        await self._reply(ctx, content="Disconnected.")
+        await self._reply(ctx, content=S("music.info.disconnected"))
 
-    @commands.hybrid_command(name="nowplaying", description="Show the current track")
+    @commands.hybrid_command(name="nowplaying", description=S("music.cmd.nowplaying"))
     async def nowplaying(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
-            await self._reply(ctx, content="Not connected.")
+            await self._reply(ctx, content=S("music.error.not_connected"))
             return
         embed = self._build_controller_embed(player)
         await self._reply(ctx, embed=embed)
 
-    @commands.hybrid_command(name="queue", description="Show the queue")
+    @commands.hybrid_command(name="queue", description=S("music.cmd.queue"))
     async def queue(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or (not player.current and not player.queue):
-            await self._reply(ctx, content="Queue is empty.")
+            await self._reply(ctx, content=S("music.error.queue_empty"))
             return
         lines: List[str] = []
         if player.current:
-            lines.append(f"Now: {_format_track_title(player.current.track)}")
+            lines.append(S("music.queue.line_now", track=_format_track_title(player.current.track)))
         for idx, entry in enumerate(player.queue, start=1):
-            lines.append(f"{idx}. {_format_track_title(entry.track)} — {_format_duration(getattr(entry.track, 'length', None))}")
+            lines.append(
+                S(
+                    "music.queue.line_entry",
+                    idx=idx,
+                    track=_format_track_title(entry.track),
+                    duration=_format_duration(getattr(entry.track, "length", None)),
+                )
+            )
         description = "\n".join(lines)
-        embed = discord.Embed(title="Queue", description=description, color=discord.Color.dark_teal())
+        embed = discord.Embed(
+            title=S("music.queue.embed_title"),
+            description=description,
+            color=discord.Color.dark_teal(),
+        )
         await self._reply(ctx, embed=embed)
 
-    @commands.hybrid_command(name="volume", description="Set the player volume (1-150)")
+    @commands.hybrid_command(name="volume", description=S("music.cmd.volume"))
     async def volume(self, ctx: commands.Context, level: int) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
-            await self._reply(ctx, content="I'm not connected.")
+            await self._reply(ctx, content=S("music.error.not_connected"))
             return
         level = max(1, min(level, 150))
         await player.set_volume(level)
-        await self._reply(ctx, content=f"Volume set to {level}%")
+        await self._reply(ctx, content=S("music.info.volume_set", level=level))
         await self.refresh_controller(player)
 
-    @commands.hybrid_command(name="controller", description="Post or refresh the music controller")
+    @commands.hybrid_command(name="controller", description=S("music.cmd.controller"))
     async def controller(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
-            await self._reply(ctx, content="Nothing to control yet.")
+            await self._reply(ctx, content=S("music.error.nothing_to_control"))
             return
         if isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
             player.bound_text_id = ctx.channel.id
         await self.refresh_controller(player)
-        await self._reply(ctx, content="Controller refreshed.")
+        await self._reply(ctx, content=S("music.info.controller_refreshed"))
 
     # ---- playlist commands ----
-    @commands.hybrid_group(name="playlist", description="Manage server playlists", invoke_without_command=True)
+    @commands.hybrid_group(name="playlist", description=S("music.cmd.playlist"), invoke_without_command=True)
     async def playlist(self, ctx: commands.Context) -> None:
         if not ctx.guild:
-            await self._reply(ctx, content="This command only works in a guild.")
+            await self._reply(ctx, content=S("common.guild_only"))
             return
         names = await self.playlists.list(ctx.guild.id)
         if not names:
-            await self._reply(ctx, content="No playlists saved yet.")
+            await self._reply(ctx, content=S("music.info.playlists_none"))
             return
-        await self._reply(ctx, content="Playlists: " + ", ".join(names))
+        await self._reply(ctx, content=S("music.info.playlists_list", names=", ".join(names)))
 
-    @playlist.command(name="save", description="Save the current queue as a playlist")
+    @playlist.command(name="save", description=S("music.cmd.playlist_save"))
     async def playlist_save(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
-            await self._reply(ctx, content="This command only works in a guild.")
+            await self._reply(ctx, content=S("common.guild_only"))
             return
         player = await self._get_player(ctx, connect=False)
         if not player or (not player.current and not player.queue):
-            await self._reply(ctx, content="Nothing to save.")
+            await self._reply(ctx, content=S("music.error.nothing_to_save"))
             return
         identifiers = self._collect_identifiers(player)
         if not identifiers:
-            await self._reply(ctx, content="Unable to save tracks without URLs.")
+            await self._reply(ctx, content=S("music.error.no_urls_to_save"))
             return
         await self.playlists.set(ctx.guild.id, name, identifiers)
-        await self._reply(ctx, content=f"Saved playlist **{name}** with {len(identifiers)} tracks.")
+        await self._reply(
+            ctx,
+            content=S("music.info.playlist_saved", name=name, count=len(identifiers)),
+        )
 
-    @playlist.command(name="load", description="Load a saved playlist into the queue")
+    @playlist.command(name="load", description=S("music.cmd.playlist_load"))
     async def playlist_load(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
-            await self._reply(ctx, content="This command only works in a guild.")
+            await self._reply(ctx, content=S("common.guild_only"))
             return
         data = await self.playlists.get(ctx.guild.id, name)
         if not data:
-            await self._reply(ctx, content="Playlist not found.")
+            await self._reply(ctx, content=S("music.error.playlist_missing"))
             return
         await self._maybe_defer(ctx)
         player = await self._get_player(ctx)
@@ -773,24 +815,31 @@ class MusicCog(commands.Cog):
         identifiers = data.get("tracks", [])
         tracks = await self._resolve_identifiers(identifiers)
         if not tracks:
-            await self._reply(ctx, content="Unable to resolve any tracks from that playlist.")
+            await self._reply(ctx, content=S("music.error.resolve_failed"))
             return
         if isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
             player.bound_text_id = ctx.channel.id
         await self._queue_tracks(player, tracks, ctx.author)
         await self.refresh_controller(player)
-        await self._reply(ctx, content=f"Loaded playlist **{data.get('label', name)}** ({len(tracks)} tracks).")
+        await self._reply(
+            ctx,
+            content=S(
+                "music.info.playlist_loaded",
+                name=data.get("label", name),
+                count=len(tracks),
+            ),
+        )
 
-    @playlist.command(name="delete", description="Delete a saved playlist")
+    @playlist.command(name="delete", description=S("music.cmd.playlist_delete"))
     async def playlist_delete(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
-            await self._reply(ctx, content="This command only works in a guild.")
+            await self._reply(ctx, content=S("common.guild_only"))
             return
         deleted = await self.playlists.delete(ctx.guild.id, name)
         if not deleted:
-            await self._reply(ctx, content="Playlist not found.")
+            await self._reply(ctx, content=S("music.error.playlist_missing"))
             return
-        await self._reply(ctx, content=f"Deleted playlist **{name}**.")
+        await self._reply(ctx, content=S("music.info.playlist_deleted", name=name))
 
 
 async def setup(bot: commands.Bot) -> None:
