@@ -1,0 +1,80 @@
+{
+  "yuri_remote": {
+    "title": "Yuri Galaxy (sample)",
+    "questions": [
+      "Is the character still a student when their story begins?",
+      "Does the story lean into slice-of-life or school club vibes?",
+      "Does the series feature fantasy or supernatural elements?",
+      "Is combat or organized action a major part of the plot?",
+      "Is the setting futuristic or science-fiction focused?",
+      "Is the cast tied to idols or music performances?",
+      "Is the series targeted at mature audiences?",
+      "Is this character one of the main protagonists?",
+      "Did the story originate as a manga or light novel?",
+      "Is the story set in a contemporary, mostly real-world setting?",
+      "Did the series debut in the modern streaming era (2010+)?"
+    ],
+    "characters": [
+      {
+        "name": "Yuu Koito",
+        "series": "Bloom Into You",
+        "blurb": "Soft-spoken first-year who discovers her own way to love while working on the student council.",
+        "answers": ["yes", "yes", "no", "no", "no", "no", "no", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Touko Nanami",
+        "series": "Bloom Into You",
+        "blurb": "Poised student council president carrying the weight of her sister's legacy.",
+        "answers": ["yes", "probably", "no", "no", "no", "no", "no", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Yuzu Aihara",
+        "series": "Citrus",
+        "blurb": "Fashion-conscious transfer student whose world is upended by her new family.",
+        "answers": ["yes", "probably", "no", "no", "no", "no", "probably", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Mei Aihara",
+        "series": "Citrus",
+        "blurb": "Disciplined student council president grappling with duty and desire.",
+        "answers": ["yes", "probably", "no", "no", "no", "no", "probably", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Shima Honnami",
+        "series": "Adachi and Shimamura",
+        "blurb": "Daydreaming athlete who slowly opens up through quiet afternoons at the gymnasium.",
+        "answers": ["yes", "yes", "no", "no", "no", "no", "no", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Sakura Adachi",
+        "series": "Adachi and Shimamura",
+        "blurb": "Truant loner who falls headfirst into her first crush.",
+        "answers": ["yes", "yes", "no", "no", "no", "no", "no", "yes", "yes", "yes", "yes"]
+      },
+      {
+        "name": "Utena Tenjou",
+        "series": "Revolutionary Girl Utena",
+        "blurb": "Prince-like duelist determined to protect Anthy from Ohtori Academy's conspiracies.",
+        "answers": ["yes", "probably_not", "yes", "yes", "no", "no", "no", "yes", "no", "probably_not", "no"]
+      },
+      {
+        "name": "Anthy Himemiya",
+        "series": "Revolutionary Girl Utena",
+        "blurb": "Mysterious Rose Bride bound to the dueling system.",
+        "answers": ["yes", "probably_not", "yes", "probably", "no", "no", "no", "probably", "no", "probably_not", "no"]
+      },
+      {
+        "name": "Chikane Himemiya",
+        "series": "Kannazuki no Miko",
+        "blurb": "Elegant shrine maiden who pilots a giant mech to defend the world with Himeko.",
+        "answers": ["yes", "probably_not", "yes", "yes", "probably", "no", "probably", "yes", "no", "probably_not", "no"]
+      },
+      {
+        "name": "Amane Kanata",
+        "series": "Strawberry Panic!",
+        "blurb": "Stoic Etoile candidate adored across the three academies.",
+        "answers": ["yes", "probably", "no", "no", "no", "no", "no", "probably", "yes", "yes", "probably_not"]
+      }
+    ]
+  }
+}

@@ -31,3 +31,11 @@ blah blah blah stuff stuff
 - Commands: `/play`, `/pause`, `/skip`, `/queue`, `/controller`, and `/playlist <list|save|load|delete>`.
 - Playlists are saved per-guild in `yuribot/data/music_playlists.json`.
 
+**Akinator datasets**
+
+- The clone ships with a tiny curated data set meant purely for demos.
+- Set `AKINATOR_DATA_URL` to point at a remote JSON document if you want to pull a larger or regularly updated dataset. The remote document must follow the same structure used in `yuribot/data/akinator_sets.py`.
+- Override `AKINATOR_DEFAULT_SET` and `AKINATOR_YURI_SET` if the remote document exposes additional named sets that should become the defaults.
+- Need more Yuri-flavoured data? Run `python yuribot/data/build_yuri_dataset.py --pages 3 --per-page 25 --limit 80 --output my_yuri_dataset.json` to call the AniList GraphQL API and emit a fresh dataset keyed as `"yuri_remote"`. Host the resulting JSON (for example with `python -m http.server`) and point `AKINATOR_DATA_URL` at it.
+- The script requires outbound internet access. When working offline you can still use `yuribot/data/yuri_remote_dataset.sample.json`, which contains a snapshot generated with the same question set so you can test the remote loader locally.
+

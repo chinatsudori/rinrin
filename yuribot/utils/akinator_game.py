@@ -4,13 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..data.akinator_sets import (
-    AKINATOR_SETS,
-    DEFAULT_SET,
-    YURI_SET,
-    CharacterEntry,
-    GameSet,
-)
+from ..data.akinator_loader import load_available_sets
+from ..data.akinator_sets import CharacterEntry, GameSet
 
 
 AnswerKey = str
@@ -46,9 +41,11 @@ class GuessResult:
 class AkinatorGame:
     """A tiny deterministic akinator implementation built on curated data."""
 
-    def __init__(self, *, yuri_mode: bool = False) -> None:
-        key = YURI_SET if yuri_mode else DEFAULT_SET
-        dataset = AKINATOR_SETS[key]
+    def __init__(self, *, yuri_mode: bool = False, dataset_key: str | None = None) -> None:
+        sets, default_key, yuri_key = load_available_sets()
+        key = dataset_key or (yuri_key if yuri_mode else default_key)
+        dataset = sets.get(key) or sets[default_key]
+
         self.dataset_key = key
         self.dataset: GameSet = dataset
         self.questions: Sequence[str] = dataset["questions"]
