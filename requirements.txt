@@ -6,3 +6,4 @@ matplotlib>=3.8
 numpy>=1.24
 pillow>=10.0
 tzdata>=2024.1
+wavelink>=2.6.3
