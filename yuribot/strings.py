@@ -7,7 +7,7 @@ import random
 # ===============================================================
 # ===== Persona / flavor toggles =====
 # Hard mode: pick full-string variant
-RIN_MODE: str = "neutral"  # "neutral" | "rin"
+RIN_MODE: str = "rin"  # "neutral" | "rin"
 
 # Soft mode: keep your existing quip system (optional)
 RIN_PERSONA_ENABLED = True
