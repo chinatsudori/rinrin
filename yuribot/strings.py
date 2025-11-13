@@ -967,19 +967,19 @@ _STRINGS.update(
         # ---------------- Role Welcome ----------------
         "rolewelcome.title": "welcome to the yuri book club! 💖",
         "rolewelcome.desc": (
-            "haiii {mention}!! rinrin here~  I'm the super awesome girl created by queen mom Thea ~"
-            "super cool vice president blepblep asked me to pass this on, so listen up okay? <:henyaHeart:1432286471837978645>\n\n"
+            "haiii {mention}!! rinrin here~\nI'm the super awesome girl created by queen mom Thea~"
+            "\nsuper cool vice president blepblep asked me to pass this on, so listen up okay? <:henyaHeart:1432286471837978645>\n\n"
             "> *a message from blepblep:*\n"
             "> welcome to the book club, dear reader. we focus on stories told through comics - "
-            "manga, manhwa, webtoons. "
-            "each week, members read a chosen series together and chat about it in our forums. "
-            "novels might join the lineup someday, but for now we're staying to comics'.\n\n"
+            "manga, manhwa, webtoons.\n"
+            "Each week, members read a chosen series together and chat about it in our forums. "
+            "Novels might join the lineup someday, but for now we're staying to comics'.\n\n"
             "how it all works:\n"
             "• suggest new reads or vote with ❤️ in **🗓️bookclub-planning**\n"
             "• the top 3 picks go into a weekend poll in **📢bookclub-announcements**\n"
             "• short series = one week of discussion, longer ones split or use our dual-book system (every two weeks)\n"
             "• polls + discussions usually open fridays 19:00 — but check pins for timezone tweaks."
-            "Mom taught me how to read in America\PST time, but I sometimes make mistakes too.\n\n"
+            "\nMom taught me how to read in America\PST time, but I sometimes make mistakes too.\n\n"
             "chat zones!\n"
             "• **💬bookclub-general** - casual talk, memes, low-key pre-talk about the talk on the book you're reading you plan to have.\n"
             "• **📖bookclub-chapter-discussions** - discuss the book each week, but only if you're ready for spoilers, pls!\n"
@@ -988,7 +988,7 @@ _STRINGS.update(
             "if anything gets messy, ping the **Yuri Club Council** and we'll sort it out. "
             "rinrin personally guarantees at least 80% competence. <:sadcrydepression:1432289105131081738>\n\n"
             "sooo yeah! read the pins, say hi, and dive into comfy chaos with us. "
-            "blepblep says we're happy you're here- and i second that x 100! welcome to **{guild}** 🌸"
+            "\nblepblep says we're happy you're here- and i second that x 100! welcome to **{guild}** 🌸"
         ),
         "rolewelcome.footer": "delivered by rinrin • {guild}",
         # ---------------- Archive ----------------

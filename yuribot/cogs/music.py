@@ -23,7 +23,6 @@ from yuribot.strings import S
 
 log = logging.getLogger(__name__)
 
-
 SPOTIFY_URL_RE = re.compile(
     r"(?:https?://open\.spotify\.com/(?:embed/)?|spotify:)(?P<type>track|album|playlist)[/:](?P<id>[A-Za-z0-9]+)"
 )
@@ -98,7 +97,10 @@ class PlaylistStore:
 
     async def list(self, guild_id: int) -> List[str]:
         async with self._lock:
-            return sorted(pdata.get("label", name) for name, pdata in self._data.get(str(guild_id), {}).items())
+            return sorted(
+                pdata.get("label", name)
+                for name, pdata in self._data.get(str(guild_id), {}).items()
+            )
 
     async def get(self, guild_id: int, name: str) -> dict | None:
         async with self._lock:
@@ -127,7 +129,9 @@ class SpotifyResolver:
 
     API_ROOT = "https://api.spotify.com/v1"
 
-    def __init__(self, client_id: str, client_secret: str, *, max_tracks: int = 100) -> None:
+    def __init__(
+        self, client_id: str, client_secret: str, *, max_tracks: int = 100
+    ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.max_tracks = max(1, max_tracks)
@@ -162,9 +166,13 @@ class SpotifyResolver:
             data = {"grant_type": "client_credentials"}
             auth = aiohttp.BasicAuth(self.client_id, self.client_secret)
             try:
-                async with session.post("https://accounts.spotify.com/api/token", data=data, auth=auth) as resp:
+                async with session.post(
+                    "https://accounts.spotify.com/api/token", data=data, auth=auth
+                ) as resp:
                     if resp.status != 200:
-                        log.warning("spotify: token request failed with status %s", resp.status)
+                        log.warning(
+                            "spotify: token request failed with status %s", resp.status
+                        )
                         self._token = None
                         return None
                     payload = await resp.json()
@@ -186,7 +194,9 @@ class SpotifyResolver:
         try:
             async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status != 200:
-                    log.warning("spotify: request to %s failed with status %s", url, resp.status)
+                    log.warning(
+                        "spotify: request to %s failed with status %s", url, resp.status
+                    )
                     return None
                 return await resp.json()
         except Exception:
@@ -236,7 +246,11 @@ class SpotifyResolver:
         name = data.get("name")
         if not name:
             return None
-        artists = ", ".join(artist.get("name") for artist in data.get("artists", []) if artist.get("name"))
+        artists = ", ".join(
+            artist.get("name")
+            for artist in data.get("artists", [])
+            if artist.get("name")
+        )
         if artists:
             return f"{name} - {artists}"
         return name
@@ -291,15 +305,25 @@ class MusicControllerView(discord.ui.View):
                 child.disabled = not has_track
             elif child.custom_id == "music:loop":
                 child.disabled = not has_track
-                child.style = discord.ButtonStyle.success if self.player.loop_current else discord.ButtonStyle.secondary
+                child.style = (
+                    discord.ButtonStyle.success
+                    if self.player.loop_current
+                    else discord.ButtonStyle.secondary
+                )
             elif child.custom_id == "music:shuffle":
                 child.disabled = not has_queue or len(self.player.queue) < 2
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not self.player.channel:
-            await interaction.response.send_message(S("music.controller.not_connected"), ephemeral=True)
+            await interaction.response.send_message(
+                S("music.controller.not_connected"), ephemeral=True
+            )
             return False
-        voice = interaction.user.voice if isinstance(interaction.user, discord.Member) else None
+        voice = (
+            interaction.user.voice
+            if isinstance(interaction.user, discord.Member)
+            else None
+        )
         if not voice or voice.channel != self.player.channel:
             await interaction.response.send_message(
                 S("music.controller.join_voice"), ephemeral=True
@@ -316,8 +340,12 @@ class MusicControllerView(discord.ui.View):
             with suppress(Exception):
                 await self.player.controller_message.edit(view=self)
 
-    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary, custom_id="music:playpause")
-    async def playpause(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(
+        emoji="⏯️", style=discord.ButtonStyle.primary, custom_id="music:playpause"
+    )
+    async def playpause(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
         if _player_is_paused(self.player):
             await self.player.resume()
         else:
@@ -325,24 +353,40 @@ class MusicControllerView(discord.ui.View):
         await self.cog.refresh_controller(self.player)
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip")
-    async def skip(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(
+        emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip"
+    )
+    async def skip(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
         await self.cog._skip_current(self.player)
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music:stop")
-    async def stop(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(
+        emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music:stop"
+    )
+    async def stop(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
         await self.cog._stop_player(self.player)
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="music:loop")
-    async def loop(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(
+        emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="music:loop"
+    )
+    async def loop(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
         self.player.loop_current = not self.player.loop_current
         await self.cog.refresh_controller(self.player)
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="music:shuffle")
-    async def shuffle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(
+        emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="music:shuffle"
+    )
+    async def shuffle(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
         self.player.shuffle_queue()
         await self.cog.refresh_controller(self.player)
         await interaction.response.defer()
@@ -372,7 +416,9 @@ class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.max_bitrate = int(os.getenv("MUSIC_MAX_BITRATE", "384000"))
-        playlist_path = Path(__file__).resolve().parent.parent / "data" / "music_playlists.json"
+        playlist_path = (
+            Path(__file__).resolve().parent.parent / "data" / "music_playlists.json"
+        )
         self.playlists = PlaylistStore(playlist_path)
         spotify_id = os.getenv("SPOTIFY_CLIENT_ID")
         spotify_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -385,7 +431,9 @@ class MusicCog(commands.Cog):
             if spotify_id and spotify_secret
             else None
         )
-        self._node_task: asyncio.Task | None = self.bot.loop.create_task(self._connect_nodes())
+        self._node_task: asyncio.Task | None = self.bot.loop.create_task(
+            self._connect_nodes()
+        )
 
     async def cog_unload(self) -> None:
         if self._node_task:
@@ -403,7 +451,11 @@ class MusicCog(commands.Cog):
         config = self._lavalink_config()
         try:
             await wavelink.NodePool.create_node(bot=self.bot, **config)
-            log.info("music: connected to lavalink node %s:%s", config.get("host"), config.get("port"))
+            log.info(
+                "music: connected to lavalink node %s:%s",
+                config.get("host"),
+                config.get("port"),
+            )
         except Exception:
             log.exception("music: failed to connect to lavalink node")
 
@@ -437,10 +489,36 @@ class MusicCog(commands.Cog):
         else:
             await ctx.reply(**kwargs)
 
-    async def _get_player(self, ctx: commands.Context, *, connect: bool = True) -> YuriPlayer | None:
+    def _any_node_connected(self) -> bool:
+        """Best-effort check that at least one Lavalink node is CONNECTED."""
+        try:
+            nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
+            return any(
+                getattr(getattr(n, "status", None), "name", None) == "CONNECTED"
+                for n in nodes.values()
+            )
+        except Exception:
+            # Older builds expose .available
+            try:
+                return any(getattr(n, "available", False) for n in nodes.values())  # type: ignore[name-defined]
+            except Exception:
+                return False
+
+    async def _get_player(
+        self, ctx: commands.Context, *, connect: bool = True
+    ) -> YuriPlayer | None:
         if not ctx.guild:
             await self._reply(ctx, content=S("common.guild_only"))
             return None
+
+        # Guardrail: ensure a connected node before attempting voice connect.
+        if not self._any_node_connected():
+            await self._reply(ctx, content=S("music.controller.not_connected"))
+            # Opportunistic reconnect
+            with suppress(Exception):
+                await self._connect_nodes()
+            return None
+
         player = ctx.guild.voice_client
         if player and not isinstance(player, YuriPlayer):
             await self._reply(ctx, content=S("music.error.other_client"))
@@ -449,18 +527,30 @@ class MusicCog(commands.Cog):
             return player
         if not connect:
             return None
-        if not isinstance(ctx.author, discord.Member) or not ctx.author.voice or not ctx.author.voice.channel:
+        if (
+            not isinstance(ctx.author, discord.Member)
+            or not ctx.author.voice
+            or not ctx.author.voice.channel
+        ):
             await self._reply(ctx, content=S("music.error.join_voice_first"))
             return None
         channel = ctx.author.voice.channel
         player = await channel.connect(cls=YuriPlayer)
-        channel_bitrate = getattr(channel, "bitrate", self.max_bitrate) or self.max_bitrate
+        channel_bitrate = (
+            getattr(channel, "bitrate", self.max_bitrate) or self.max_bitrate
+        )
         with suppress(AttributeError):
             player.preferred_bitrate = min(channel_bitrate, self.max_bitrate)
-        player.bound_text_id = ctx.channel.id if isinstance(ctx.channel, (discord.TextChannel, discord.Thread)) else None
-        return player
+        player.bound_text_id = (
+            ctx.channel.id
+            if isinstance(ctx.channel, (discord.TextChannel, discord.Thread))
+            else None
+        )
+        return player  # type: ignore[return-value]
 
-    def _player_text_channel(self, player: YuriPlayer) -> discord.abc.Messageable | None:
+    def _player_text_channel(
+        self, player: YuriPlayer
+    ) -> discord.abc.Messageable | None:
         if not player.guild or not player.bound_text_id:
             return None
         channel = player.guild.get_channel(player.bound_text_id)
@@ -469,16 +559,18 @@ class MusicCog(commands.Cog):
         return None
 
     async def _search_tracks(self, query: str) -> List[wavelink.Playable]:
-        if self.spotify:
-            spotify_queries = await self.spotify.resolve_queries(query)
-        else:
-            spotify_queries = []
-
+        # Spotify URL → list of YT queries
+        spotify_queries = (
+            await self.spotify.resolve_queries(query) if self.spotify else []
+        )
         tracks: List[wavelink.Playable] = []
+
         if spotify_queries:
             for entry in spotify_queries:
                 try:
-                    result = await wavelink.YouTubeTrack.search(query=entry, return_first=True)
+                    result = await wavelink.YouTubeTrack.search(
+                        query=entry, return_first=True
+                    )
                 except Exception:
                     continue
                 if isinstance(result, list):
@@ -490,6 +582,7 @@ class MusicCog(commands.Cog):
             if tracks:
                 return tracks
 
+        # Try playlist first (if query is a playlist URL)
         try:
             playlist = await wavelink.YouTubePlaylist.search(query=query)
         except Exception:
@@ -498,7 +591,9 @@ class MusicCog(commands.Cog):
             tracks.extend(list(playlist.tracks))
         else:
             try:
-                results = await wavelink.YouTubeTrack.search(query=query, return_first=False)
+                results = await wavelink.YouTubeTrack.search(
+                    query=query, return_first=False
+                )
             except Exception:
                 results = None
             if isinstance(results, list):
@@ -541,11 +636,17 @@ class MusicCog(commands.Cog):
             embed.description = S("music.controller.idle_hint")
         embed.add_field(
             name=S("music.controller.field_loop"),
-            value=S("music.controller.loop_on") if player.loop_current else S("music.controller.loop_off"),
+            value=(
+                S("music.controller.loop_on")
+                if player.loop_current
+                else S("music.controller.loop_off")
+            ),
         )
         embed.add_field(
             name=S("music.controller.field_volume"),
-            value=S("music.controller.volume_value", percent=getattr(player, "volume", 100)),
+            value=S(
+                "music.controller.volume_value", percent=getattr(player, "volume", 100)
+            ),
         )
         if player.queue:
             upcoming = []
@@ -565,10 +666,19 @@ class MusicCog(commands.Cog):
             )
         return embed
 
-    async def _queue_tracks(self, player: YuriPlayer, tracks: Iterable[wavelink.Playable], author: discord.Member) -> List[QueuedTrack]:
+    async def _queue_tracks(
+        self,
+        player: YuriPlayer,
+        tracks: Iterable[wavelink.Playable],
+        author: discord.Member,
+    ) -> List[QueuedTrack]:
         added: List[QueuedTrack] = []
         for track in tracks:
-            entry = QueuedTrack(track=track, requester_id=author.id, requester_display=author.display_name)
+            entry = QueuedTrack(
+                track=track,
+                requester_id=author.id,
+                requester_display=author.display_name,
+            )
             if not player.current:
                 player.current = entry
                 await player.play(track)
@@ -599,11 +709,15 @@ class MusicCog(commands.Cog):
         await player.stop()
         await self.refresh_controller(player)
 
-    async def _resolve_identifiers(self, identifiers: Sequence[str]) -> List[wavelink.Playable]:
+    async def _resolve_identifiers(
+        self, identifiers: Sequence[str]
+    ) -> List[wavelink.Playable]:
         resolved: List[wavelink.Playable] = []
         for entry in identifiers:
             try:
-                results = await wavelink.YouTubeTrack.search(query=entry, return_first=True)
+                results = await wavelink.YouTubeTrack.search(
+                    query=entry, return_first=True
+                )
             except Exception:
                 continue
             if isinstance(results, list):
@@ -617,11 +731,15 @@ class MusicCog(commands.Cog):
     def _collect_identifiers(self, player: YuriPlayer) -> List[str]:
         identifiers: List[str] = []
         if player.current:
-            uri = getattr(player.current.track, "uri", None) or getattr(player.current.track, "identifier", None)
+            uri = getattr(player.current.track, "uri", None) or getattr(
+                player.current.track, "identifier", None
+            )
             if uri:
                 identifiers.append(uri)
         for entry in player.queue:
-            uri = getattr(entry.track, "uri", None) or getattr(entry.track, "identifier", None)
+            uri = getattr(entry.track, "uri", None) or getattr(
+                entry.track, "identifier", None
+            )
             if uri:
                 identifiers.append(uri)
         return identifiers
@@ -632,7 +750,9 @@ class MusicCog(commands.Cog):
         log.info("music: node %s is ready", node.identifier)
 
     @commands.Cog.listener()
-    async def on_wavelink_track_end(self, player: wavelink.Player, track: wavelink.Playable, reason: str) -> None:
+    async def on_wavelink_track_end(
+        self, player: wavelink.Player, track: wavelink.Playable, reason: str
+    ) -> None:
         if not isinstance(player, YuriPlayer):
             return
         if reason == "REPLACED":
@@ -640,13 +760,30 @@ class MusicCog(commands.Cog):
         await self._advance_queue(player)
 
     @commands.Cog.listener()
-    async def on_wavelink_track_start(self, player: wavelink.Player, track: wavelink.Playable) -> None:
+    async def on_wavelink_track_start(
+        self, player: wavelink.Player, track: wavelink.Playable
+    ) -> None:
         if isinstance(player, YuriPlayer):
             await self.refresh_controller(player)
 
-    # ---- commands ----
-    @commands.hybrid_command(name="play", description=S("music.cmd.play"))
-    async def play(self, ctx: commands.Context, *, query: str) -> None:
+    # =========================
+    # Group: /music …
+    # =========================
+    @commands.hybrid_group(
+        name="music", description="Music controls", invoke_without_command=True
+    )
+    async def music(self, ctx: commands.Context) -> None:
+        await self._reply(
+            ctx,
+            content=(
+                "Use subcommands: play, pause, resume, skip, stop, leave, nowplaying, queue, volume, controller, "
+                "playlist, node"
+            ),
+        )
+
+    # ---- core controls ----
+    @music.command(name="play", description=S("music.cmd.play"))
+    async def music_play(self, ctx: commands.Context, *, query: str) -> None:
         await self._maybe_defer(ctx)
         player = await self._get_player(ctx)
         if not player:
@@ -657,16 +794,18 @@ class MusicCog(commands.Cog):
         if not tracks:
             await self._reply(ctx, content=S("music.error.no_matches"))
             return
-        added = await self._queue_tracks(player, tracks, ctx.author)
+        added = await self._queue_tracks(player, tracks, ctx.author)  # type: ignore[arg-type]
         await self.refresh_controller(player)
         if len(added) == 1:
             title = _format_track_title(added[0].track)
             await self._reply(ctx, content=S("music.info.queued_single", title=title))
         else:
-            await self._reply(ctx, content=S("music.info.queued_multi", count=len(added)))
+            await self._reply(
+                ctx, content=S("music.info.queued_multi", count=len(added))
+            )
 
-    @commands.hybrid_command(name="pause", description=S("music.cmd.pause"))
-    async def pause(self, ctx: commands.Context) -> None:
+    @music.command(name="pause", description=S("music.cmd.pause"))
+    async def music_pause(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
             await self._reply(ctx, content=S("music.error.nothing_playing"))
@@ -674,8 +813,8 @@ class MusicCog(commands.Cog):
         await player.pause()
         await self._reply(ctx, content=S("music.info.paused"))
 
-    @commands.hybrid_command(name="resume", description=S("music.cmd.resume"))
-    async def resume(self, ctx: commands.Context) -> None:
+    @music.command(name="resume", description=S("music.cmd.resume"))
+    async def music_resume(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
             await self._reply(ctx, content=S("music.error.nothing_playing"))
@@ -683,8 +822,8 @@ class MusicCog(commands.Cog):
         await player.resume()
         await self._reply(ctx, content=S("music.info.resumed"))
 
-    @commands.hybrid_command(name="skip", description=S("music.cmd.skip"))
-    async def skip(self, ctx: commands.Context) -> None:
+    @music.command(name="skip", description=S("music.cmd.skip"))
+    async def music_skip(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or not player.current:
             await self._reply(ctx, content=S("music.error.nothing_to_skip"))
@@ -692,8 +831,8 @@ class MusicCog(commands.Cog):
         await self._skip_current(player)
         await self._reply(ctx, content=S("music.info.skipped"))
 
-    @commands.hybrid_command(name="stop", description=S("music.cmd.stop"))
-    async def stop(self, ctx: commands.Context) -> None:
+    @music.command(name="stop", description=S("music.cmd.stop"))
+    async def music_stop(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
             await self._reply(ctx, content=S("music.error.not_connected"))
@@ -701,8 +840,8 @@ class MusicCog(commands.Cog):
         await self._stop_player(player)
         await self._reply(ctx, content=S("music.info.stopped"))
 
-    @commands.hybrid_command(name="leave", description=S("music.cmd.leave"))
-    async def leave(self, ctx: commands.Context) -> None:
+    @music.command(name="leave", description=S("music.cmd.leave"))
+    async def music_leave(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
             await self._reply(ctx, content=S("music.error.not_in_voice"))
@@ -711,8 +850,8 @@ class MusicCog(commands.Cog):
         await player.disconnect()
         await self._reply(ctx, content=S("music.info.disconnected"))
 
-    @commands.hybrid_command(name="nowplaying", description=S("music.cmd.nowplaying"))
-    async def nowplaying(self, ctx: commands.Context) -> None:
+    @music.command(name="nowplaying", description=S("music.cmd.nowplaying"))
+    async def music_nowplaying(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
             await self._reply(ctx, content=S("music.error.not_connected"))
@@ -720,15 +859,20 @@ class MusicCog(commands.Cog):
         embed = self._build_controller_embed(player)
         await self._reply(ctx, embed=embed)
 
-    @commands.hybrid_command(name="queue", description=S("music.cmd.queue"))
-    async def queue(self, ctx: commands.Context) -> None:
+    @music.command(name="queue", description=S("music.cmd.queue"))
+    async def music_queue(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player or (not player.current and not player.queue):
             await self._reply(ctx, content=S("music.error.queue_empty"))
             return
         lines: List[str] = []
         if player.current:
-            lines.append(S("music.queue.line_now", track=_format_track_title(player.current.track)))
+            lines.append(
+                S(
+                    "music.queue.line_now",
+                    track=_format_track_title(player.current.track),
+                )
+            )
         for idx, entry in enumerate(player.queue, start=1):
             lines.append(
                 S(
@@ -746,8 +890,8 @@ class MusicCog(commands.Cog):
         )
         await self._reply(ctx, embed=embed)
 
-    @commands.hybrid_command(name="volume", description=S("music.cmd.volume"))
-    async def volume(self, ctx: commands.Context, level: int) -> None:
+    @music.command(name="volume", description=S("music.cmd.volume"))
+    async def music_volume(self, ctx: commands.Context, level: int) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
             await self._reply(ctx, content=S("music.error.not_connected"))
@@ -757,8 +901,8 @@ class MusicCog(commands.Cog):
         await self._reply(ctx, content=S("music.info.volume_set", level=level))
         await self.refresh_controller(player)
 
-    @commands.hybrid_command(name="controller", description=S("music.cmd.controller"))
-    async def controller(self, ctx: commands.Context) -> None:
+    @music.command(name="controller", description=S("music.cmd.controller"))
+    async def music_controller(self, ctx: commands.Context) -> None:
         player = await self._get_player(ctx, connect=False)
         if not player:
             await self._reply(ctx, content=S("music.error.nothing_to_control"))
@@ -768,9 +912,13 @@ class MusicCog(commands.Cog):
         await self.refresh_controller(player)
         await self._reply(ctx, content=S("music.info.controller_refreshed"))
 
-    # ---- playlist commands ----
-    @commands.hybrid_group(name="playlist", description=S("music.cmd.playlist"), invoke_without_command=True)
-    async def playlist(self, ctx: commands.Context) -> None:
+    # ---- playlist subgroup ----
+    @music.group(
+        name="playlist",
+        description=S("music.cmd.playlist"),
+        invoke_without_command=True,
+    )
+    async def music_playlist(self, ctx: commands.Context) -> None:
         if not ctx.guild:
             await self._reply(ctx, content=S("common.guild_only"))
             return
@@ -778,10 +926,12 @@ class MusicCog(commands.Cog):
         if not names:
             await self._reply(ctx, content=S("music.info.playlists_none"))
             return
-        await self._reply(ctx, content=S("music.info.playlists_list", names=", ".join(names)))
+        await self._reply(
+            ctx, content=S("music.info.playlists_list", names=", ".join(names))
+        )
 
-    @playlist.command(name="save", description=S("music.cmd.playlist_save"))
-    async def playlist_save(self, ctx: commands.Context, name: str) -> None:
+    @music_playlist.command(name="save", description=S("music.cmd.playlist_save"))
+    async def music_playlist_save(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
             await self._reply(ctx, content=S("common.guild_only"))
             return
@@ -799,8 +949,8 @@ class MusicCog(commands.Cog):
             content=S("music.info.playlist_saved", name=name, count=len(identifiers)),
         )
 
-    @playlist.command(name="load", description=S("music.cmd.playlist_load"))
-    async def playlist_load(self, ctx: commands.Context, name: str) -> None:
+    @music_playlist.command(name="load", description=S("music.cmd.playlist_load"))
+    async def music_playlist_load(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
             await self._reply(ctx, content=S("common.guild_only"))
             return
@@ -819,7 +969,7 @@ class MusicCog(commands.Cog):
             return
         if isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
             player.bound_text_id = ctx.channel.id
-        await self._queue_tracks(player, tracks, ctx.author)
+        await self._queue_tracks(player, tracks, ctx.author)  # type: ignore[arg-type]
         await self.refresh_controller(player)
         await self._reply(
             ctx,
@@ -830,8 +980,8 @@ class MusicCog(commands.Cog):
             ),
         )
 
-    @playlist.command(name="delete", description=S("music.cmd.playlist_delete"))
-    async def playlist_delete(self, ctx: commands.Context, name: str) -> None:
+    @music_playlist.command(name="delete", description=S("music.cmd.playlist_delete"))
+    async def music_playlist_delete(self, ctx: commands.Context, name: str) -> None:
         if not ctx.guild:
             await self._reply(ctx, content=S("common.guild_only"))
             return
@@ -840,6 +990,37 @@ class MusicCog(commands.Cog):
             await self._reply(ctx, content=S("music.error.playlist_missing"))
             return
         await self._reply(ctx, content=S("music.info.playlist_deleted", name=name))
+
+    # ---- node subgroup ----
+    @music.group(
+        name="node", description="Lavalink node tools", invoke_without_command=True
+    )
+    async def music_node(self, ctx: commands.Context) -> None:
+        nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
+        if not nodes:
+            await self._reply(ctx, content="No nodes registered.")
+            return
+        lines = []
+        for n in nodes.values():
+            status = getattr(getattr(n, "status", None), "name", None) or "UNKNOWN"
+            ident = getattr(n, "identifier", "unknown")
+            host = getattr(n, "host", "?")
+            port = getattr(n, "port", "?")
+            lines.append(f"{ident} @ {host}:{port} — {status}")
+        await self._reply(ctx, content="\n".join(lines))
+
+    @music_node.command(name="connect", description="Connect to the Lavalink node now")
+    async def music_node_connect(self, ctx: commands.Context) -> None:
+        try:
+            await self._connect_nodes()
+            await self._reply(
+                ctx,
+                content="Attempted node connect. Use `/music node` to check status.",
+            )
+        except Exception:
+            await self._reply(
+                ctx, content="Node connect attempt failed. Check bot logs."
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
