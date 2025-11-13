@@ -151,6 +151,7 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.voice_stats",
             "yuribot.cogs.tellmum",
             "yuribot.cogs.activity_metrics",
+            "yuribot.cogs.music",
         )
         await self._load_extensions(extensions)
 
