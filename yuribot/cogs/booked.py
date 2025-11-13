@@ -5,6 +5,7 @@ import logging
 import discord
 from discord.ext import commands
 
+from discord.ext.commands import guild_only
 from ..models import role_welcome
 from ..ui.booked import build_role_welcome_embed
 from ..utils.booked import TARGET_ROLE_ID, role_ids
