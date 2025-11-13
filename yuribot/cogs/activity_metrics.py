@@ -253,9 +253,7 @@ class ActivityMetricsCog(commands.Cog):
                 progress["channel_index"] = idx
                 if isinstance(ch, discord.StageChannel):
                     continue
-                if isinstance(ch, discord.TextChannel) or isinstance(
-                    ch, discord.NewsChannel
-                ):
+                if isinstance(ch, discord.TextChannel):
                     await _scan_textlike(ch)
                 elif isinstance(ch, discord.ForumChannel):
                     await _scan_forum(ch)
