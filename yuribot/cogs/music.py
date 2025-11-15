@@ -29,6 +29,9 @@ from yuribot.utils.music import (
 
 log = logging.getLogger(__name__)
 
+node = wavelink.Node(uri="http(s)://host:port", password="pass")
+await wavelink.NodePool.connect(client=self.bot, nodes=[node])
+
 
 class MusicCog(commands.Cog):
     """Music system backed by Lavalink via Wavelink."""
@@ -68,8 +71,9 @@ class MusicCog(commands.Cog):
 
         # ---- node bootstrap ----
 
-    async def _connect_nodes(self) -> None:
-        """Connect to the Lavalink node using the NodePool.connect API we actually have."""
+        async def _connect_nodes(self) -> None:
+            """Connect to the Lavalink node using NodePool.connect(client=..., nodes=[Node(...)])."""
+
         await self.bot.wait_until_ready()
 
         NodePool = getattr(wavelink, "NodePool", None)
@@ -81,10 +85,10 @@ class MusicCog(commands.Cog):
 
         # If nodes already exist, don't recreate them.
         try:
-            existing_nodes = getattr(NodePool, "nodes", {}) or {}
+            existing = getattr(NodePool, "nodes", {}) or {}
         except Exception:
-            existing_nodes = {}
-        if existing_nodes:
+            existing = {}
+        if existing:
             return
 
         config = self._lavalink_config()
@@ -92,80 +96,22 @@ class MusicCog(commands.Cog):
         port = config.get("port")
         password = config.get("password")
         https = config.get("https", False)
-        identifier = config.get("identifier")
 
-        connect = getattr(NodePool, "connect", None)
-        if connect is None:
-            log.error(
-                "music: NodePool has no 'connect' method; attrs=%s",
-                [a for a in dir(NodePool) if not a.startswith("_")],
+        scheme = "https" if https else "http"
+        uri = f"{scheme}://{host}:{port}"
+
+        # Build a single node and connect the pool to it.
+        node = wavelink.Node(uri=uri, password=password)
+
+        try:
+            await NodePool.connect(client=self.bot, nodes=[node])
+            log.info(
+                "music: connected to lavalink node %s:%s via NodePool.connect",
+                host,
+                port,
             )
-            return
-
-        # Try a few signatures in order, catching TypeError each time
-        attempts = [
-            # classic-ish bot+identifier (will TypeError in your build, we know)
-            {
-                "args": [],
-                "kwargs": dict(
-                    bot=self.bot,
-                    host=host,
-                    port=port,
-                    password=password,
-                    https=https,
-                    identifier=identifier,
-                ),
-            },
-            # client+identifier
-            {
-                "args": [],
-                "kwargs": dict(
-                    client=self.bot,
-                    host=host,
-                    port=port,
-                    password=password,
-                    https=https,
-                    identifier=identifier,
-                ),
-            },
-            # client only (most likely match in your case)
-            {
-                "args": [],
-                "kwargs": dict(
-                    client=self.bot,
-                    host=host,
-                    port=port,
-                    password=password,
-                    https=https,
-                ),
-            },
-            # bare positional (client, host, port, password)
-            {"args": [self.bot, host, port, password], "kwargs": {}},
-        ]
-
-        for idx, spec in enumerate(attempts, start=1):
-            try:
-                await connect(*spec.get("args", []), **spec.get("kwargs", {}))
-                log.info(
-                    "music: connected to lavalink node %s:%s via NodePool.connect (attempt %d)",
-                    host,
-                    port,
-                    idx,
-                )
-                return
-            except TypeError as e:
-                # Signature mismatch; try the next pattern.
-                log.debug("music: NodePool.connect attempt %d TypeError: %r", idx, e)
-                continue
-            except Exception:
-                # Real failure, log and bail.
-                log.exception("music: NodePool.connect attempt %d failed", idx)
-                return
-
-        log.error(
-            "music: NodePool.connect could not be called with any known signature; attrs=%s",
-            [a for a in dir(NodePool) if not a.startswith("_")],
-        )
+        except Exception:
+            log.exception("music: failed to connect to lavalink node")
 
     def _lavalink_config(self) -> dict:
         url = os.getenv("LAVALINK_URL", "http://127.0.0.1:2333")
@@ -199,17 +145,25 @@ class MusicCog(commands.Cog):
             await ctx.reply(**kwargs)
 
     def _any_node_connected(self) -> bool:
+        """Best-effort check that at least one Lavalink node is connected."""
+        NodePool = getattr(wavelink, "NodePool", None)
+        if NodePool is None:
+            return False
         try:
-            nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
-            return any(
-                getattr(getattr(n, "status", None), "name", None) == "CONNECTED"
-                for n in nodes.values()
-            )
+            nodes = getattr(NodePool, "nodes", {}) or {}
         except Exception:
-            try:
-                return any(getattr(n, "available", False) for n in nodes.values())  # type: ignore[name-defined]
-            except Exception:
-                return False
+            return False
+
+        # nodes is usually a dict[identifier, Node], but be defensive.
+        if isinstance(nodes, dict):
+            node_iter = nodes.values()
+        else:
+            node_iter = nodes
+
+        for n in node_iter:
+            if getattr(n, "is_connected", False) or getattr(n, "available", False):
+                return True
+        return False
 
     async def _get_player(
         self, ctx: commands.Context, *, connect: bool = True
@@ -544,65 +498,99 @@ class MusicCog(commands.Cog):
             return
         await self._reply(ctx, content=S("music.info.playlist_deleted", name=name))
 
-    # ---- node subgroup ----
+        # ---- node subgroup ----
 
-    @music.group(
-        name="node",
-        description="Lavalink node tools",
-        invoke_without_command=True,
-    )
-    async def music_node(self, ctx: commands.Context) -> None:
-        nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
-        if not nodes:
-            await self._reply(ctx, content="No nodes registered.")
-            return
-        lines = []
-        for n in nodes.values():
-            status = getattr(getattr(n, "status", None), "name", None) or "UNKNOWN"
-            ident = getattr(n, "identifier", "unknown")
-            host = getattr(n, "host", "?")
-            port = getattr(n, "port", "?")
-            lines.append(f"{ident} @ {host}:{port} — {status}")
-        await self._reply(ctx, content="\n".join(lines))
+        @music.group(
+            name="node",
+            description="Lavalink node tools",
+            invoke_without_command=True,
+        )
+        async def music_node(self, ctx: commands.Context) -> None:
+            NodePool = getattr(wavelink, "NodePool", None)
+            if NodePool is None:
+                await self._reply(
+                    ctx, content="NodePool not available in this wavelink build."
+                )
+                return
 
-    @music_node.command(
-        name="connect",
-        description="Connect to the Lavalink node now",
-    )
-    async def music_node_connect(self, ctx: commands.Context) -> None:
-        import traceback
+            try:
+                nodes = getattr(NodePool, "nodes", {}) or {}
+            except Exception:
+                nodes = {}
 
-        try:
-            await self._connect_nodes()
-        except Exception as e:
-            tb = traceback.format_exc()
-            # Log to whatever logger you *do* see
-            log.error("music: explicit node connect failure: %r\n%s", e, tb)
-            # And send a compact version to Discord
+            if not nodes:
+                await self._reply(ctx, content="No nodes registered.")
+                return
+
+            if isinstance(nodes, dict):
+                items = nodes.items()
+            else:
+                # Fallback if it's a list-like
+                items = [(getattr(n, "identifier", "unknown"), n) for n in nodes]
+
+            lines = []
+            for ident, n in items:
+                host = getattr(n, "host", "?")
+                port = getattr(n, "port", "?")
+                if getattr(n, "is_connected", False) or getattr(n, "available", False):
+                    status = "CONNECTED"
+                else:
+                    status = "DISCONNECTED"
+                lines.append(f"{ident} @ {host}:{port} — {status}")
+            await self._reply(ctx, content="\n".join(lines))
+
+        @music_node.command(
+            name="connect",
+            description="Connect to the Lavalink node now",
+        )
+        async def music_node_connect(self, ctx: commands.Context) -> None:
+            import traceback
+
+            try:
+                await self._connect_nodes()
+            except Exception as e:
+                tb = traceback.format_exc()
+                log.error("music: explicit node connect failure: %r\n%s", e, tb)
+                await self._reply(
+                    ctx,
+                    content=f"Node connect failed: `{type(e).__name__}: {e}`",
+                )
+                return
+
+            # Show node statuses after attempting connect
+            NodePool = getattr(wavelink, "NodePool", None)
+            if NodePool is None:
+                await self._reply(ctx, content="NodePool not available after connect.")
+                return
+
+            try:
+                nodes = getattr(NodePool, "nodes", {}) or {}
+            except Exception:
+                nodes = {}
+
+            if not nodes:
+                await self._reply(ctx, content="No nodes registered after connect.")
+                return
+
+            if isinstance(nodes, dict):
+                items = nodes.items()
+            else:
+                items = [(getattr(n, "identifier", "unknown"), n) for n in nodes]
+
+            lines = []
+            for ident, n in items:
+                host = getattr(n, "host", "?")
+                port = getattr(n, "port", "?")
+                if getattr(n, "is_connected", False) or getattr(n, "available", False):
+                    status = "CONNECTED"
+                else:
+                    status = "DISCONNECTED"
+                lines.append(f"{ident} @ {host}:{port} — {status}")
+
             await self._reply(
                 ctx,
-                content=f"Node connect failed: `{type(e).__name__}: {e}`",
+                content="Node connect attempted.\n" + "\n".join(lines),
             )
-            return
-
-        # If we got here, _connect_nodes didn't raise. Show node statuses.
-        nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
-        if not nodes:
-            await self._reply(ctx, content="No nodes registered after connect.")
-            return
-
-        lines = []
-        for n in nodes.values():
-            status = getattr(getattr(n, "status", None), "name", None) or "UNKNOWN"
-            ident = getattr(n, "identifier", "unknown")
-            host = getattr(n, "host", "?")
-            port = getattr(n, "port", "?")
-            lines.append(f"{ident} @ {host}:{port} — {status}")
-
-        await self._reply(
-            ctx,
-            content="Node connect attempted.\n" + "\n".join(lines),
-        )
 
 
 async def setup(bot: commands.Bot) -> None:
