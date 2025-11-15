@@ -6,7 +6,7 @@ from contextlib import suppress
 import discord
 
 from yuribot.strings import S
-from yuribot.utils.music import (
+from yuribot.util.music import (
     YuriPlayer,
     format_duration,
     format_track_title,
@@ -15,8 +15,9 @@ from yuribot.utils.music import (
 
 
 class MusicControllerView(discord.ui.View):
-    def __init__(self, cog: "MusicCogProto", player: YuriPlayer) -> None:
-        # MusicCogProto = structural type; actual cog imports this.
+    """Message controller view for a YuriPlayer."""
+
+    def __init__(self, cog: "MusicCog", player: YuriPlayer) -> None:
         super().__init__(timeout=300)
         self.cog = cog
         self.player = player
@@ -52,6 +53,7 @@ class MusicControllerView(discord.ui.View):
                 S("music.controller.not_connected"), ephemeral=True
             )
             return False
+
         voice = (
             interaction.user.voice
             if isinstance(interaction.user, discord.Member)
@@ -62,6 +64,7 @@ class MusicControllerView(discord.ui.View):
                 S("music.controller.join_voice"), ephemeral=True
             )
             return False
+
         return True
 
     async def on_timeout(self) -> None:
@@ -76,7 +79,9 @@ class MusicControllerView(discord.ui.View):
     # ----- buttons -----
 
     @discord.ui.button(
-        emoji="⏯️", style=discord.ButtonStyle.primary, custom_id="music:playpause"
+        emoji="⏯️",
+        style=discord.ButtonStyle.primary,
+        custom_id="music:playpause",
     )
     async def playpause(
         self, interaction: discord.Interaction, _: discord.ui.Button
@@ -89,7 +94,9 @@ class MusicControllerView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.button(
-        emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip"
+        emoji="⏭️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="music:skip",
     )
     async def skip(
         self, interaction: discord.Interaction, _: discord.ui.Button
@@ -98,7 +105,9 @@ class MusicControllerView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.button(
-        emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music:stop"
+        emoji="⏹️",
+        style=discord.ButtonStyle.danger,
+        custom_id="music:stop",
     )
     async def stop(
         self, interaction: discord.Interaction, _: discord.ui.Button
@@ -107,7 +116,9 @@ class MusicControllerView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.button(
-        emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="music:loop"
+        emoji="🔁",
+        style=discord.ButtonStyle.secondary,
+        custom_id="music:loop",
     )
     async def loop(
         self, interaction: discord.Interaction, _: discord.ui.Button
@@ -117,7 +128,9 @@ class MusicControllerView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.button(
-        emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="music:shuffle"
+        emoji="🔀",
+        style=discord.ButtonStyle.secondary,
+        custom_id="music:shuffle",
     )
     async def shuffle(
         self, interaction: discord.Interaction, _: discord.ui.Button
@@ -129,6 +142,7 @@ class MusicControllerView(discord.ui.View):
 
 def build_controller_embed(player: YuriPlayer) -> discord.Embed:
     embed = discord.Embed(color=discord.Color.blurple())
+
     if player.current:
         track = player.current.track
         requester = player.current.requester(player.guild)
@@ -145,6 +159,7 @@ def build_controller_embed(player: YuriPlayer) -> discord.Embed:
     else:
         embed.title = S("music.controller.idle")
         embed.description = S("music.controller.idle_hint")
+
     embed.add_field(
         name=S("music.controller.field_loop"),
         value=(
@@ -156,9 +171,11 @@ def build_controller_embed(player: YuriPlayer) -> discord.Embed:
     embed.add_field(
         name=S("music.controller.field_volume"),
         value=S(
-            "music.controller.volume_value", percent=getattr(player, "volume", 100)
+            "music.controller.volume_value",
+            percent=getattr(player, "volume", 100),
         ),
     )
+
     if player.queue:
         upcoming = []
         for idx, entry in enumerate(list(player.queue)[:5], start=1):
@@ -175,4 +192,5 @@ def build_controller_embed(player: YuriPlayer) -> discord.Embed:
             value="\n".join(upcoming),
             inline=False,
         )
+
     return embed

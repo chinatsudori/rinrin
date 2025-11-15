@@ -1,4 +1,3 @@
-# yuribot/util/music.py
 from __future__ import annotations
 
 import asyncio
@@ -44,6 +43,7 @@ class QueuedTrack:
 
 
 def format_duration(length: int | None) -> str:
+    """Format a Lavalink length (ms) as H:MM:SS / M:SS."""
     if not length or length <= 0:
         return "?"
     seconds = int(length // 1000)
@@ -55,7 +55,10 @@ def format_duration(length: int | None) -> str:
 
 
 def format_track_title(track: wavelink.Playable) -> str:
-    title = getattr(track, "title", "Unknown track")
+    """Return a Markdown title with link if available."""
+    from yuribot.strings import S
+
+    title = getattr(track, "title", S("music.track.unknown"))
     uri = getattr(track, "uri", None)
     if uri:
         return f"[{title}]({uri})"
@@ -63,6 +66,7 @@ def format_track_title(track: wavelink.Playable) -> str:
 
 
 def player_is_paused(player: wavelink.Player) -> bool:
+    """Best-effort 'is paused' check across Wavelink versions."""
     state = getattr(player, "is_paused", False)
     if callable(state):
         try:
@@ -323,6 +327,7 @@ class YuriPlayer(wavelink.Player):
 async def search_tracks(
     query: str, *, spotify: SpotifyResolver | None
 ) -> List[wavelink.Playable]:
+    """High-level search: Spotify -> YT queries -> YT playlist/track."""
     # Spotify URL → list of YT queries
     spotify_queries = await spotify.resolve_queries(query) if spotify else []
     tracks: List[wavelink.Playable] = []

@@ -1,4 +1,3 @@
-# yuribot/cogs/music.py
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +6,7 @@ import os
 from contextlib import suppress
 from pathlib import Path
 from typing import List
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -14,7 +14,7 @@ import wavelink
 
 from yuribot.strings import S
 from yuribot.ui.music import MusicControllerView, build_controller_embed
-from yuribot.utils.music import (
+from yuribot.util.music import (
     PlaylistStore,
     SpotifyResolver,
     YuriPlayer,
@@ -70,7 +70,8 @@ class MusicCog(commands.Cog):
 
     async def _connect_nodes(self) -> None:
         await self.bot.wait_until_ready()
-        if wavelink.NodePool.nodes:
+        # Don’t duplicate nodes if already connected.
+        if getattr(wavelink.NodePool, "nodes", {}):
             return
         config = self._lavalink_config()
         try:
@@ -84,8 +85,6 @@ class MusicCog(commands.Cog):
             log.exception("music: failed to connect to lavalink node")
 
     def _lavalink_config(self) -> dict:
-        from urllib.parse import urlparse
-
         url = os.getenv("LAVALINK_URL", "http://127.0.0.1:2333")
         parsed = urlparse(url)
         host = parsed.hostname or "127.0.0.1"
@@ -93,7 +92,7 @@ class MusicCog(commands.Cog):
         password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
         identifier = os.getenv("LAVALINK_NAME", "MAIN")
         resume_key = os.getenv("LAVALINK_RESUME_KEY")
-        config = {
+        config: dict = {
             "host": host,
             "port": port,
             "password": password,
@@ -125,6 +124,7 @@ class MusicCog(commands.Cog):
                 for n in nodes.values()
             )
         except Exception:
+            # Older builds may expose .available instead
             try:
                 return any(getattr(n, "available", False) for n in nodes.values())  # type: ignore[name-defined]
             except Exception:
@@ -137,6 +137,7 @@ class MusicCog(commands.Cog):
             await self._reply(ctx, content=S("common.guild_only"))
             return None
 
+        # Ensure a connected node before attempting voice connect.
         if not self._any_node_connected():
             await self._reply(ctx, content=S("music.controller.not_connected"))
             with suppress(Exception):
@@ -151,6 +152,7 @@ class MusicCog(commands.Cog):
             return player
         if not connect:
             return None
+
         if (
             not isinstance(ctx.author, discord.Member)
             or not ctx.author.voice
@@ -195,7 +197,7 @@ class MusicCog(commands.Cog):
                 player.controller_message = None
         player.controller_message = await channel.send(embed=embed, view=view)
 
-    # Exposed for UI view
+    # Exposed helpers for UI view
     async def skip_current(self, player: YuriPlayer) -> None:
         await skip_current(player)
         await self.refresh_controller(player)
@@ -208,7 +210,7 @@ class MusicCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, node: wavelink.Node) -> None:
-        log.info("music: node %s is ready", node.identifier)
+        log.info("music: node %s is ready", getattr(node, "identifier", "unknown"))
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(
@@ -233,10 +235,18 @@ class MusicCog(commands.Cog):
     # =========================
 
     @commands.hybrid_group(
-        name="music", description=S("music.cmd.group"), invoke_without_command=True
+        name="music",
+        description="Music controls",
+        invoke_without_command=True,
     )
     async def music(self, ctx: commands.Context) -> None:
-        await self._reply(ctx, content=S("music.help.root"))
+        await self._reply(
+            ctx,
+            content=(
+                "Use subcommands: play, pause, resume, skip, stop, leave, "
+                "nowplaying, queue, volume, controller, playlist, node"
+            ),
+        )
 
     # ---- core controls ----
 
@@ -255,9 +265,7 @@ class MusicCog(commands.Cog):
         added = await queue_tracks(player, tracks, ctx.author)  # type: ignore[arg-type]
         await self.refresh_controller(player)
         if len(added) == 1:
-            title = (
-                build_controller_embed(player).fields[0].value
-            )  # or compute directly
+            title = format_track_title(added[0].track)
             await self._reply(ctx, content=S("music.info.queued_single", title=title))
         else:
             await self._reply(
@@ -459,13 +467,13 @@ class MusicCog(commands.Cog):
 
     @music.group(
         name="node",
-        description=S("music.node.cmd.group"),
+        description="Lavalink node tools",
         invoke_without_command=True,
     )
     async def music_node(self, ctx: commands.Context) -> None:
         nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
         if not nodes:
-            await self._reply(ctx, content=S("music.node.none"))
+            await self._reply(ctx, content="No nodes registered.")
             return
         lines = []
         for n in nodes.values():
@@ -473,27 +481,21 @@ class MusicCog(commands.Cog):
             ident = getattr(n, "identifier", "unknown")
             host = getattr(n, "host", "?")
             port = getattr(n, "port", "?")
-            lines.append(
-                S(
-                    "music.node.status_line",
-                    ident=ident,
-                    host=host,
-                    port=port,
-                    status=status,
-                )
-            )
+            lines.append(f"{ident} @ {host}:{port} — {status}")
         await self._reply(ctx, content="\n".join(lines))
 
-    @music_node.command(name="connect", description=S("music.node.cmd.connect"))
+    @music_node.command(name="connect", description="Connect to the Lavalink node now")
     async def music_node_connect(self, ctx: commands.Context) -> None:
         try:
             await self._connect_nodes()
             await self._reply(
                 ctx,
-                content=S("music.node.connect_attempt"),
+                content="Attempted node connect. Use `/music node` to check status.",
             )
         except Exception:
-            await self._reply(ctx, content=S("music.node.connect_failed"))
+            await self._reply(
+                ctx, content="Node connect attempt failed. Check bot logs."
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
