@@ -29,10 +29,6 @@ from yuribot.utils.music import (
 
 log = logging.getLogger(__name__)
 
-node = wavelink.Node(uri="http(s)://host:port", password="pass")
-await wavelink.NodePool.connect(client=self.bot, nodes=[node])
-
-
 class MusicCog(commands.Cog):
     """Music system backed by Lavalink via Wavelink."""
 
