@@ -57,6 +57,7 @@ class MusicCog(commands.Cog):
             else None
         )
 
+        # Kick off node connection in the background
         self._node_task: asyncio.Task | None = self.bot.loop.create_task(
             self._connect_nodes()
         )
@@ -69,11 +70,10 @@ class MusicCog(commands.Cog):
         if self.spotify:
             await self.spotify.close()
 
-        # ---- node bootstrap ----
+    # ---- node bootstrap ----
 
-        async def _connect_nodes(self) -> None:
-            """Connect to the Lavalink node using NodePool.connect(client=..., nodes=[Node(...)])."""
-
+    async def _connect_nodes(self) -> None:
+        """Connect to the Lavalink node using NodePool.connect(client=..., nodes=[Node(...)])."""
         await self.bot.wait_until_ready()
 
         NodePool = getattr(wavelink, "NodePool", None)
@@ -100,10 +100,11 @@ class MusicCog(commands.Cog):
         scheme = "https" if https else "http"
         uri = f"{scheme}://{host}:{port}"
 
-        # Build a single node and connect the pool to it.
         node = wavelink.Node(uri=uri, password=password)
 
         try:
+            # This matches the NodePool API your attrs suggest:
+            # connect(client=Client, nodes=[Node, ...])
             await NodePool.connect(client=self.bot, nodes=[node])
             log.info(
                 "music: connected to lavalink node %s:%s via NodePool.connect",
