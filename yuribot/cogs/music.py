@@ -484,18 +484,44 @@ class MusicCog(commands.Cog):
             lines.append(f"{ident} @ {host}:{port} — {status}")
         await self._reply(ctx, content="\n".join(lines))
 
-    @music_node.command(name="connect", description="Connect to the Lavalink node now")
+    @music_node.command(
+        name="connect",
+        description="Connect to the Lavalink node now",
+    )
     async def music_node_connect(self, ctx: commands.Context) -> None:
+        import traceback
+
         try:
             await self._connect_nodes()
+        except Exception as e:
+            tb = traceback.format_exc()
+            # Log to whatever logger you *do* see
+            log.error("music: explicit node connect failure: %r\n%s", e, tb)
+            # And send a compact version to Discord
             await self._reply(
                 ctx,
-                content="Attempted node connect. Use `/music node` to check status.",
+                content=f"Node connect failed: `{type(e).__name__}: {e}`",
             )
-        except Exception:
-            await self._reply(
-                ctx, content="Node connect attempt failed. Check bot logs."
-            )
+            return
+
+        # If we got here, _connect_nodes didn't raise. Show node statuses.
+        nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
+        if not nodes:
+            await self._reply(ctx, content="No nodes registered after connect.")
+            return
+
+        lines = []
+        for n in nodes.values():
+            status = getattr(getattr(n, "status", None), "name", None) or "UNKNOWN"
+            ident = getattr(n, "identifier", "unknown")
+            host = getattr(n, "host", "?")
+            port = getattr(n, "port", "?")
+            lines.append(f"{ident} @ {host}:{port} — {status}")
+
+        await self._reply(
+            ctx,
+            content="Node connect attempted.\n" + "\n".join(lines),
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
