@@ -138,7 +138,6 @@ class YuriBot(commands.Bot):
             "yuribot.cogs.botlog",
             "yuribot.cogs.welcome",
             "yuribot.cogs.coin_dice",
-            "yuribot.cogs.akinator",
             "yuribot.cogs.mangaupdates",
             "yuribot.cogs.booked",
             "yuribot.cogs.timestamp",
