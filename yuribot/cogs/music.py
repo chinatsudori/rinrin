@@ -68,21 +68,21 @@ class MusicCog(commands.Cog):
 
         # ---- node bootstrap ----
 
-        async def _connect_nodes(self) -> None:
-            await self.bot.wait_until_ready()
+    async def _connect_nodes(self) -> None:
+        await self.bot.wait_until_ready()
 
-            if wavelink.NodePool.nodes:
-                return
-            config = self._lavalink_config()
-            try:
-                await wavelink.NodePool.create_node(bot=self.bot, **config)
-                log.info(
-                    "music: connected to lavalink node %s:%s",
-                    config.get("host"),
-                    config.get("port"),
-                )
-            except Exception:
-                log.exception("music: failed to connect to lavalink node")
+        if wavelink.NodePool.nodes:
+            return
+        config = self._lavalink_config()
+        try:
+            await wavelink.NodePool.create_node(bot=self.bot, **config)
+            log.info(
+                "music: connected to lavalink node %s:%s",
+                config.get("host"),
+                config.get("port"),
+            )
+        except Exception:
+            log.exception("music: failed to connect to lavalink node")
 
     def _lavalink_config(self) -> dict:
         url = os.getenv("LAVALINK_URL", "http://127.0.0.1:2333")
