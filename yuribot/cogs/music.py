@@ -69,17 +69,99 @@ class MusicCog(commands.Cog):
         # ---- node bootstrap ----
 
     async def _connect_nodes(self) -> None:
+        """Connect to the Lavalink node using whatever Wavelink API is available."""
         await self.bot.wait_until_ready()
 
-        if wavelink.NodePool.nodes:
+        NodePool = getattr(wavelink, "NodePool", None)
+        if NodePool is None:
+            log.error(
+                "music: wavelink.NodePool is not available in this wavelink build."
+            )
             return
-        config = self._lavalink_config()
+
+        # If nodes already exist, don't recreate them.
         try:
-            await wavelink.NodePool.create_node(bot=self.bot, **config)
-            log.info(
-                "music: connected to lavalink node %s:%s",
-                config.get("host"),
-                config.get("port"),
+            existing_nodes = getattr(NodePool, "nodes", {}) or {}
+        except Exception:
+            existing_nodes = {}
+        if existing_nodes:
+            return
+
+        config = self._lavalink_config()
+
+        # Normalize the kwargs once
+        node_kwargs = {
+            "host": config.get("host"),
+            "port": config.get("port"),
+            "password": config.get("password"),
+            "https": config.get("https", False),
+            # Most Wavelink 2.x builds accept 'bot' OR 'client'; we try both in order.
+        }
+
+        # Helper to try a callable with varied parameter names
+        async def _try_call(func) -> bool:
+            if func is None:
+                return False
+            try:
+                # First try with 'bot'
+                try:
+                    await func(
+                        bot=self.bot, identifier=config.get("identifier"), **node_kwargs
+                    )
+                    return True
+                except TypeError:
+                    # Fall back to 'client' if 'bot' isn't accepted
+                    await func(
+                        client=self.bot,
+                        identifier=config.get("identifier"),
+                        **node_kwargs,
+                    )
+                    return True
+            except Exception:
+                log.exception("music: node connect attempt with %r failed", func)
+                return False
+
+        try:
+            # 1) Class-level create_node (classic 2.x API)
+            if hasattr(NodePool, "create_node"):
+                if await _try_call(getattr(NodePool, "create_node")):
+                    log.info(
+                        "music: connected to lavalink node %s:%s via NodePool.create_node (class)",
+                        config.get("host"),
+                        config.get("port"),
+                    )
+                    return
+
+            # 2) Instance-level create_node (some builds put it on the instance)
+            pool_instance = None
+            try:
+                pool_instance = NodePool()
+            except Exception:
+                pool_instance = None
+
+            if pool_instance is not None:
+                inst_create = getattr(pool_instance, "create_node", None)
+                if inst_create and await _try_call(inst_create):
+                    log.info(
+                        "music: connected to lavalink node %s:%s via NodePool().create_node (instance)",
+                        config.get("host"),
+                        config.get("port"),
+                    )
+                    return
+
+                # 3) Instance-level connect(...) fallback (just in case)
+                inst_connect = getattr(pool_instance, "connect", None)
+                if inst_connect and await _try_call(inst_connect):
+                    log.info(
+                        "music: connected to lavalink node %s:%s via NodePool().connect",
+                        config.get("host"),
+                        config.get("port"),
+                    )
+                    return
+
+            log.error(
+                "music: NodePool has no usable create_node/connect; attributes: %s",
+                [a for a in dir(NodePool) if not a.startswith("_")],
             )
         except Exception:
             log.exception("music: failed to connect to lavalink node")
