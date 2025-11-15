@@ -66,23 +66,23 @@ class MusicCog(commands.Cog):
         if self.spotify:
             await self.spotify.close()
 
-    # ---- node bootstrap ----
+        # ---- node bootstrap ----
 
-    async def _connect_nodes(self) -> None:
-        await self.bot.wait_until_ready()
-        # Don’t duplicate nodes if already connected.
-        if getattr(wavelink.NodePool, "nodes", {}):
-            return
-        config = self._lavalink_config()
-        try:
-            await wavelink.NodePool.create_node(bot=self.bot, **config)
-            log.info(
-                "music: connected to lavalink node %s:%s",
-                config.get("host"),
-                config.get("port"),
-            )
-        except Exception:
-            log.exception("music: failed to connect to lavalink node")
+        async def _connect_nodes(self) -> None:
+            await self.bot.wait_until_ready()
+
+            if wavelink.NodePool.nodes:
+                return
+            config = self._lavalink_config()
+            try:
+                await wavelink.NodePool.create_node(bot=self.bot, **config)
+                log.info(
+                    "music: connected to lavalink node %s:%s",
+                    config.get("host"),
+                    config.get("port"),
+                )
+            except Exception:
+                log.exception("music: failed to connect to lavalink node")
 
     def _lavalink_config(self) -> dict:
         url = os.getenv("LAVALINK_URL", "http://127.0.0.1:2333")
@@ -116,7 +116,6 @@ class MusicCog(commands.Cog):
             await ctx.reply(**kwargs)
 
     def _any_node_connected(self) -> bool:
-        """Best-effort check that at least one Lavalink node is CONNECTED."""
         try:
             nodes = getattr(wavelink.NodePool, "nodes", {}) or {}
             return any(
@@ -124,7 +123,6 @@ class MusicCog(commands.Cog):
                 for n in nodes.values()
             )
         except Exception:
-            # Older builds may expose .available instead
             try:
                 return any(getattr(n, "available", False) for n in nodes.values())  # type: ignore[name-defined]
             except Exception:
