@@ -6,7 +6,7 @@ from contextlib import suppress
 import discord
 
 from yuribot.strings import S
-from yuribot.util.music import (
+from yuribot.utils.music import (
     YuriPlayer,
     format_duration,
     format_track_title,
