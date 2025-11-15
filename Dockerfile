@@ -30,7 +30,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --force-reinstall "wavelink==2.6.3"
 
 # Code (owned by app user)
 COPY --chown=appuser:appuser yuribot ./yuribot
