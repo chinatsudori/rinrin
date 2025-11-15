@@ -14,7 +14,7 @@ import wavelink
 
 from yuribot.strings import S
 from yuribot.ui.music import MusicControllerView, build_controller_embed
-from yuribot.util.music import (
+from yuribot.utils.music import (
     PlaylistStore,
     SpotifyResolver,
     YuriPlayer,
