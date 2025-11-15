@@ -669,6 +669,44 @@ _STRINGS.update(
             "neutral": "Deleted playlist **{name}**.",
             "rin": "deleted **{name}**.",
         },
+        "music.cmd.group": {
+            "neutral": "Music controls",
+            "rin": "music controls",
+        },
+        "music.help.root": {
+            "neutral": (
+                "Use subcommands: play, pause, resume, skip, stop, leave, nowplaying, "
+                "queue, volume, controller, playlist, node"
+            ),
+            "rin": (
+                "use subcommands: play, pause, resume, skip, stop, leave, nowplaying, "
+                "queue, volume, controller, playlist, node"
+            ),
+        },
+        "music.node.cmd.group": {
+            "neutral": "Lavalink node tools",
+            "rin": "lavalink node tools",
+        },
+        "music.node.cmd.connect": {
+            "neutral": "Connect to the Lavalink node now",
+            "rin": "force a lavalink node connect now",
+        },
+        "music.node.none": {
+            "neutral": "No nodes registered.",
+            "rin": "no nodes registered.",
+        },
+        "music.node.status_line": {
+            "neutral": "{ident} @ {host}:{port} — {status}",
+            "rin": "{ident} @ {host}:{port} — {status}",
+        },
+        "music.node.connect_attempt": {
+            "neutral": "Attempted node connect. Use `/music node` to check status.",
+            "rin": "tried to connect the node. check `/music node` for status.",
+        },
+        "music.node.connect_failed": {
+            "neutral": "Node connect attempt failed. Check bot logs.",
+            "rin": "node connect failed. check the bot logs.",
+        },
         # ---------------- MoveAny / ThreadTools ----------------
         "move_any.header": {
             "neutral": "**{author}** — {ts}\n{jump}",
