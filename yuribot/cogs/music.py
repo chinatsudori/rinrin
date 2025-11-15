@@ -69,7 +69,7 @@ class MusicCog(commands.Cog):
         # ---- node bootstrap ----
 
     async def _connect_nodes(self) -> None:
-        """Connect to the Lavalink node using whatever Wavelink API is available."""
+        """Connect to the Lavalink node using the NodePool.connect API we actually have."""
         await self.bot.wait_until_ready()
 
         NodePool = getattr(wavelink, "NodePool", None)
@@ -88,83 +88,84 @@ class MusicCog(commands.Cog):
             return
 
         config = self._lavalink_config()
+        host = config.get("host")
+        port = config.get("port")
+        password = config.get("password")
+        https = config.get("https", False)
+        identifier = config.get("identifier")
 
-        # Normalize the kwargs once
-        node_kwargs = {
-            "host": config.get("host"),
-            "port": config.get("port"),
-            "password": config.get("password"),
-            "https": config.get("https", False),
-            # Most Wavelink 2.x builds accept 'bot' OR 'client'; we try both in order.
-        }
-
-        # Helper to try a callable with varied parameter names
-        async def _try_call(func) -> bool:
-            if func is None:
-                return False
-            try:
-                # First try with 'bot'
-                try:
-                    await func(
-                        bot=self.bot, identifier=config.get("identifier"), **node_kwargs
-                    )
-                    return True
-                except TypeError:
-                    # Fall back to 'client' if 'bot' isn't accepted
-                    await func(
-                        client=self.bot,
-                        identifier=config.get("identifier"),
-                        **node_kwargs,
-                    )
-                    return True
-            except Exception:
-                log.exception("music: node connect attempt with %r failed", func)
-                return False
-
-        try:
-            # 1) Class-level create_node (classic 2.x API)
-            if hasattr(NodePool, "create_node"):
-                if await _try_call(getattr(NodePool, "create_node")):
-                    log.info(
-                        "music: connected to lavalink node %s:%s via NodePool.create_node (class)",
-                        config.get("host"),
-                        config.get("port"),
-                    )
-                    return
-
-            # 2) Instance-level create_node (some builds put it on the instance)
-            pool_instance = None
-            try:
-                pool_instance = NodePool()
-            except Exception:
-                pool_instance = None
-
-            if pool_instance is not None:
-                inst_create = getattr(pool_instance, "create_node", None)
-                if inst_create and await _try_call(inst_create):
-                    log.info(
-                        "music: connected to lavalink node %s:%s via NodePool().create_node (instance)",
-                        config.get("host"),
-                        config.get("port"),
-                    )
-                    return
-
-                # 3) Instance-level connect(...) fallback (just in case)
-                inst_connect = getattr(pool_instance, "connect", None)
-                if inst_connect and await _try_call(inst_connect):
-                    log.info(
-                        "music: connected to lavalink node %s:%s via NodePool().connect",
-                        config.get("host"),
-                        config.get("port"),
-                    )
-                    return
-
+        connect = getattr(NodePool, "connect", None)
+        if connect is None:
             log.error(
-                "music: NodePool has no usable create_node/connect; attributes: %s",
+                "music: NodePool has no 'connect' method; attrs=%s",
                 [a for a in dir(NodePool) if not a.startswith("_")],
             )
-        except Exception:
-            log.exception("music: failed to connect to lavalink node")
+            return
+
+        # Try a few signatures in order, catching TypeError each time
+        attempts = [
+            # classic-ish bot+identifier (will TypeError in your build, we know)
+            {
+                "args": [],
+                "kwargs": dict(
+                    bot=self.bot,
+                    host=host,
+                    port=port,
+                    password=password,
+                    https=https,
+                    identifier=identifier,
+                ),
+            },
+            # client+identifier
+            {
+                "args": [],
+                "kwargs": dict(
+                    client=self.bot,
+                    host=host,
+                    port=port,
+                    password=password,
+                    https=https,
+                    identifier=identifier,
+                ),
+            },
+            # client only (most likely match in your case)
+            {
+                "args": [],
+                "kwargs": dict(
+                    client=self.bot,
+                    host=host,
+                    port=port,
+                    password=password,
+                    https=https,
+                ),
+            },
+            # bare positional (client, host, port, password)
+            {"args": [self.bot, host, port, password], "kwargs": {}},
+        ]
+
+        for idx, spec in enumerate(attempts, start=1):
+            try:
+                await connect(*spec.get("args", []), **spec.get("kwargs", {}))
+                log.info(
+                    "music: connected to lavalink node %s:%s via NodePool.connect (attempt %d)",
+                    host,
+                    port,
+                    idx,
+                )
+                return
+            except TypeError as e:
+                # Signature mismatch; try the next pattern.
+                log.debug("music: NodePool.connect attempt %d TypeError: %r", idx, e)
+                continue
+            except Exception:
+                # Real failure, log and bail.
+                log.exception("music: NodePool.connect attempt %d failed", idx)
+                return
+
+        log.error(
+            "music: NodePool.connect could not be called with any known signature; attrs=%s",
+            [a for a in dir(NodePool) if not a.startswith("_")],
+        )
 
     def _lavalink_config(self) -> dict:
         url = os.getenv("LAVALINK_URL", "http://127.0.0.1:2333")
